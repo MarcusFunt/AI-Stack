@@ -1,0 +1,160 @@
+{
+  "services": {
+    "llm": {
+      "container": "ai-stack-llm",
+      "base": "http://llm:8080",
+      "health": "/health",
+      "gpu": true,
+      "start_timeout": 240,
+      "idle_timeout": 300,
+      "backend_auth": "llama"
+    },
+    "reasoning": {
+      "container": "ai-stack-reasoning",
+      "base": "http://reasoning:8080",
+      "health": "/health",
+      "gpu": true,
+      "start_timeout": 420,
+      "idle_timeout": 300,
+      "backend_auth": "llama"
+    },
+    "stt": {
+      "container": "ai-stack-stt",
+      "base": "http://stt:8000",
+      "health": "/health",
+      "gpu": true,
+      "start_timeout": 180,
+      "idle_timeout": 180
+    },
+    "tts": {
+      "container": "ai-stack-tts",
+      "base": "http://tts:8000",
+      "health": "/health",
+      "gpu": true,
+      "start_timeout": 240,
+      "idle_timeout": 180
+    },
+    "vlm": {
+      "container": "ai-stack-vlm",
+      "base": "http://vlm:8000",
+      "health": "/health",
+      "gpu": true,
+      "start_timeout": 300,
+      "idle_timeout": 300
+    },
+    "comfyui": {
+      "container": "ai-stack-comfyui",
+      "base": "http://comfyui:8188",
+      "health": "/system_stats",
+      "gpu": true,
+      "start_timeout": 240,
+      "idle_timeout": 600
+    },
+    "wangp": {
+      "container": "ai-stack-wangp",
+      "base": "http://wangp:7860",
+      "health": "/",
+      "gpu": true,
+      "start_timeout": 300,
+      "idle_timeout": 600
+    },
+    "lerobot": {
+      "container": "ai-stack-lerobot",
+      "base": null,
+      "health": null,
+      "gpu": true,
+      "start_timeout": 60,
+      "idle_timeout": 0
+    }
+  },
+  "models": [
+    {
+      "id": "local-fast",
+      "service": "llm",
+      "owned_by": "local",
+      "capabilities": [
+        "chat",
+        "coding"
+      ],
+      "display_name": "Qwen3.5-9B",
+      "backend_model": "Qwen3.5-9B",
+      "model_file": "daily.gguf",
+      "size_gib": 5.29,
+      "native_context": 262144,
+      "gguf_file_type": 15,
+      "quantization_version": 2,
+      "benchmark_generated_tps": 52.657,
+      "benchmark_prompt_tps": 248.793,
+      "benchmark_vram_mib": 7409
+    },
+    {
+      "id": "local-reasoning",
+      "service": "reasoning",
+      "owned_by": "local",
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "coding"
+      ],
+      "display_name": "Qwen3.8-27B",
+      "backend_model": "Qwen3.8-27B",
+      "model_file": "reasoning.gguf",
+      "size_gib": 17.671,
+      "native_context": 262144,
+      "gguf_file_type": 15,
+      "quantization_version": 2,
+      "gpu_layers": 28,
+      "benchmark_generated_tps": 4.783,
+      "benchmark_prompt_tps": 8.657,
+      "benchmark_vram_mib": 10254
+    },
+    {
+      "id": "local-stt",
+      "service": "stt",
+      "owned_by": "local",
+      "capabilities": [
+        "transcription"
+      ]
+    },
+    {
+      "id": "local-tts",
+      "service": "tts",
+      "owned_by": "local",
+      "capabilities": [
+        "speech"
+      ]
+    },
+    {
+      "id": "local-vlm",
+      "service": "vlm",
+      "owned_by": "local",
+      "capabilities": [
+        "vision",
+        "robotics"
+      ]
+    },
+    {
+      "id": "local-image",
+      "service": "comfyui",
+      "owned_by": "local",
+      "capabilities": [
+        "image"
+      ]
+    },
+    {
+      "id": "local-video",
+      "service": "wangp",
+      "owned_by": "local",
+      "capabilities": [
+        "video",
+        "image"
+      ]
+    }
+  ],
+  "aliases": {
+    "fast": "local-fast",
+    "llm": "local-fast",
+    "reasoning": "local-reasoning",
+    "vision": "local-vlm"
+  }
+}

@@ -1,0 +1,6 @@
+.env
+models
+data
+third_party
+*.gguf
+__pycache__

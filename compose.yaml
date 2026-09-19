@@ -1,0 +1,247 @@
+name: ai-stack
+
+x-gpu-base: &gpu-base
+  profiles: ["gpu"]
+  gpus: all
+  restart: "no"
+  networks: [ai]
+  init: true
+  stop_grace_period: 30s
+
+services:
+  supervisor:
+    build:
+      context: ./supervisor
+    container_name: ai-stack-supervisor
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CONFIG_PATH: /config/models.json
+      SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
+      LLAMA_API_KEY: ${LLAMA_API_KEY}
+      LEASE_STATE_PATH: /state/supervisor-leases.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/config:ro
+      - ./data/state:/state
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: ai-stack-gateway
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AI_API_KEY: ${AI_API_KEY}
+      SUPERVISOR_URL: http://supervisor:8000
+      SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
+      LLAMA_API_KEY: ${LLAMA_API_KEY}
+      CONFIG_PATH: /config/models.json
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      supervisor:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8090}:8000"
+    volumes:
+      - ./config:/config:ro
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  dashboard:
+    build:
+      context: ./dashboard
+    container_name: ai-stack-dashboard
+    restart: unless-stopped
+    init: true
+    environment:
+      AI_API_KEY: ${AI_API_KEY}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-3000}:80"
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","wget","-q","-O","-","http://127.0.0.1/"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  llm:
+    <<: *gpu-base
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: ai-stack-llm
+    volumes:
+      - ./models/llm:/models:ro
+    command:
+      - -m
+      - ${LLM_MODEL:-/models/daily.gguf}
+      - --alias
+      - local-fast
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - ${LLM_CONTEXT:-16384}
+      - -np
+      - "1"
+      - -ngl
+      - ${LLM_GPU_LAYERS:-999}
+      - --api-key
+      - ${LLAMA_API_KEY}
+      - --cors-origins
+      - localhost
+
+  reasoning:
+    <<: *gpu-base
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: ai-stack-reasoning
+    volumes:
+      - ./models/llm:/models:ro
+    command:
+      - -m
+      - ${REASONING_MODEL:-/models/reasoning.gguf}
+      - --alias
+      - local-reasoning
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - ${REASONING_CONTEXT:-8192}
+      - -np
+      - "1"
+      - -ngl
+      - ${REASONING_GPU_LAYERS:-28}
+      - --api-key
+      - ${LLAMA_API_KEY}
+      - --cors-origins
+      - localhost
+
+  stt:
+    <<: *gpu-base
+    build:
+      context: ./stt
+    container_name: ai-stack-stt
+    environment:
+      STT_MODEL: ${STT_MODEL:-large-v3}
+      STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-float16}
+      STT_DOWNLOAD_ROOT: /models
+      HF_HOME: ${HF_HOME:-/cache/huggingface}
+    volumes:
+      - ./models/stt:/models
+      - ./data/cache:/cache
+
+  tts:
+    <<: *gpu-base
+    image: local/qwen3-tts-openai:0.1.1
+    container_name: ai-stack-tts
+    environment:
+      QWEN_MODEL_ID: ${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}
+      QWEN_ATTN_IMPLEMENTATION: sdpa
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HOME: /data/hf
+    volumes:
+      - qwen_tts_hf_cache:/data/hf
+
+  vlm:
+    <<: *gpu-base
+    build:
+      context: ./vlm
+    container_name: ai-stack-vlm
+    environment:
+      VLM_MODEL: ${VLM_MODEL:-Qwen/Qwen3-VL-4B-Instruct}
+      VLM_LOCAL_FILES_ONLY: "1"
+      HF_HOME: ${HF_HOME:-/cache/huggingface}
+    volumes:
+      - ./models/vlm:/models
+      - ./data/cache:/cache
+    shm_size: "2gb"
+
+  comfyui:
+    <<: *gpu-base
+    build:
+      context: ./third_party/ComfyUI
+      dockerfile: Dockerfile.ai-stack
+    container_name: ai-stack-comfyui
+    ports:
+      - "127.0.0.1:8188:8188"
+    volumes:
+      - ./models/image/checkpoints:/opt/ComfyUI/models/checkpoints
+      - ./models/image/diffusion_models:/opt/ComfyUI/models/diffusion_models
+      - ./models/image/vae:/opt/ComfyUI/models/vae
+      - ./models/image/loras:/opt/ComfyUI/models/loras
+      - ./models/image/controlnet:/opt/ComfyUI/models/controlnet
+      - ./models/image/clip:/opt/ComfyUI/models/clip
+      - ./models/image/text_encoders:/opt/ComfyUI/models/text_encoders
+      - ./models/image/upscale_models:/opt/ComfyUI/models/upscale_models
+      - ./data/input/comfyui:/opt/ComfyUI/input
+      - ./data/outputs/comfyui:/opt/ComfyUI/output
+      - ./data/cache:/cache
+
+  wangp:
+    <<: *gpu-base
+    build:
+      context: ./third_party/Wan2GP
+      args:
+        CUDA_ARCHITECTURES: "8.6"
+    container_name: ai-stack-wangp
+    ports:
+      - "127.0.0.1:7860:7860"
+    volumes:
+      - ./third_party/Wan2GP:/workspace
+      - ./models/wangp:/models/wangp
+      - ./data/cache:/home/user/.cache
+      - ./data/outputs/wangp:/workspace/outputs
+    command:
+      - --profile
+      - "4"
+      - --attention
+      - sage
+      - --perc-reserved-mem-max
+      - "1"
+    shm_size: "2gb"
+
+  lerobot:
+    <<: *gpu-base
+    image: huggingface/lerobot-gpu:latest
+    container_name: ai-stack-lerobot
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./data/cache:/home/user_lerobot/.cache
+    shm_size: "2gb"
+
+networks:
+  ai:
+    name: ai-stack-net
+
+volumes:
+  qwen_tts_hf_cache:
+    external: true
