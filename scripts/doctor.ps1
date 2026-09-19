@@ -14,7 +14,7 @@ try {
   Pass "gpu" $gpu
 } catch { Fail "gpu" $_ }
 
-foreach($key in @("AI_API_KEY","SUPERVISOR_TOKEN","LLAMA_API_KEY","LLM_MODEL","REASONING_MODEL")) {
+foreach($key in @("AI_API_KEY","SUPERVISOR_TOKEN","LLAMA_API_KEY","HOST_AGENT_TOKEN","LLM_MODEL","REASONING_MODEL")) {
   if(Get-Content .env | Where-Object { $_ -like "$key=*" }) { Pass "env:$key" "present" }
   else { Fail "env:$key" "missing" }
 }
@@ -29,9 +29,29 @@ foreach($file in @("models\llm\daily.gguf","models\llm\reasoning.gguf","config\m
 try { docker compose --profile gpu config | Out-Null; Pass "compose-config" "valid" }
 catch { Fail "compose-config" $_ }
 
+try {
+  $agent = Invoke-RestMethod -Uri "http://127.0.0.1:8788/health" -TimeoutSec 3
+  if($agent.status -eq "ok") {
+    Pass "host-agent" ("v" + $agent.version + "; Tailscale=" + $agent.tailscale + "; HF CLI=" + $agent.hf_cli)
+  } else { Fail "host-agent" ("unexpected status: " + $agent.status) }
+} catch { Fail "host-agent" $_ }
+
+$startupAgent = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup\LocalAIHostAgent.cmd"
+if(Test-Path $startupAgent) { Pass "host-agent-autostart" "Startup entry present" }
+else { Fail "host-agent-autostart" "Startup entry missing" }
+
 $running = @(docker ps --format "{{.Names}}" | Where-Object { $_ -match "^ai-stack-(llm|reasoning|stt|tts|vlm|comfyui|wangp|lerobot)$" })
 if($running.Count -le 1) { Pass "gpu-exclusivity" ($running -join ",") }
 else { Fail "gpu-exclusivity" ($running -join ",") }
+
+foreach($svc in @("telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
+  $container = "ai-stack-$svc"
+  $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
+  $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
+  if(-not $containerImage -or -not $latestImage) { continue }
+  if($containerImage -eq $latestImage) { Pass ("image-sync:" + $svc) "current" }
+  else { Fail ("image-sync:" + $svc) "container uses an older image; recreate it" }
+}
 
 $drives=Get-PSDrive C,D -ErrorAction SilentlyContinue
 foreach($d in $drives) { Pass ("disk:"+$d.Name) (([math]::Round($d.Free/1GB,1)).ToString()+" GiB free") }

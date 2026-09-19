@@ -1,36 +1,33 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   Activity, AudioLines, Bot, BrainCircuit, ChevronRight, CircleStop,
-  Cpu, Gauge, Image as ImageIcon, MessageSquareText, Mic, Play,
-  RefreshCw, Rocket, Sparkles, Square, Video, Volume2, Wrench,
+  Cpu, Gauge, Image as ImageIcon, MessageSquareText, Mic, Network, Play,
+  RefreshCw, Sparkles, Video, Volume2, Wrench,
 } from 'lucide-react'
 import { localAI } from './api'
-import type { ModelInfo, SupervisorStatus } from './api'
+import type { ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
+import {
+  ControlOverview, HealthPanel, JobsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
+} from './OpsPanels'
 import './index.css'
 
-type Section = 'overview' | 'chat' | 'speech' | 'vision' | 'studio' | 'system'
+type Section = 'overview' | 'models' | 'jobs' | 'health' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 const nav = [
   ['overview', Activity, 'Overview'],
+  ['models', BrainCircuit, 'Models'],
+  ['jobs', Gauge, 'Jobs'],
+  ['health', Cpu, 'Health'],
   ['chat', MessageSquareText, 'Chat'],
   ['speech', AudioLines, 'Speech'],
   ['vision', Bot, 'Robot vision'],
   ['studio', Sparkles, 'Studio'],
-  ['system', Wrench, 'System'],
+  ['setup', Wrench, 'Setup'],
+  ['network', Network, 'Network'],
+  ['system', Wrench, 'API'],
 ] as const
-
-const serviceMeta: Record<string, { label: string; detail: string; icon: typeof Cpu }> = {
-  llm: { label: 'Fast LLM', detail: 'Qwen3.5-9B · ~53 tok/s', icon: Rocket },
-  reasoning: { label: 'Reasoning', detail: 'Qwen3.8-27B · deep mode', icon: BrainCircuit },
-  stt: { label: 'Speech to text', detail: 'faster-whisper large-v3', icon: Mic },
-  tts: { label: 'Text to speech', detail: 'Qwen3-TTS', icon: Volume2 },
-  vlm: { label: 'Robot vision', detail: 'Qwen3-VL-4B', icon: Bot },
-  comfyui: { label: 'Image studio', detail: 'ComfyUI', icon: ImageIcon },
-  wangp: { label: 'Video studio', detail: 'WanGP', icon: Video },
-  lerobot: { label: 'LeRobot', detail: 'robot policy workspace', icon: Cpu },
-}
 
 function prettyError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
@@ -41,60 +38,37 @@ function StatusDot({ status }: { status: string }) {
   return <span className={'status-dot ' + (active ? 'online' : 'offline')} />
 }
 
-function MetricCard(props: { label: string; value: string; sub: string; icon: typeof Cpu }) {
-  const Icon = props.icon
-  return (
-    <div className="metric-card">
-      <div className="metric-icon"><Icon size={18} /></div>
-      <div>
-        <span>{props.label}</span>
-        <strong>{props.value}</strong>
-        <small>{props.sub}</small>
-      </div>
-    </div>
-  )
-}
-
-function ServiceCard(props: {
-  name: string
-  status: string
-  jobs: number
-  idle?: number
-  busy: boolean
-  onStart: () => void
-  onStop: () => void
+function GlobalStatusStrip(props: {
+  snapshot: Snapshot | null
+  network: NetworkStatus | null
+  gatewayOk: boolean
+  models: ModelInfo[]
 }) {
-  const meta = serviceMeta[props.name] || { label: props.name, detail: 'local service', icon: Cpu }
-  const Icon = meta.icon
-  const running = props.status === 'running'
+  const serviceStates = Object.values(props.snapshot?.supervisor.service_states || {})
+  const unhealthy = serviceStates.some((state) => ['error', 'dead', 'oom', 'failed'].includes(state))
+  const job = props.snapshot?.jobs.active[0]
+  const owner = props.snapshot?.supervisor.gpu_owner
+  const ownerIds: Record<string, string> = {
+    llm: 'local-fast', reasoning: 'local-reasoning', stt: 'local-stt', tts: 'local-tts',
+    vlm: 'local-vlm', comfyui: 'local-image', wangp: 'local-video',
+  }
+  const ownerModel = owner ? props.models.find((m) => m.id === ownerIds[owner]) : undefined
+  const ownerLabel = ownerModel ? String(ownerModel.metadata.display_name || ownerModel.id) : owner
+  const funnel = props.network?.mcp_mode !== undefined
+    ? props.network.mcp_mode === 'public'
+    : !!props.network?.serve_status?.includes('Funnel on')
+  const systemState = !props.gatewayOk ? 'error' : unhealthy ? 'warn' : 'ready'
   return (
-    <article className={'service-card ' + (running ? 'is-running' : '')}>
-      <div className="service-top">
-        <div className="service-icon"><Icon size={19} /></div>
-        <div className="service-copy">
-          <div className="service-title-row">
-            <h3>{meta.label}</h3><StatusDot status={props.status} />
-          </div>
-          <p>{meta.detail}</p>
-        </div>
-      </div>
-      <div className="service-bottom">
-        <div className="service-state">
-          <span>{running ? 'ACTIVE' : props.status.toUpperCase()}</span>
-          {props.jobs > 0 && <b>{props.jobs} job{props.jobs === 1 ? '' : 's'}</b>}
-          {props.idle !== undefined && props.idle > 0 && <b>sleep in {Math.ceil(props.idle)}s</b>}
-        </div>
-        <button
-          className={running ? 'icon-button danger' : 'icon-button'}
-          disabled={props.busy || props.jobs > 0}
-          onClick={running ? props.onStop : props.onStart}
-          title={running ? 'Stop service' : 'Load service'}
-        >
-          {props.busy ? <RefreshCw className="spin" size={15} /> :
-            running ? <Square size={14} /> : <Play size={14} />}
-        </button>
-      </div>
-    </article>
+    <div className="global-status-strip">
+      <div><span>SYSTEM</span><StateBadge state={systemState} /></div>
+      <div><span>GPU</span><strong>{ownerLabel || 'IDLE'}</strong></div>
+      <div><span>JOB</span><strong>{job ? job.phase.replaceAll('_', ' ') : 'IDLE'}</strong></div>
+      <div><span>MQTT</span><StateBadge state={props.snapshot?.mqtt.connected ? 'ready' : 'stopped'} /></div>
+      <div><span>TAILSCALE</span><StateBadge state={props.network?.online ? 'ready' : 'stopped'} /></div>
+      <div><span>MCP</span><strong className={funnel ? 'public-exposure' : ''}>
+        {props.network ? (funnel ? 'PUBLIC' : 'PRIVATE/OFF') : 'UNKNOWN'}
+      </strong></div>
+    </div>
   )
 }
 
@@ -429,18 +403,26 @@ function SystemPanel(props: {
 export default function App() {
   const [section, setSection] = useState<Section>('overview')
   const [status, setStatus] = useState<SupervisorStatus | null>(null)
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [network, setNetwork] = useState<NetworkStatus | null>(null)
   const [busyServices, setBusyServices] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
   const [gatewayOk, setGatewayOk] = useState(false)
 
+  const applySnapshot = useCallback((next: Snapshot) => {
+    setSnapshot(next)
+    setStatus(next.supervisor)
+    setGatewayOk(next.gateway.status === 'online')
+  }, [])
+
   const refresh = useCallback(async (includeModels = false) => {
     try {
-      const [nextStatus, health] = await Promise.all([
-        localAI.status(),
+      const [nextSnapshot, health] = await Promise.all([
+        localAI.snapshot(),
         localAI.health(),
       ])
-      setStatus(nextStatus)
+      applySnapshot(nextSnapshot)
       setGatewayOk(health.status === 'ok')
       setError('')
       if (includeModels) setModels((await localAI.models()).data)
@@ -448,16 +430,60 @@ export default function App() {
       setGatewayOk(false)
       setError(prettyError(err))
     }
-  }, [])
+  }, [applySnapshot])
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refresh(true), 0)
-    const timer = window.setInterval(() => void refresh(false), 2500)
+    const timer = window.setInterval(() => void refresh(false), 10000)
     return () => {
       window.clearTimeout(initial)
       window.clearInterval(timer)
     }
   }, [refresh])
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const next = await localAI.network()
+        if (alive) setNetwork(next)
+      } catch {
+        if (alive) setNetwork(null)
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), 15000)
+    return () => { alive = false; window.clearInterval(timer) }
+  }, [])
+
+  useEffect(() => {
+    let socket: WebSocket | null = null
+    let retry = 0
+    let closed = false
+    const connect = () => {
+      if (closed) return
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      socket = new WebSocket(`${protocol}//${window.location.host}/api/events`)
+      socket.onmessage = (event) => {
+        try {
+          applySnapshot(JSON.parse(event.data) as Snapshot)
+          setError('')
+        } catch {
+          // Fallback polling will recover malformed frames.
+        }
+      }
+      socket.onopen = () => setGatewayOk(true)
+      socket.onclose = () => {
+        if (!closed) retry = window.setTimeout(connect, 2000)
+      }
+    }
+    connect()
+    return () => {
+      closed = true
+      window.clearTimeout(retry)
+      socket?.close()
+    }
+  }, [applySnapshot])
 
   async function serviceAction(name: string, action: 'start' | 'stop') {
     setBusyServices((old) => new Set(old).add(name))
@@ -486,18 +512,17 @@ export default function App() {
     }
   }
 
-  const runningCount = status?.running_gpu_services.length || 0
-  const activeJobs = useMemo(
-    () => Object.values(status?.active_jobs || {}).reduce((sum, count) => sum + count, 0),
-    [status],
-  )
-
-  const content = section === 'chat' ? <ChatPanel models={models} /> :
+  const content = section === 'models' ? <ModelsPanel models={models} snapshot={snapshot} /> :
+    section === 'jobs' ? <JobsPanel snapshot={snapshot} /> :
+    section === 'health' ? <HealthPanel snapshot={snapshot} /> :
+    section === 'chat' ? <ChatPanel models={models} /> :
     section === 'speech' ? <SpeechPanel /> :
     section === 'vision' ? <VisionPanel /> :
     section === 'studio' ? (
       <StudioPanel onStart={(name) => serviceAction(name, 'start')} busy={busyServices} />
     ) :
+    section === 'setup' ? <SetupPanel snapshot={snapshot} models={models} /> :
+    section === 'network' ? <NetworkPanel network={network} onNetwork={setNetwork} /> :
     section === 'system' ? (
       <SystemPanel models={models} status={status} onStopAll={stopAll} />
     ) : null
@@ -525,58 +550,29 @@ export default function App() {
             <StatusDot status={gatewayOk ? 'running' : 'offline'} />
             <div>
               <strong>{gatewayOk ? 'Gateway online' : 'Gateway unavailable'}</strong>
-              <span>localhost:3000</span>
+              <span>{snapshot?.mqtt.connected ? 'MQTT connected' : 'localhost:3000'}</span>
             </div>
           </div>
-          <div className="gpu-pill"><Cpu size={15} /><span>RTX 3060 · 12 GB</span></div>
+          <div className="gpu-pill">
+            <Cpu size={15} />
+            <span>{snapshot?.machine.gpu?.name || 'RTX 3060'} Â· {((snapshot?.machine.gpu?.vram_total_mib || 12288) / 1024).toFixed(0)} GB</span>
+          </div>
         </div>
       </aside>
 
       <main>
+        <GlobalStatusStrip snapshot={snapshot} network={network} gatewayOk={gatewayOk} models={models} />
         {section === 'overview' ? (
-          <div className="overview">
-            <header className="hero">
-              <div>
-                <span className="eyebrow">LOCAL INFERENCE CONTROL PLANE</span>
-                <h1>One machine.<br /><em>Every model.</em></h1>
-                <p>
-                  Chat, reasoning, speech, robot perception, image generation and video
-                  behind one scheduler-aware control surface.
-                </p>
-              </div>
-              <button className="refresh-button" onClick={() => refresh(true)}>
-                <RefreshCw size={16} /> Refresh
-              </button>
-            </header>
-
-            <div className="metrics">
-              <MetricCard icon={Cpu} label="GPU OWNER" value={status?.gpu_owner || 'Idle'} sub={runningCount ? 'exclusive GPU lease' : '12 GB VRAM available'} />
-              <MetricCard icon={Activity} label="ACTIVE JOBS" value={String(activeJobs)} sub={activeJobs ? 'requests in flight' : 'scheduler is clear'} />
-              <MetricCard icon={BrainCircuit} label="REGISTERED" value={String(models.length)} sub="logical AI services" />
-              <MetricCard icon={Gauge} label="GATEWAY" value={gatewayOk ? 'Online' : 'Offline'} sub="unified authenticated API" />
-            </div>
-
-            <div className="section-title">
-              <div><span className="eyebrow">GPU SCHEDULER</span><h2>Services</h2></div>
-              <span>Only one heavyweight service owns the GPU at a time.</span>
-            </div>
-            <div className="service-grid">
-              {Object.entries(status?.services || {}).map(([name, state]) => (
-                <ServiceCard
-                  key={name}
-                  name={name}
-                  status={state}
-                  jobs={status?.active_jobs[name] || 0}
-                  idle={status?.idle_stop_in_seconds[name]}
-                  busy={busyServices.has(name)}
-                  onStart={() => serviceAction(name, 'start')}
-                  onStop={() => serviceAction(name, 'stop')}
-                />
-              ))}
-            </div>
-            {error && <div className="error-banner">{error}</div>}
-          </div>
+          <ControlOverview
+            snapshot={snapshot}
+            models={models}
+            busy={busyServices}
+            onStart={(name) => serviceAction(name, 'start')}
+            onStop={(name) => serviceAction(name, 'stop')}
+            onRefresh={() => void refresh(true)}
+          />
         ) : content}
+        {error && <div className="global-error error-banner">{error}</div>}
       </main>
     </div>
   )

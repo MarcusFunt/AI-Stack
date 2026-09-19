@@ -1,32 +1,26 @@
-# React + TypeScript + Vite
+# Local AI Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React/TypeScript control surface for the Local AI workstation. The dashboard talks only
+to the authenticated FastAPI gateway through its nginx `/api` proxy; API credentials are
+injected server-side and are not stored in browser code or local storage.
 
-Currently, two official plugins are available:
+Main views:
+- **Overview**: physical GPU/system telemetry, current job, scheduler and worker states.
+- **Models**: installed models, measured throughput/VRAM/startup data, LLM benchmark action.
+- **Jobs**: active and recent requests with phase, elapsed time and activity indicators.
+- **Health**: control-plane topology, heartbeat and worker semantic state.
+- **Setup**: GUI system doctor and optional MQTT/Home Assistant telemetry configuration.
+- Chat, Speech, Robot Vision and Studio retain the interactive model tools.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Live state is delivered through `/api/events` WebSocket with periodic polling as a fallback.
 
-## React Compiler
+Development:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+cd D:\AI-Stack\dashboard
+npm ci
+npm run build
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Production is built and served by the dashboard Docker image. MQTT is telemetry-only by
+default; no MQTT command topics are subscribed by the gateway.

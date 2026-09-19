@@ -11,10 +11,11 @@ Browser
 Dashboard :3000 -- React/Vite control surface + server-side API-key proxy
   |
   v
-Gateway :8090   -- authenticated public/local API
-  |
+Gateway :8090   -- authenticated public/local API + jobs/MQTT adapter
+  | \
+  |  +--> Telemetry -- NVML + CPU/RAM/storage sampler (1 Hz)
   v
-Supervisor     -- internal Docker/GPU lifecycle service
+Supervisor     -- internal Docker/GPU lifecycle + semantic state service
   |
   +-- llama.cpp fast LLM
   +-- llama.cpp reasoning LLM
@@ -26,9 +27,32 @@ Supervisor     -- internal Docker/GPU lifecycle service
   +-- LeRobot (optional)
 ```
 
-Only one heavyweight GPU service owns the GPU at a time. The gateway, supervisor, and dashboard stay resident.
+Only one heavyweight GPU service owns the GPU at a time. The gateway, supervisor, telemetry sampler, dashboard, and MCP bridge stay resident.
 
-Open **http://127.0.0.1:3000** for the Local AI control surface. It provides live service/GPU state, fast and reasoning chat, STT, TTS, robotics vision, image/video studio launchers, model registry information, and service controls. Browser requests go through the dashboard's `/api` proxy; `AI_API_KEY` is injected server-side and is not stored in frontend code or browser storage.
+Open **http://127.0.0.1:3000** for the Local AI control surface. It provides the instrument-style Overview, Models, Jobs, Health and Setup pages in addition to fast/reasoning chat, STT, TTS, robotics vision, image/video studio launchers, model registry information, and service controls. Browser requests go through the dashboard's `/api` proxy; `AI_API_KEY` is injected server-side and is not stored in frontend code or browser storage.
+
+## Remote access
+
+Tailscale keeps normal Local AI access private to the tailnet:
+- UI: `https://marcus-computer.taile97c31.ts.net:8443/`
+- API through the dashboard proxy: `https://marcus-computer.taile97c31.ts.net:8443/api/v1/...`
+- Existing Ascento dashboard remains on private Tailscale HTTPS port 443.
+
+The remote MCP bridge is the only public Funnel service:
+- Bearer-auth endpoint: `https://marcus-computer.taile97c31.ts.net:10000/mcp`
+- Connector-compatible secret URL: run `.\scripts\show-mcp-connection.ps1` locally to display it.
+
+Operational helpers:
+```powershell
+.\scripts\tailscale-local-ai.ps1
+.\scripts\tailscale-local-ai.ps1 -StatusOnly
+.\scripts\tailscale-local-ai.ps1 -DisablePublicMcp
+.\scripts\show-mcp-connection.ps1
+.\scripts\rotate-mcp-credentials.ps1
+```
+
+The MCP exposes only status, model discovery, API capability discovery, and `ask_local_ai`. It does not expose shell, arbitrary files, Docker, or remote-desktop functions.
+
 ## Security
 
 - Gateway binds to `127.0.0.1:8090` and requires `AI_API_KEY`.
@@ -165,11 +189,113 @@ Vendored ComfyUI and WanGP repos use local `core.autocrlf=false` settings to avo
 
 ## Operating policy
 
-Keep the lightweight gateway and supervisor running. Heavy GPU containers remain stopped until requested.
+Keep the lightweight dashboard, gateway, supervisor, telemetry sampler, and MCP bridge running. Heavy GPU containers remain stopped until requested.
 After manual testing:
 
 ```powershell
 .\scripts\ai.ps1 stop-all
 ```
 
-Use `doctor` before or after significant changes. It checks Docker, Compose, the RTX 3060, required secrets, model files, Compose validity, GPU exclusivity, and disk headroom.
+Use `doctor` before or after significant changes. It checks Docker, Compose, the RTX 3060, required secrets, model files, Compose validity, the Windows host agent/autostart entry, GPU exclusivity, image synchronization, and disk headroom.
+
+## Dashboard telemetry and setup
+
+The dashboard is also the machine's control/diagnostic panel. Its Overview separates the
+**AI scheduler state** from physical GPU state, so an idle scheduler does not imply that
+all 12 GiB of VRAM is free. A lightweight always-on telemetry container samples the RTX
+3060 and runtime resources once per second.
+
+The dashboard currently exposes:
+- a global status strip and fleet matrix with semantic worker states: stopped, starting/loading, ready, running, unloading, and error;
+- physical GPU load, VRAM, temperature, power and clock telemetry, deliberately separate from scheduler ownership;
+- fixed-scale 2-minute / 10-minute / 1-hour GPU, VRAM, temperature and power history charts;
+- runtime CPU/RAM and model-drive headroom;
+- current/recent jobs with phase, elapsed time, activity age, load ETA and LLM throughput;
+- measured model cards with tokens/s, ms/token, prompt throughput, VRAM and cold-start time;
+- a Health topology, GUI System Doctor, and one-click per-service or seven-service functional self-tests;
+- a Network page for actual Tailscale Serve/Funnel state and GUI route configuration;
+- a Models page for guarded runtime configuration and Hugging Face downloads;
+- GUI configuration and broker testing for optional read-only MQTT/Home Assistant telemetry.
+
+The browser receives a live snapshot over `/api/events` WebSocket with polling as a
+fallback. The telemetry sidecar also exposes Prometheus-format metrics on its internal
+container endpoint for an optional future Prometheus scraper; that endpoint is not
+published directly to the host.
+
+### MQTT / Home Assistant
+
+MQTT is an output adapter only and is disabled by default. Local AI does not depend on
+the MQTT broker being available, and the gateway does not subscribe to command topics.
+Configure it from **Dashboard -> Setup** instead of editing configuration files.
+
+The retained topic namespace starts at:
+
+```text
+localai/marcus-computer/status
+localai/marcus-computer/gpu/utilization
+localai/marcus-computer/gpu/vram_used_mb
+localai/marcus-computer/gpu/temperature_c
+localai/marcus-computer/gpu/power_w
+localai/marcus-computer/scheduler/owner
+localai/marcus-computer/job/state
+localai/marcus-computer/service/<service>/state
+```
+
+When Home Assistant discovery is enabled, the gateway publishes discovery entries under
+the configured discovery prefix (`homeassistant` by default). These same MQTT topics are
+suitable for ESP32/OLED/LED status displays.
+
+
+### Functional self-tests
+
+**Dashboard -> Health** can run one service at a time or the complete GPU stack. The tests
+use the normal supervisor lease path, so they also validate GPU hand-off rather than
+starting containers behind the scheduler's back.
+
+The full test exercises:
+- real chat completions for the fast and reasoning LLMs;
+- WAV decode/transcription for STT;
+- actual WAV generation for TTS;
+- an actual image-analysis request for the VLM;
+- the ComfyUI API and WanGP application endpoint.
+
+Heavy workers are still subject to their normal idle timers. Use **Stop all GPU services**
+or `.\scripts\ai.ps1 stop-all` when a test session is finished if you want VRAM released
+immediately.
+
+### Windows host integration
+
+Tailscale configuration and model-file management need access to Windows rather than the
+Linux containers. `scripts\host_agent.py` provides a small token-authenticated bridge on
+port 8788 for those allow-listed operations. It is not a shell API.
+
+The bridge is started at Windows login through:
+
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\LocalAIHostAgent.cmd`
+
+The repository copy of the launcher is `scripts\start-host-agent.cmd`. The strict doctor
+checks both the agent and its autostart entry. The agent reports Tailscale state and
+Hugging Face CLI availability to the dashboard.
+
+### Network / Tailscale GUI
+
+**Dashboard -> Network** shows the actual Tailscale DNS name, Tailscale IP, private
+dashboard route, MCP exposure mode and Windows bridge status. Route changes are applied
+through the Windows host agent and the returned Tailscale state is re-read after each
+change.
+
+The intended layout remains:
+- dashboard: tailnet-only HTTPS on port 8443;
+- MCP: configurable as public Funnel, tailnet-only, or off on port 10000;
+- direct local API: `127.0.0.1:8090`.
+
+The page also detects the older HTTPS port-443 route and can remove it explicitly instead
+of silently changing existing remote access.
+
+### Model management
+
+**Dashboard -> Models** exposes the allow-listed runtime settings from `.env` and can
+download model files using the installed Hugging Face `hf` CLI. Worker recreation is
+blocked while that worker is loaded or has active jobs; unload it first. Downloads are
+written into the existing model directories on D: and do not automatically switch the
+active model.

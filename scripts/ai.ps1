@@ -33,8 +33,44 @@ function Wait-Gateway {
   throw "gateway did not become ready"
 }
 
+function Test-HostAgent {
+  try {
+    $r = Invoke-RestMethod "http://127.0.0.1:8788/health" -TimeoutSec 2
+    return $r.status -eq "ok"
+  } catch { return $false }
+}
+
+function Start-HostAgent {
+  if (Test-HostAgent) { return }
+
+  # A crashed/stale pythonw process should not prevent recovery.
+  $stale = @(Get-CimInstance Win32_Process | Where-Object {
+    $_.CommandLine -and $_.CommandLine -like "*AI-Stack*host_agent.py*"
+  })
+  foreach($proc in $stale) {
+    try { Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop } catch {}
+  }
+
+  $launcher = Join-Path $PSScriptRoot "start-host-agent.cmd"
+  if (Test-Path $launcher) {
+    Start-Process -FilePath "cmd.exe" -ArgumentList @("/d","/s","/c",('"' + $launcher + '"')) -WorkingDirectory $Root -WindowStyle Hidden
+  } else {
+    $script = Join-Path $PSScriptRoot "host_agent.py"
+    $outLog = Join-Path $Root "data\state\host-agent.log"
+    $errLog = Join-Path $Root "data\state\host-agent-error.log"
+    Start-Process -FilePath "pythonw.exe" -ArgumentList @($script) -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+  }
+
+  for($i=0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 250
+    if (Test-HostAgent) { return }
+  }
+  throw "Windows host agent did not become ready on port 8788"
+}
+
 function Start-ControlPlane {
-  Invoke-Compose -CommandArgs @("up","-d","supervisor","gateway")
+  Start-HostAgent
+  Invoke-Compose -CommandArgs @("up","-d","telemetry","supervisor","gateway","dashboard","mcp")
   Wait-Gateway
 }
 
@@ -111,12 +147,12 @@ switch ($Action) {
     try { Invoke-Supervisor "GET" "/status" 10 } catch { Write-Warning $_ }
   }
   "build" {
-    Invoke-Compose -CommandArgs @("build","supervisor","gateway","stt","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
   }
   "create" {
-    Invoke-Compose -CommandArgs @("build","supervisor","gateway","stt","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("pull","llm","reasoning")
-    Invoke-Compose -CommandArgs @("--profile","gpu","create","llm","reasoning","stt","tts","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
     Start-ControlPlane
   }
   "update" {
@@ -126,7 +162,7 @@ switch ($Action) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
     $rollbackImages = [ordered]@{}
-    foreach($svc in @("supervisor","gateway","stt","vlm","comfyui","wangp")) {
+    foreach($svc in @("telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
       $tag = Save-RollbackImage ("ai-stack-" + $svc + ":latest") ("ai-stack-" + $svc + ":rollback-" + $stamp)
       if($tag) { $rollbackImages[$svc] = $tag }
     }
@@ -154,9 +190,9 @@ switch ($Action) {
     if ($LASTEXITCODE -ne 0) { throw "Wan2GP update failed" }
 
     Invoke-Compose -CommandArgs @("pull","llm","reasoning")
-    Invoke-Compose -CommandArgs @("build","supervisor","gateway","stt","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
-    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","supervisor","gateway")
+    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","telemetry","supervisor","gateway","dashboard","mcp")
     Write-Output "Update complete. Rollback snapshot: $statePath"
   }
   "rollback" {
@@ -188,7 +224,7 @@ switch ($Action) {
     }
 
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
-    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","supervisor","gateway")
+    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","telemetry","supervisor","gateway","dashboard","mcp")
     Write-Output "Rollback complete from: $Snapshot"
   }
   "doctor" { & (Join-Path $PSScriptRoot "doctor.ps1") }
