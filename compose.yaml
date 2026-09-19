@@ -58,8 +58,12 @@ services:
     environment:
       TELEMETRY_INTERVAL: "1.0"
       TELEMETRY_DISK_PATH: /workspace
+      TELEMETRY_HISTORY_DB: /state/telemetry-history.sqlite3
+      TELEMETRY_PERSIST_INTERVAL: "60"
+      TELEMETRY_HISTORY_RETENTION_SECONDS: "604800"
     volumes:
       - ./models:/workspace:ro
+      - ./data/state:/state
     networks: [ai]
     healthcheck:
       test: ["CMD","python3","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]

@@ -1,5 +1,8 @@
 import asyncio
+import json
+import math
 import os
+import sqlite3
 import time
 from collections import deque
 from pathlib import Path
@@ -9,12 +12,21 @@ import pynvml
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
-app = FastAPI(title="Local AI Telemetry", version="0.1.0")
+app = FastAPI(title="Local AI Telemetry", version="0.2.0")
 SAMPLE_INTERVAL = float(os.getenv("TELEMETRY_INTERVAL", "1.0"))
 DISK_PATH = Path(os.getenv("TELEMETRY_DISK_PATH", "/workspace"))
-history = deque(maxlen=3600)
+HISTORY_DB_PATH = Path(os.getenv("TELEMETRY_HISTORY_DB", "/state/telemetry-history.sqlite3"))
+PERSIST_INTERVAL = max(10, int(os.getenv("TELEMETRY_PERSIST_INTERVAL", "60")))
+HISTORY_RETENTION_SECONDS = max(
+    3600, int(os.getenv("TELEMETRY_HISTORY_RETENTION_SECONDS", str(7 * 24 * 3600)))
+)
+LIVE_HISTORY_SECONDS = 3600
+history = deque(maxlen=max(3600, int(LIVE_HISTORY_SECONDS / max(SAMPLE_INTERVAL, 0.1))))
 latest = {}
 sampler_task = None
+last_persist_bucket = None
+history_error = None
+
 
 def read_gpu():
     handle = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -34,6 +46,7 @@ def read_gpu():
         "core_clock_mhz": float(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)),
         "memory_clock_mhz": float(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)),
     }
+
 
 def read_system():
     vm = psutil.virtual_memory()
@@ -74,21 +87,91 @@ def collect_sample():
     return sample
 
 
+def history_db():
+    HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(HISTORY_DB_PATH, timeout=5)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS samples (
+            bucket INTEGER PRIMARY KEY,
+            timestamp REAL NOT NULL,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+    return connection
+
+
+def initialize_history_db():
+    with history_db():
+        pass
+
+
+def persist_sample(sample):
+    global history_error
+    bucket = int(float(sample["timestamp"]) // PERSIST_INTERVAL)
+    cutoff = time.time() - HISTORY_RETENTION_SECONDS
+    try:
+        with history_db() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO samples(bucket, timestamp, payload) VALUES (?, ?, ?)",
+                (bucket, float(sample["timestamp"]), json.dumps(sample, separators=(",", ":"))),
+            )
+            connection.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,))
+        history_error = None
+    except Exception as exc:
+        history_error = str(exc)
+
+
+def persisted_samples(cutoff):
+    global history_error
+    if not HISTORY_DB_PATH.exists():
+        return []
+    try:
+        with history_db() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM samples WHERE timestamp >= ? ORDER BY timestamp ASC",
+                (cutoff,),
+            ).fetchall()
+        history_error = None
+        return [json.loads(row[0]) for row in rows]
+    except Exception as exc:
+        history_error = str(exc)
+        return []
+
+
+def downsample(samples, max_points):
+    if len(samples) <= max_points:
+        return samples
+    step = max(1, math.ceil(len(samples) / max_points))
+    reduced = samples[::step]
+    if reduced[-1].get("timestamp") != samples[-1].get("timestamp"):
+        reduced.append(samples[-1])
+    return reduced
+
+
 async def sampler():
-    global latest
+    global latest, last_persist_bucket
     while True:
         latest = await asyncio.to_thread(collect_sample)
         history.append(latest)
+        bucket = int(float(latest["timestamp"]) // PERSIST_INTERVAL)
+        if bucket != last_persist_bucket:
+            last_persist_bucket = bucket
+            await asyncio.to_thread(persist_sample, latest)
         await asyncio.sleep(SAMPLE_INTERVAL)
 
 
 @app.on_event("startup")
 async def startup():
-    global sampler_task, latest
+    global sampler_task, latest, last_persist_bucket
     pynvml.nvmlInit()
     psutil.cpu_percent(interval=None)
+    await asyncio.to_thread(initialize_history_db)
     latest = await asyncio.to_thread(collect_sample)
     history.append(latest)
+    last_persist_bucket = int(float(latest["timestamp"]) // PERSIST_INTERVAL)
+    await asyncio.to_thread(persist_sample, latest)
     sampler_task = asyncio.create_task(sampler())
 
 
@@ -105,7 +188,13 @@ async def shutdown():
 @app.get("/health")
 def health():
     ok = latest.get("gpu") is not None
-    return {"status": "ok" if ok else "degraded", "version": app.version}
+    return {
+        "status": "ok" if ok else "degraded",
+        "version": app.version,
+        "history_persistent": history_error is None,
+        "history_error": history_error,
+    }
+
 
 @app.get("/snapshot")
 def snapshot():
@@ -113,10 +202,42 @@ def snapshot():
 
 
 @app.get("/history")
-def get_history(seconds: int = 120):
-    seconds = max(5, min(seconds, 3600))
+def get_history(seconds: int = 120, max_points: int = 900):
+    seconds = max(5, min(seconds, HISTORY_RETENTION_SECONDS))
+    max_points = max(60, min(max_points, 2000))
     cutoff = time.time() - seconds
-    return {"samples": [sample for sample in history if sample.get("timestamp", 0) >= cutoff]}
+    live_samples = [sample for sample in history if sample.get("timestamp", 0) >= cutoff]
+
+    live_start = live_samples[0].get("timestamp", 0) if live_samples else None
+    live_covers_window = bool(
+        live_start is not None
+        and live_start <= cutoff + max(PERSIST_INTERVAL, SAMPLE_INTERVAL * 2)
+    )
+
+    if seconds <= LIVE_HISTORY_SECONDS and live_covers_window:
+        samples = live_samples
+    elif seconds <= LIVE_HISTORY_SECONDS:
+        persisted = persisted_samples(cutoff)
+        cutoff_for_live = (live_start or time.time()) - SAMPLE_INTERVAL
+        older = [sample for sample in persisted if sample.get("timestamp", 0) < cutoff_for_live]
+        samples = older + live_samples
+    else:
+        persisted = persisted_samples(cutoff)
+        by_bucket = {
+            int(float(sample.get("timestamp", 0)) // PERSIST_INTERVAL): sample
+            for sample in persisted
+        }
+        for sample in live_samples:
+            bucket = int(float(sample.get("timestamp", 0)) // PERSIST_INTERVAL)
+            by_bucket[bucket] = sample
+        samples = sorted(by_bucket.values(), key=lambda sample: sample.get("timestamp", 0))
+
+    return {
+        "samples": downsample(samples, max_points),
+        "retention_seconds": HISTORY_RETENTION_SECONDS,
+        "persistent": history_error is None,
+        "history_error": history_error,
+    }
 
 
 @app.get("/metrics", response_class=PlainTextResponse)

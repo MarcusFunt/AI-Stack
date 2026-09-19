@@ -8,6 +8,7 @@ import { localAI } from './api'
 import type {
   DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, RuntimeSettings, Snapshot,
 } from './api'
+import { isBadState } from './state'
 
 const labels: Record<string, string> = {
   llm: 'Fast LLM',
@@ -36,7 +37,7 @@ function tone(state: string) {
   if (['ready', 'complete', 'pass'].includes(state)) return 'ok'
   if (['running'].includes(state)) return 'live'
   if (['starting', 'loading', 'warming', 'waiting', 'unloading', 'warn'].includes(state)) return 'busy'
-  if (['failed', 'error', 'dead', 'oom', 'fail'].includes(state)) return 'bad'
+  if (isBadState(state)) return 'bad'
   return 'muted'
 }
 
@@ -73,33 +74,71 @@ function GaugeBar(props: {
 
 function FixedHistoryChart(props: {
   title: string
-  values: number[]
+  values: Array<number | null>
+  timestamps: number[]
   min: number
   max: number
   current: string
   unit: string
 }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
   const span = Math.max(1, props.max - props.min)
-  const values = props.values.length ? props.values : [props.min, props.min]
-  const points = values.map((value, i) => {
-    const x = values.length === 1 ? 100 : (i / (values.length - 1)) * 100
+  const points = props.values.map((value, i) => {
+    if (value === null || Number.isNaN(value)) return null
+    const x = props.values.length <= 1 ? 100 : (i / (props.values.length - 1)) * 100
     const clamped = Math.max(props.min, Math.min(props.max, value))
     const y = 42 - ((clamped - props.min) / span) * 36
-    return x.toFixed(2) + ',' + y.toFixed(2)
-  }).join(' ')
-  const minSeen = props.values.length ? Math.min(...props.values) : 0
-  const maxSeen = props.values.length ? Math.max(...props.values) : 0
+    return { x, y, value }
+  })
+  const segments: string[] = []
+  let segment: string[] = []
+  for (const point of points) {
+    if (!point) {
+      if (segment.length) segments.push(segment.join(' '))
+      segment = []
+      continue
+    }
+    segment.push(point.x.toFixed(2) + ',' + point.y.toFixed(2))
+  }
+  if (segment.length) segments.push(segment.join(' '))
+  const seen = points.flatMap((point) => point ? [point.value] : [])
+  const minSeen = seen.length ? Math.min(...seen) : null
+  const maxSeen = seen.length ? Math.max(...seen) : null
+  const avgSeen = seen.length ? seen.reduce((sum, value) => sum + value, 0) / seen.length : null
+  const formatTime = (timestamp?: number) => timestamp
+    ? new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '—'
+  const hoverPoint = hoverIndex !== null ? points[hoverIndex] : null
+  const hoverTime = hoverIndex !== null ? props.timestamps[hoverIndex] : undefined
+  const handleMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    if (props.values.length <= 1) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / Math.max(bounds.width, 1)))
+    setHoverIndex(Math.round(ratio * (props.values.length - 1)))
+  }
   return (
     <div className="history-chart">
       <div className="history-chart-head">
         <div><span>{props.title}</span><strong>{props.current}</strong></div>
-        <small>{fmt(minSeen, 0)}–{fmt(maxSeen, 0)} {props.unit}</small>
+        <small>
+          {hoverPoint
+            ? `${formatTime(hoverTime)} · ${fmt(hoverPoint.value, 1)}${props.unit}`
+            : minSeen === null
+              ? 'No samples'
+              : `min ${fmt(minSeen, 0)} · avg ${fmt(avgSeen, 0)} · max ${fmt(maxSeen, 0)} ${props.unit}`}
+        </small>
       </div>
-      <svg viewBox="0 0 100 46" preserveAspectRatio="none">
+      <svg viewBox="0 0 100 46" preserveAspectRatio="none" aria-label={props.title + ' history'}
+        onMouseMove={handleMove} onMouseLeave={() => setHoverIndex(null)}>
         {[6, 24, 42].map((y) => <line key={y} x1="0" x2="100" y1={y} y2={y} />)}
-        <polyline points={points} fill="none" vectorEffect="non-scaling-stroke" />
+        {segments.map((line, index) => <polyline key={index} points={line} fill="none" vectorEffect="non-scaling-stroke" />)}
+        {hoverPoint && <>
+          <line className="history-crosshair" x1={hoverPoint.x} x2={hoverPoint.x} y1="6" y2="42" />
+          <circle className="history-hover-dot" cx={hoverPoint.x} cy={hoverPoint.y} r="1.15" />
+        </>}
       </svg>
       <div className="history-scale"><span>{props.max}{props.unit}</span><span>{props.min}{props.unit}</span></div>
+      <div className="history-time"><span>{formatTime(props.timestamps[0])}</span><span>{formatTime(props.timestamps.at(-1))}</span></div>
     </div>
   )
 }
@@ -194,13 +233,17 @@ export function ControlOverview(props: {
   onRefresh: () => void
 }) {
   const [history, setHistory] = useState<Snapshot['machine'][]>([])
+  const [historyPersistent, setHistoryPersistent] = useState<boolean | null>(null)
   const [windowSeconds, setWindowSeconds] = useState(120)
   useEffect(() => {
     let alive = true
     const load = async () => {
       try {
-        const result = await localAI.telemetryHistory(windowSeconds)
-        if (alive) setHistory(result.samples)
+        const result = await localAI.telemetryHistory(windowSeconds, 900)
+        if (alive) {
+          setHistory(result.samples)
+          setHistoryPersistent(result.persistent ?? null)
+        }
       } catch { /* live cards still work without history */ }
     }
     void load()
@@ -211,10 +254,11 @@ export function ControlOverview(props: {
   const gpu = props.snapshot?.machine.gpu
   const system = props.snapshot?.machine.system
   const status = props.snapshot?.supervisor
-  const gpuSeries = history.map((s) => s.gpu?.utilization_percent || 0)
-  const vramSeries = history.map((s) => (s.gpu?.vram_used_mib || 0) / 1024)
-  const tempSeries = history.map((s) => s.gpu?.temperature_c || 0)
-  const powerSeries = history.map((s) => s.gpu?.power_w || 0)
+  const historyTimes = history.map((s) => s.timestamp)
+  const gpuSeries = history.map((s) => s.gpu ? s.gpu.utilization_percent : null)
+  const vramSeries = history.map((s) => s.gpu ? s.gpu.vram_used_mib / 1024 : null)
+  const tempSeries = history.map((s) => s.gpu ? s.gpu.temperature_c : null)
+  const powerSeries = history.map((s) => s.gpu ? s.gpu.power_w : null)
   return (
     <div className="overview">
       <header className="compact-hero">
@@ -239,23 +283,25 @@ export function ControlOverview(props: {
       </div>
 
       <div className="history-toolbar">
-        <div><span className="eyebrow">FIXED-SCALE HISTORY</span><strong>Hardware over time</strong></div>
+        <div><span className="eyebrow">FIXED-SCALE HISTORY</span><strong>Hardware over time</strong>
+          <small>{historyPersistent === true ? '7-day minute history persisted on disk' : historyPersistent === false ? 'Persistent history unavailable' : 'Live history'}</small>
+        </div>
         <div className="history-window">
-          {[[120, '2m'], [600, '10m'], [3600, '1h']].map(([seconds, label]) => (
+          {[[120, '2m'], [600, '10m'], [3600, '1h'], [86400, '24h'], [604800, '7d']].map(([seconds, label]) => (
             <button key={seconds} className={windowSeconds === seconds ? 'active' : ''}
               onClick={() => setWindowSeconds(Number(seconds))}>{label}</button>
           ))}
         </div>
       </div>
       <div className="history-grid">
-        <FixedHistoryChart title="GPU LOAD" values={gpuSeries} min={0} max={100}
+        <FixedHistoryChart title="GPU LOAD" values={gpuSeries} timestamps={historyTimes} min={0} max={100}
           current={fmt(gpu?.utilization_percent, 0) + '%'} unit="%" />
-        <FixedHistoryChart title="VRAM" values={vramSeries} min={0}
+        <FixedHistoryChart title="VRAM" values={vramSeries} timestamps={historyTimes} min={0}
           max={(gpu?.vram_total_mib || 12288) / 1024}
           current={fmt((gpu?.vram_used_mib || 0) / 1024, 1) + ' GiB'} unit=" GiB" />
-        <FixedHistoryChart title="TEMPERATURE" values={tempSeries} min={20} max={90}
+        <FixedHistoryChart title="TEMPERATURE" values={tempSeries} timestamps={historyTimes} min={20} max={90}
           current={fmt(gpu?.temperature_c, 0) + '°C'} unit="°C" />
-        <FixedHistoryChart title="POWER" values={powerSeries} min={0} max={gpu?.power_limit_w || 170}
+        <FixedHistoryChart title="POWER" values={powerSeries} timestamps={historyTimes} min={0} max={gpu?.power_limit_w || 170}
           current={fmt(gpu?.power_w, 1) + ' W'} unit=" W" />
       </div>
 
@@ -266,13 +312,15 @@ export function ControlOverview(props: {
       <div className="fleet-matrix">
         <div className="fleet-row fleet-head">
           <span>SERVICE</span><span>MODEL</span><span>STATE</span><span>GPU</span>
-          <span>JOBS</span><span>LOAD</span><span>AUTO STOP</span><span>LAST ERROR</span>
+          <span>JOBS</span><span>LOAD</span><span>AUTO STOP</span><span>LAST ERROR</span><span>ACTION</span>
         </div>
         {Object.keys(status?.services || {}).map((name) => {
           const state = status?.service_states?.[name] || status?.services[name] || 'unknown'
           const model = serviceModel(name, props.models)
           const metric = status?.service_metrics?.[name]
           const idle = status?.idle_stop_in_seconds[name]
+          const jobs = status?.active_jobs[name] || 0
+          const running = ['ready', 'running', 'loading', 'starting', 'warming'].includes(state)
           return (
             <div className="fleet-row" key={'fleet-' + name}>
               <strong>{labels[name] || name}</strong>
@@ -281,41 +329,21 @@ export function ControlOverview(props: {
               <span className={status?.gpu_owner === name ? 'owner-pill' : ''}>
                 {status?.gpu_owner === name ? 'OWNER' : '—'}
               </span>
-              <b>{status?.active_jobs[name] || 0}</b>
+              <b>{jobs}</b>
               <span>{duration(metric?.last_start_s)}</span>
               <span>{idle !== undefined ? duration(idle) : '—'}</span>
-              <span className={metric?.last_error ? 'danger-text fleet-error' : 'fleet-error'}>
+              <span className={metric?.last_error ? 'danger-text fleet-error' : 'fleet-error'}
+                title={metric?.last_error || undefined}>
                 {metric?.last_error || '—'}
               </span>
-            </div>
-          )
-        })}
-      </div>
-      <div className="ops-service-grid">
-        {Object.keys(status?.services || {}).map((name) => {
-          const state = status?.service_states?.[name] || status?.services[name] || 'unknown'
-          const jobs = status?.active_jobs[name] || 0
-          const idle = status?.idle_stop_in_seconds[name]
-          const start = status?.service_metrics?.[name]?.last_start_s
-          const running = ['ready', 'running', 'loading', 'starting', 'warming'].includes(state)
-          return (
-            <article className={'ops-service-card state-' + tone(state)} key={name}>
-              <div className="service-card-head">
-                <div><strong>{labels[name] || name}</strong><span>{name}</span></div>
-                <StateBadge state={state} />
-              </div>
-              <div className="service-readouts">
-                <div><span>JOBS</span><b>{jobs}</b></div>
-                <div><span>LAST START</span><b>{duration(start)}</b></div>
-                <div><span>AUTO STOP</span><b>{idle !== undefined ? duration(idle) : '—'}</b></div>
-              </div>
-              <button className={running ? 'service-control stop' : 'service-control'}
+              <button className={running ? 'fleet-action stop' : 'fleet-action'}
                 disabled={props.busy.has(name) || jobs > 0}
+                aria-label={(running ? 'Stop ' : 'Load ') + (labels[name] || name)}
                 onClick={() => running ? props.onStop(name) : props.onStart(name)}>
                 {props.busy.has(name) ? <RefreshCw className="spin" size={14} /> :
                   running ? <><Square size={13} /> Stop</> : <><Play size={13} /> Load</>}
               </button>
-            </article>
+            </div>
           )
         })}
       </div>
@@ -463,11 +491,46 @@ export function ModelsPanel({ models, snapshot }: { models: ModelInfo[]; snapsho
               <span className="eyebrow">{service.toUpperCase()}</span><h3>{labels[service] || service}</h3>
             </div></div><StateBadge state={snapshot?.supervisor.service_states?.[service] || 'stopped'} /></div>
             <div className="config-field-list">
-              {Object.entries(values).map(([key, value]) => (
-                <label key={key}>{key.replaceAll('_', ' ')}
-                  <input value={value} onChange={(e) => setConfig(service, key, e.target.value)} />
-                </label>
-              ))}
+              {Object.entries(values).map(([key, value]) => {
+                const llmFiles = management?.inventory?.llm || []
+                const isLlmModel = ['llm', 'reasoning'].includes(service) && key.endsWith('_MODEL') && llmFiles.length > 0
+                const isContext = key.endsWith('_CONTEXT')
+                const isGpuLayers = key.endsWith('_GPU_LAYERS')
+                const isComputeType = key === 'STT_COMPUTE_TYPE'
+                const hint = isContext
+                  ? 'tokens · keep enough VRAM free for KV cache'
+                  : isGpuLayers
+                    ? '0 = CPU · 999 = full offload when supported'
+                    : isLlmModel
+                      ? 'installed GGUF on the model drive'
+                      : isComputeType
+                        ? 'float16 is fastest on the RTX 3060'
+                        : ''
+                return (
+                  <label key={key}>{key.replaceAll('_', ' ')}
+                    {isLlmModel ? (
+                      <select value={value} onChange={(e) => setConfig(service, key, e.target.value)}>
+                        {!llmFiles.some((file) => file.config_path === value) && <option value={value}>{value}</option>}
+                        {llmFiles.map((file) => <option key={file.config_path} value={file.config_path}>
+                          {file.name}{file.size_gib ? ' · ' + file.size_gib + ' GiB' : ''}
+                        </option>)}
+                      </select>
+                    ) : isComputeType ? (
+                      <select value={value} onChange={(e) => setConfig(service, key, e.target.value)}>
+                        {['float16', 'int8_float16', 'int8'].map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+                      </select>
+                    ) : (
+                      <input value={value}
+                        type={isContext || isGpuLayers ? 'number' : 'text'}
+                        min={isContext ? 512 : isGpuLayers ? 0 : undefined}
+                        max={isContext ? 262144 : isGpuLayers ? 999 : undefined}
+                        step={isContext ? 512 : isGpuLayers ? 1 : undefined}
+                        onChange={(e) => setConfig(service, key, e.target.value)} />
+                    )}
+                    {hint && <small className="config-hint">{hint}</small>}
+                  </label>
+                )
+              })}
             </div>
             <button className="secondary"
               disabled={!!configBusy || !!snapshot?.supervisor.active_jobs?.[service]
@@ -513,9 +576,15 @@ export function ModelsPanel({ models, snapshot }: { models: ModelInfo[]; snapsho
         <div className="install-list">
           {(management?.installs || []).map((job) => <div key={job.id}>
             <div><strong>{job.repo}{job.filename ? ' · ' + job.filename : ''}</strong>
-              <span>{job.target} · {job.id}</span></div>
+              <span>{job.target} · {job.elapsed_s !== undefined ? duration(job.elapsed_s) : job.id}</span></div>
             <StateBadge state={job.state} />
-            <pre>{job.log_tail ? job.log_tail.split('\n').slice(-2).join('\n') : 'waiting for output…'}</pre>
+            <div className="install-progress">
+              {job.progress_percent !== null && job.progress_percent !== undefined ? <>
+                <div className="bar-track"><div className="bar-fill" style={{ width: Math.max(0, Math.min(100, job.progress_percent)) + '%' }} /></div>
+                <span>{fmt(job.progress_percent, 0)}%{job.progress_text ? ' · ' + job.progress_text : ''}</span>
+              </> : <span>{job.state === 'running' ? 'Downloading · waiting for measurable progress…' : job.state}</span>}
+              {job.log_tail && <details><summary>Log</summary><pre>{job.log_tail.split('\n').slice(-8).join('\n')}</pre></details>}
+            </div>
           </div>)}
         </div>
         {manageMessage && <div className="setup-message">{manageMessage}</div>}
@@ -568,26 +637,60 @@ function SelfTestPanel({ snapshot }: { snapshot: Snapshot | null }) {
     }
   }
   const active = tests?.run.state === 'running'
+  const runStarted = tests?.run.started_at || 0
+  const currentResults = services.filter((service) => {
+    const result = tests?.results?.[service]
+    return !!result?.started_at && result.started_at >= runStarted
+  })
+  const completed = currentResults.filter((service) => !!tests?.results?.[service]?.finished_at)
+  const currentService = active
+    ? services.find((service) => !completed.includes(service)) || tests?.run.services.at(-1)
+    : undefined
+  const progress = active ? Math.round((completed.length / services.length) * 100) : (tests?.run.state === 'pass' ? 100 : 0)
+  const fullElapsed = tests?.run.started_at && tests.run.finished_at
+    ? tests.run.finished_at - tests.run.started_at
+    : tests?.run.started_at && snapshot?.timestamp ? snapshot.timestamp - tests.run.started_at : null
+  const lastFinished = tests?.run.finished_at
+    ? new Date(tests.run.finished_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null
+
   return (
     <div className="tool-card self-test-panel">
       <div className="setup-card-title">
         <div><TestTube2 size={19} /><div><span className="eyebrow">FUNCTIONAL DIAGNOSTICS</span>
-          <h3>One-click service self-tests</h3></div></div>
+          <h3>Service verification</h3></div></div>
         <button className="primary no-margin" disabled={active || !!busy} onClick={() => void run()}>
           {active || busy === 'all' ? <RefreshCw className="spin" size={14} /> : <TestTube2 size={14} />}
           Test entire stack
         </button>
       </div>
+
+      {(active || (tests?.run.state && tests.run.state !== 'idle')) && (
+        <div className="self-test-summary">
+          <div className="self-test-summary-copy">
+            <div>
+              <span className="eyebrow">{active ? 'FULL TEST IN PROGRESS' : 'LAST FULL TEST'}</span>
+              <strong>{active
+                ? `${completed.length} / ${services.length} complete${currentService ? ' · now ' + (labels[currentService] || currentService) : ''}`
+                : `${String(tests?.run.state || 'unknown').toUpperCase()}${lastFinished ? ' · ' + lastFinished : ''}`}</strong>
+            </div>
+            <span>{fullElapsed !== null ? duration(fullElapsed) + (active ? ' elapsed' : ' total') : '—'}</span>
+          </div>
+          <div className="bar-track self-test-progress"><div className="bar-fill" style={{ width: progress + '%' }} /></div>
+        </div>
+      )}
+
       <div className="self-test-grid">
         {services.map((service) => {
           const result = tests?.results?.[service]
           const state = result?.state || 'untested'
+          const testDepth = ['comfyui', 'wangp'].includes(service) ? 'Connectivity check' : 'Inference E2E'
           return (
-            <div className="self-test-row" key={service}>
+            <div className={'self-test-row ' + (currentService === service ? 'is-current' : '')} key={service}>
               <div><strong>{labels[service] || service}</strong>
-                <span>{result?.detail || 'No functional test has been run yet.'}</span></div>
+                <span><b className="test-depth">{testDepth}</b>{result?.detail ? ' · ' + result.detail : ' · No test has been run yet.'}</span></div>
               <span>{result?.elapsed_s ? duration(result.elapsed_s) : '—'}</span>
-              <StateBadge state={state} />
+              <StateBadge state={currentService === service ? 'running' : state} />
               <button className="secondary no-margin" disabled={active || !!busy}
                 onClick={() => void run(service)}>
                 {busy === service ? <RefreshCw className="spin" size={13} /> : <Play size={13} />} Test
@@ -596,10 +699,6 @@ function SelfTestPanel({ snapshot }: { snapshot: Snapshot | null }) {
           )
         })}
       </div>
-      {tests?.run.state && tests.run.state !== 'idle' && (
-        <div className="setup-message">Full test state: <b>{tests.run.state}</b>
-          {tests.run.services.length ? ' · ' + tests.run.services.join(' → ') : ''}</div>
-      )}
       {error && <div className="error-banner">{error}</div>}
     </div>
   )
@@ -608,7 +707,7 @@ function SelfTestPanel({ snapshot }: { snapshot: Snapshot | null }) {
 export function HealthPanel({ snapshot }: { snapshot: Snapshot | null }) {
   const supervisor = snapshot?.supervisor
   const machine = snapshot?.machine
-  const unhealthy = Object.entries(supervisor?.service_states || {}).filter(([, s]) => ['error', 'dead'].includes(s))
+  const unhealthy = Object.entries(supervisor?.service_states || {}).filter(([, state]) => isBadState(state))
   const gatewayState = snapshot?.gateway.status === 'online' ? 'ready' : 'error'
   const telemetryState = machine?.gpu ? 'ready' : 'error'
   return (
@@ -656,7 +755,13 @@ function CheckRow({ check }: { check: DoctorCheck }) {
   )
 }
 
-export function SetupPanel({ snapshot, models }: { snapshot: Snapshot | null; models: ModelInfo[] }) {
+export function SetupPanel(props: {
+  snapshot: Snapshot | null
+  models: ModelInfo[]
+  network: NetworkStatus | null
+  onNavigate: (section: 'network' | 'models' | 'health') => void
+}) {
+  const { snapshot, models, network } = props
   const [checks, setChecks] = useState<DoctorCheck[]>([])
   const [doctorState, setDoctorState] = useState('loading')
   const [settings, setSettings] = useState<RuntimeSettings | null>(null)
@@ -732,6 +837,21 @@ export function SetupPanel({ snapshot, models }: { snapshot: Snapshot | null; mo
   }
 
   const mqtt = settings?.mqtt
+  const apiReady = snapshot?.gateway.status === 'online'
+  const networkAvailable = !!network?.online && !!network?.dashboard_enabled
+  const networkSecure = networkAvailable && network?.mcp_mode !== 'public' && !network?.legacy_443
+  const modelReady = models.length > 0 && models.every((model) => {
+    const state = snapshot?.supervisor.service_states?.[serviceForModel(model.id)]
+    return !isBadState(state)
+  })
+  const smokeReady = snapshot?.self_tests?.run.state === 'pass'
+  const wizardSteps = [
+    { id: 'host', title: 'Host, Docker & GPU', detail: 'Prerequisites and persistent storage', state: doctorState === 'pass' ? 'ready' : doctorState === 'loading' ? 'starting' : 'error', action: () => void refreshDoctor(), actionLabel: 'Run checks' },
+    { id: 'api', title: 'Control plane API', detail: 'Gateway, supervisor and telemetry', state: apiReady ? 'ready' : 'error', action: () => props.onNavigate('health'), actionLabel: 'Open health' },
+    { id: 'network', title: 'Remote access', detail: !networkAvailable ? 'Tailscale dashboard needs configuration' : networkSecure ? 'Private dashboard and non-public MCP' : 'Online · review public/legacy exposure', state: networkSecure ? 'ready' : 'warn', action: () => props.onNavigate('network'), actionLabel: 'Configure' },
+    { id: 'models', title: 'Model fleet', detail: `${models.length} registered capabilities`, state: modelReady ? 'ready' : 'warn', action: () => props.onNavigate('models'), actionLabel: 'Review models' },
+    { id: 'smoke', title: 'Functional smoke test', detail: smokeReady ? 'Latest full-stack run passed' : 'Run inference/connectivity verification', state: smokeReady ? 'ready' : 'warn', action: () => props.onNavigate('health'), actionLabel: 'Run tests' },
+  ]
   return (
     <section className="workspace">
       <div className="workspace-head">
@@ -739,6 +859,27 @@ export function SetupPanel({ snapshot, models }: { snapshot: Snapshot | null; mo
         <button className="secondary no-margin" onClick={() => void refreshDoctor()}>
           <RefreshCw className={doctorState === 'loading' ? 'spin' : ''} size={14} /> Run checks
         </button>
+      </div>
+
+      <div className="setup-wizard">
+        <div className="setup-wizard-head">
+          <div><span className="eyebrow">FIRST-RUN PATH</span><h3>Bring the workstation to a verified ready state</h3></div>
+          <span>{wizardSteps.filter((step) => step.state === 'ready').length} / {wizardSteps.length} required steps ready</span>
+        </div>
+        <div className="wizard-step-grid">
+          {wizardSteps.map((step, index) => <div className="wizard-step" key={step.id}>
+            <div className="wizard-number">{index + 1}</div>
+            <div className="wizard-copy"><strong>{step.title}</strong><span>{step.detail}</span></div>
+            <StateBadge state={step.state} />
+            <button className="secondary no-margin" onClick={step.action}>{step.actionLabel}</button>
+          </div>)}
+        </div>
+        <div className="wizard-optional">
+          <span>OPTIONAL INTEGRATION</span>
+          <strong>MQTT / Home Assistant</strong>
+          <StateBadge state={snapshot?.mqtt.connected ? 'ready' : mqtt?.enabled ? 'waiting' : 'stopped'} />
+          <small>{snapshot?.mqtt.connected ? 'Connected and publishing telemetry.' : 'Configure below if you want external telemetry.'}</small>
+        </div>
       </div>
 
       <div className="setup-grid">
@@ -859,6 +1000,12 @@ export function NetworkPanel(props: {
   }
 
   const apply = async () => {
+    if (effectiveMcpMode === 'public' && props.network?.mcp_mode !== 'public') {
+      const confirmed = window.confirm(
+        'Public Funnel makes the authenticated MCP endpoint reachable from the public internet. Continue?'
+      )
+      if (!confirmed) return
+    }
     setBusy('apply')
     setMessage('')
     try {
@@ -869,6 +1016,30 @@ export function NetworkPanel(props: {
       setInitialized(false)
       setClearLegacy(false)
       setMessage(result.ok ? 'Tailscale routes updated and verified.' : 'One or more Tailscale commands failed.')
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const applySecureDefaults = async () => {
+    setBusy('secure')
+    setMessage('')
+    try {
+      const result = await localAI.configureTailscale({
+        dashboard_enabled: true,
+        mcp_mode: 'private',
+        clear_legacy_443: true,
+      })
+      props.onNetwork(result.status)
+      setDashboardEnabled(true)
+      setMcpMode('private')
+      setInitialized(false)
+      setClearLegacy(false)
+      setMessage(result.ok
+        ? 'Secure defaults applied: private dashboard, tailnet-only MCP, legacy :443 removed.'
+        : 'One or more secure-default commands failed.')
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err))
     } finally {
@@ -893,6 +1064,29 @@ export function NetworkPanel(props: {
     ['Unified API local', 'http://127.0.0.1:8090/v1/'],
     ['Dashboard private', props.network?.dashboard_url || 'Unavailable'],
     ['MCP endpoint', props.network?.mcp_url || 'Unavailable'],
+  ]
+  const routeCards = [
+    {
+      port: ':8443',
+      title: 'Dashboard',
+      target: '127.0.0.1:3000',
+      exposure: props.network?.dashboard_enabled ? 'TAILNET ONLY' : 'OFF',
+      state: props.network?.dashboard_enabled ? 'ready' : 'stopped',
+    },
+    {
+      port: ':10000',
+      title: 'MCP',
+      target: '127.0.0.1:8765',
+      exposure: publicMcp ? 'PUBLIC FUNNEL' : props.network?.mcp_mode === 'private' ? 'TAILNET ONLY' : 'OFF',
+      state: publicMcp ? 'warn' : props.network?.mcp_mode === 'private' ? 'ready' : 'stopped',
+    },
+    {
+      port: ':443',
+      title: 'Legacy API route',
+      target: '127.0.0.1:8000',
+      exposure: legacy443 ? 'TAILNET ONLY · LEGACY' : 'OFF',
+      state: legacy443 ? 'warn' : 'stopped',
+    },
   ]
 
   return (
@@ -945,9 +1139,15 @@ export function NetworkPanel(props: {
           {effectiveMcpMode === 'public' && <div className="exposure-warning">
             <AlertTriangle size={16} /><span><strong>Public internet exposure</strong>
               MCP remains authenticated, but this route is reachable outside your tailnet.</span></div>}
-          <button className="primary" disabled={!!busy} onClick={() => void apply()}>
-            {busy === 'apply' ? <RefreshCw className="spin" size={14} /> : <Save size={14} />} Apply routes
-          </button>
+          <div className="network-actions">
+            <button className="primary no-margin" disabled={!!busy} onClick={() => void apply()}>
+              {busy === 'apply' ? <RefreshCw className="spin" size={14} /> : <Save size={14} />} Apply routes
+            </button>
+            <button className="secondary no-margin" disabled={!!busy} onClick={() => void applySecureDefaults()}
+              title="Private dashboard, tailnet-only MCP, and remove the legacy :443 route.">
+              {busy === 'secure' ? <RefreshCw className="spin" size={14} /> : <Shield size={14} />} Secure defaults
+            </button>
+          </div>
           {message && <div className="setup-message">{message}</div>}
         </div>
 
@@ -958,6 +1158,8 @@ export function NetworkPanel(props: {
             {routes.map(([name, value]) => <div key={name}>
               <div><strong>{name}</strong><code>{value}</code></div>
               <button className="icon-button" disabled={value === 'Unavailable'}
+                aria-label={'Copy ' + name}
+                title={'Copy ' + name}
                 onClick={() => void copy(value)}><Copy size={14} /></button>
             </div>)}
           </div>
@@ -981,8 +1183,19 @@ export function NetworkPanel(props: {
 
       <div className="tool-card actual-routes">
         <div className="setup-card-title"><div><Wifi size={19} /><div>
-          <span className="eyebrow">ACTUAL HOST STATE</span><h3>Tailscale Serve / Funnel</h3></div></div></div>
-        <pre>{props.network?.serve_status || 'No route state available.'}</pre>
+          <span className="eyebrow">ACTUAL HOST STATE</span><h3>Active Tailscale routes</h3></div></div></div>
+        <div className="route-card-grid">
+          {routeCards.map((route) => <div className="route-card" key={route.port}>
+            <div className="route-port">{route.port}</div>
+            <div><strong>{route.title}</strong><span>{route.target}</span></div>
+            <b className={route.state === 'warn' ? 'danger-text' : ''}>{route.exposure}</b>
+            <StateBadge state={route.state} />
+          </div>)}
+        </div>
+        <details className="raw-state">
+          <summary>Advanced: raw Tailscale Serve / Funnel state</summary>
+          <pre>{props.network?.serve_status || 'No route state available.'}</pre>
+        </details>
         {props.network?.status_error && <div className="error-banner">{props.network.status_error}</div>}
       </div>
     </section>

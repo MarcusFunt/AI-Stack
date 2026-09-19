@@ -208,13 +208,14 @@ all 12 GiB of VRAM is free. A lightweight always-on telemetry container samples 
 The dashboard currently exposes:
 - a global status strip and fleet matrix with semantic worker states: stopped, starting/loading, ready, running, unloading, and error;
 - physical GPU load, VRAM, temperature, power and clock telemetry, deliberately separate from scheduler ownership;
-- fixed-scale 2-minute / 10-minute / 1-hour GPU, VRAM, temperature and power history charts;
+- fixed-scale 2-minute / 10-minute / 1-hour / 24-hour / 7-day GPU, VRAM, temperature and power history charts, with hover readouts and minute history persisted under `data/state`;
 - runtime CPU/RAM and model-drive headroom;
 - current/recent jobs with phase, elapsed time, activity age, load ETA and LLM throughput;
 - measured model cards with tokens/s, ms/token, prompt throughput, VRAM and cold-start time;
-- a Health topology, GUI System Doctor, and one-click per-service or seven-service functional self-tests;
-- a Network page for actual Tailscale Serve/Funnel state and GUI route configuration;
-- a Models page for guarded runtime configuration and Hugging Face downloads;
+- a Health topology, GUI System Doctor, and one-click per-service or seven-service functional self-tests with live run progress and test-depth labels;
+- a first-run Setup path that links prerequisites, API health, remote access, models and a full smoke test;
+- a Network page that turns actual Tailscale Serve/Funnel state into structured route cards, warns about public exposure, and offers a private secure-defaults preset;
+- a Models page with guarded typed runtime controls, installed-GGUF selection, Hugging Face downloads and progress when the CLI reports it;
 - GUI configuration and broker testing for optional read-only MQTT/Home Assistant telemetry.
 
 The browser receives a live snapshot over `/api/events` WebSocket with polling as a

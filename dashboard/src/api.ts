@@ -108,10 +108,20 @@ export type InstallJob = {
   state: string
   exit_code?: number | null
   log_tail: string
+  elapsed_s?: number
+  progress_percent?: number | null
+  progress_text?: string
+}
+
+export type ModelFile = {
+  name: string
+  config_path: string
+  size_gib?: number | null
 }
 
 export type ModelManagement = {
   config: Record<string, Record<string, string>>
+  inventory?: Record<string, ModelFile[]>
   installs: InstallJob[]
   installer_available?: boolean
   hf_cli?: string | null
@@ -227,9 +237,15 @@ export const localAI = {
     }),
   installStatus: (id: string) =>
     request<InstallJob>('/control/model-management/install/' + encodeURIComponent(id)),
-  telemetryHistory: (seconds = 120) =>
-    request<{ samples: Snapshot['machine'][] }>(
-      '/control/telemetry/history?seconds=' + encodeURIComponent(seconds),
+  telemetryHistory: (seconds = 120, maxPoints = 900) =>
+    request<{
+      samples: Snapshot['machine'][]
+      retention_seconds?: number
+      persistent?: boolean
+      history_error?: string | null
+    }>(
+      '/control/telemetry/history?seconds=' + encodeURIComponent(seconds)
+        + '&max_points=' + encodeURIComponent(maxPoints),
     ),
   benchmark: (service: string) =>
     request<Record<string, number | string | null>>(
