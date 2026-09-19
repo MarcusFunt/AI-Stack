@@ -22,11 +22,26 @@ LLAMA_API_KEY = os.getenv("LLAMA_API_KEY", "").strip()
 if not LLAMA_API_KEY:
     raise RuntimeError("LLAMA_API_KEY must be set")
 
-app = FastAPI(title="Local AI GPU Supervisor", version="0.3.0")
+app = FastAPI(title="Local AI GPU Supervisor", version="0.4.0")
 docker_client = docker.from_env()
 transition_lock = asyncio.Lock()
 lease_condition = asyncio.Condition()
 LEASE_STATE_PATH = Path(os.getenv("LEASE_STATE_PATH", "/state/supervisor-leases.json"))
+RUNTIME_SETTINGS_PATH = Path(os.getenv("RUNTIME_SETTINGS_PATH", "/state/runtime-settings.json"))
+SERVICE_METRICS_PATH = Path(os.getenv("SERVICE_METRICS_PATH", "/state/supervisor-metrics.json"))
+
+DEFAULT_RUNTIME_SETTINGS = {
+    "mqtt": {
+        "enabled": False,
+        "host": "",
+        "port": 1883,
+        "username": "",
+        "password": "",
+        "home_assistant_discovery": True,
+        "discovery_prefix": "homeassistant",
+        "publish_interval": 2.0,
+    }
+}
 
 def load_lease_state():
     try:
@@ -99,6 +114,77 @@ sync_active_jobs()
 lease_epoch = 0
 idle_tasks = {}
 idle_deadlines = {}
+service_phase = {}
+service_metrics = {}
+try:
+    service_metrics = json.loads(SERVICE_METRICS_PATH.read_text(encoding="utf-8"))
+    if not isinstance(service_metrics, dict):
+        service_metrics = {}
+except Exception:
+    service_metrics = {}
+
+
+def persist_service_metrics():
+    SERVICE_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SERVICE_METRICS_PATH.with_name(SERVICE_METRICS_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(service_metrics, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, SERVICE_METRICS_PATH)
+
+
+def load_runtime_settings():
+    try:
+        payload = json.loads(RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            merged = json.loads(json.dumps(DEFAULT_RUNTIME_SETTINGS))
+            merged["mqtt"].update(payload.get("mqtt", {}))
+            return merged
+    except Exception:
+        pass
+    return json.loads(json.dumps(DEFAULT_RUNTIME_SETTINGS))
+
+
+def save_runtime_settings(payload):
+    mqtt = payload.get("mqtt", {}) if isinstance(payload, dict) else {}
+    current = load_runtime_settings()
+    target = current["mqtt"]
+    target["enabled"] = bool(mqtt.get("enabled", target["enabled"]))
+    target["host"] = str(mqtt.get("host", target["host"])).strip()[:253]
+    target["port"] = max(1, min(65535, int(mqtt.get("port", target["port"]))))
+    target["username"] = str(mqtt.get("username", target["username"]))[:256]
+    if "password" in mqtt and mqtt["password"] not in {None, "", "********"}:
+        target["password"] = str(mqtt["password"])[:512]
+    target["home_assistant_discovery"] = bool(
+        mqtt.get("home_assistant_discovery", target["home_assistant_discovery"])
+    )
+    target["discovery_prefix"] = str(
+        mqtt.get("discovery_prefix", target["discovery_prefix"])
+    ).strip()[:128] or "homeassistant"
+    target["publish_interval"] = max(
+        1.0, min(60.0, float(mqtt.get("publish_interval", target["publish_interval"])))
+    )
+    if target["enabled"] and not target["host"]:
+        raise HTTPException(400, "MQTT host is required when MQTT is enabled")
+    RUNTIME_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RUNTIME_SETTINGS_PATH.with_name(RUNTIME_SETTINGS_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    os.replace(tmp, RUNTIME_SETTINGS_PATH)
+    return current
+
+
+def semantic_state(service, raw_state):
+    phase = service_phase.get(service)
+    if phase in {"starting", "loading", "warming", "unloading", "error"}:
+        return phase
+    if active_jobs.get(service, 0):
+        return "running"
+    if raw_state == "running":
+        return "ready"
+    if raw_state == "restarting":
+        return "starting"
+    if raw_state in {"created", "exited", "dead", "not-created"}:
+        return "stopped"
+    return raw_state or "unknown"
+
 
 @app.middleware("http")
 async def supervisor_auth(request: Request, call_next):
@@ -164,10 +250,13 @@ async def stop_service(service: str):
     try:
         c = get_container(service)
     except HTTPException:
+        service_phase[service] = "stopped"
         return
     c.reload()
     if c.status == "running":
+        service_phase[service] = "unloading"
         await asyncio.to_thread(c.stop, timeout=30)
+    service_phase[service] = "stopped"
 
 async def wait_ready(service: str):
     spec = SERVICES[service]
@@ -210,20 +299,40 @@ async def wait_ready(service: str):
 
 async def start_and_wait_ready(service: str):
     last_exc = None
+    started = time.perf_counter()
+    was_running = False
+    service_phase[service] = "starting"
     for attempt in range(2):
         target = get_container(service)
         target.reload()
-        if target.status != "running":
+        was_running = target.status == "running"
+        if not was_running:
             await asyncio.to_thread(target.start)
+        service_phase[service] = "loading"
         try:
             await wait_ready(service)
+            elapsed = round(time.perf_counter() - started, 3)
+            service_phase[service] = "ready"
+            if not was_running:
+                metric = service_metrics.setdefault(service, {})
+                metric["last_start_s"] = elapsed
+                metric["starts"] = int(metric.get("starts", 0)) + 1
+                metric["last_started_at"] = time.time()
+                metric["last_error"] = None
+                persist_service_metrics()
             return
         except HTTPException as exc:
             last_exc = exc
+            service_phase[service] = "error"
+            metric = service_metrics.setdefault(service, {})
+            metric["last_error"] = str(exc.detail)[-1000:]
+            metric["last_error_at"] = time.time()
+            persist_service_metrics()
             target.reload()
             transient_exit = exc.status_code == 503 and target.status in {"exited", "dead"}
             if attempt == 0 and transient_exit:
                 await asyncio.sleep(1)
+                service_phase[service] = "starting"
                 continue
             raise
     raise last_exc
@@ -331,22 +440,98 @@ async def recover_idle_shutdowns():
 def health():
     return {"status": "ok", "version": app.version}
 
+
+def safe_runtime_settings(payload):
+    safe = json.loads(json.dumps(payload))
+    if safe.get("mqtt", {}).get("password"):
+        safe["mqtt"]["password"] = "********"
+        safe["mqtt"]["password_configured"] = True
+    else:
+        safe["mqtt"]["password_configured"] = False
+    return safe
+
+
+@app.get("/settings")
+def settings():
+    return safe_runtime_settings(load_runtime_settings())
+
+
+@app.put("/settings")
+async def update_settings(request: Request):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "settings body must be JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "settings body must be an object")
+    return safe_runtime_settings(save_runtime_settings(payload))
+
+
+@app.get("/doctor")
+def doctor():
+    checks = []
+    try:
+        docker_client.ping()
+        info = docker_client.info()
+        checks.append({
+            "id": "docker",
+            "label": "Docker Engine",
+            "status": "pass",
+            "detail": info.get("ServerVersion", "reachable"),
+        })
+    except Exception as exc:
+        checks.append({"id": "docker", "label": "Docker Engine", "status": "fail", "detail": str(exc)})
+
+    states = {name: container_status(name) for name in SERVICES}
+    missing = [name for name, state in states.items() if state == "not-created" and name != "lerobot"]
+    checks.append({
+        "id": "workers",
+        "label": "Worker containers",
+        "status": "warn" if missing else "pass",
+        "detail": "missing: " + ", ".join(missing) if missing else f"{len(states)} configured",
+    })
+    running = [name for name in GPU_SERVICES if states.get(name) == "running"]
+    checks.append({
+        "id": "gpu-exclusivity",
+        "label": "GPU exclusivity",
+        "status": "pass" if len(running) <= 1 else "fail",
+        "detail": ", ".join(running) if running else "no heavyweight worker running",
+    })
+    try:
+        SERVICE_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        probe = SERVICE_METRICS_PATH.parent / ".doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        checks.append({"id": "state", "label": "Persistent state", "status": "pass", "detail": str(SERVICE_METRICS_PATH.parent)})
+    except Exception as exc:
+        checks.append({"id": "state", "label": "Persistent state", "status": "fail", "detail": str(exc)})
+
+    overall = "fail" if any(c["status"] == "fail" for c in checks) else (
+        "warn" if any(c["status"] == "warn" for c in checks) else "pass"
+    )
+    return {"status": overall, "checks": checks, "services": states}
+
+
 @app.get("/status")
 def status():
     states = {name: container_status(name) for name in SERVICES}
     running = [name for name in GPU_SERVICES if states.get(name) == "running"]
     owner = running[0] if len(running) == 1 else None
     now = time.monotonic()
+    semantic = {name: semantic_state(name, state) for name, state in states.items()}
     return {
         "gpu_owner": owner,
         "running_gpu_services": running,
         "active_jobs": dict(active_jobs),
         "lease_epoch": lease_epoch,
+        "heartbeat": time.time(),
         "idle_stop_in_seconds": {
             name: max(0, round(deadline - now, 1))
             for name, deadline in idle_deadlines.items()
         },
         "services": states,
+        "service_states": semantic,
+        "service_metrics": service_metrics,
     }
 
 @app.post("/acquire/{service}")
@@ -392,7 +577,13 @@ async def reset_leases():
 @app.post("/ensure/{service}")
 async def ensure(service: str):
     await prepare_service(service)
-    return {"service": service, "status": "ready"}
+    if service in GPU_SERVICES and active_jobs.get(service, 0) == 0:
+        schedule_idle_stop(service)
+    return {
+        "service": service,
+        "status": "ready",
+        "idle_timeout": int(SERVICES[service].get("idle_timeout", 0)),
+    }
 
 @app.post("/stop/{service}")
 async def stop(service: str):

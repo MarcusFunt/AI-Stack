@@ -56,7 +56,7 @@ async def transcribe(
                 raise HTTPException(400, "upload contains no audio stream")
             duration = None
             if container.duration is not None:
-                duration = float(container.duration * av.time_base)
+                duration = float(container.duration / av.time_base)
             else:
                 stream = container.streams.audio[0]
                 if stream.duration is not None and stream.time_base is not None:

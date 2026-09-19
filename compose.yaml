@@ -27,6 +27,8 @@ services:
       SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
       LLAMA_API_KEY: ${LLAMA_API_KEY}
       LEASE_STATE_PATH: /state/supervisor-leases.json
+      RUNTIME_SETTINGS_PATH: /state/runtime-settings.json
+      SERVICE_METRICS_PATH: /state/supervisor-metrics.json
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -35,6 +37,32 @@ services:
     networks: [ai]
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  telemetry:
+    build:
+      context: ./telemetry
+    container_name: ai-stack-telemetry
+    restart: unless-stopped
+    init: true
+    gpus: all
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      TELEMETRY_INTERVAL: "1.0"
+      TELEMETRY_DISK_PATH: /workspace
+    volumes:
+      - ./models:/workspace:ro
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python3","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -58,14 +86,21 @@ services:
       SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
       LLAMA_API_KEY: ${LLAMA_API_KEY}
       CONFIG_PATH: /config/models.json
+      TELEMETRY_URL: http://telemetry:8000
+      RUNTIME_SETTINGS_PATH: /state/runtime-settings.json
+      HOST_AGENT_URL: http://host.docker.internal:8788
+      HOST_AGENT_TOKEN: ${HOST_AGENT_TOKEN}
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       supervisor:
+        condition: service_healthy
+      telemetry:
         condition: service_healthy
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8090}:8000"
     volumes:
       - ./config:/config:ro
+      - ./data/state:/state:ro
     networks: [ai]
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
@@ -89,6 +124,36 @@ services:
     networks: [ai]
     healthcheck:
       test: ["CMD","wget","-q","-O","-","http://127.0.0.1/"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  mcp:
+    build:
+      context: ./mcp
+    container_name: ai-stack-mcp
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      MCP_API_KEY: ${MCP_API_KEY}
+      MCP_URL_TOKEN: ${MCP_URL_TOKEN}
+      AI_API_KEY: ${AI_API_KEY}
+      GATEWAY_URL: http://gateway:8000
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8765}:8000"
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 10s
       timeout: 4s
       retries: 6
@@ -170,6 +235,7 @@ services:
       HF_HOME: /data/hf
     volumes:
       - qwen_tts_hf_cache:/data/hf
+      - ./models/tts:/models:ro
 
   vlm:
     <<: *gpu-base
