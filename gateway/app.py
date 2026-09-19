@@ -973,10 +973,14 @@ async def control_jobs():
 
 
 @app.get("/control/telemetry/history")
-async def telemetry_history(seconds: int = 120):
-    seconds = max(5, min(seconds, 3600))
+async def telemetry_history(seconds: int = 120, max_points: int = 900):
+    seconds = max(5, min(seconds, 7 * 24 * 3600))
+    max_points = max(60, min(max_points, 2000))
     async with httpx.AsyncClient(timeout=5) as client:
-        response = await client.get(TELEMETRY_URL + "/history", params={"seconds": seconds})
+        response = await client.get(
+            TELEMETRY_URL + "/history",
+            params={"seconds": seconds, "max_points": max_points},
+        )
         response.raise_for_status()
         return response.json()
 

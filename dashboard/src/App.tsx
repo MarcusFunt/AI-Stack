@@ -10,6 +10,7 @@ import type { ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api
 import {
   ControlOverview, HealthPanel, JobsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
 } from './OpsPanels'
+import { isBadState } from './state'
 import './index.css'
 
 type Section = 'overview' | 'models' | 'jobs' | 'health' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
@@ -43,9 +44,10 @@ function GlobalStatusStrip(props: {
   network: NetworkStatus | null
   gatewayOk: boolean
   models: ModelInfo[]
+  nowSeconds: number
 }) {
   const serviceStates = Object.values(props.snapshot?.supervisor.service_states || {})
-  const unhealthy = serviceStates.some((state) => ['error', 'dead', 'oom', 'failed'].includes(state))
+  const unhealthy = serviceStates.some((state) => isBadState(state))
   const job = props.snapshot?.jobs.active[0]
   const owner = props.snapshot?.supervisor.gpu_owner
   const ownerIds: Record<string, string> = {
@@ -54,19 +56,33 @@ function GlobalStatusStrip(props: {
   }
   const ownerModel = owner ? props.models.find((m) => m.id === ownerIds[owner]) : undefined
   const ownerLabel = ownerModel ? String(ownerModel.metadata.display_name || ownerModel.id) : owner
-  const funnel = props.network?.mcp_mode !== undefined
-    ? props.network.mcp_mode === 'public'
-    : !!props.network?.serve_status?.includes('Funnel on')
-  const systemState = !props.gatewayOk ? 'error' : unhealthy ? 'warn' : 'ready'
+  const ageSeconds = props.snapshot && props.nowSeconds
+    ? Math.max(0, props.nowSeconds - props.snapshot.timestamp)
+    : Number.POSITIVE_INFINITY
+  const telemetryState = !props.snapshot || ageSeconds > 60 ? 'error' : ageSeconds > 15 ? 'warn' : 'ready'
+  const mcpMode = props.network?.mcp_mode || 'off'
+  const warnings = [
+    unhealthy ? 'worker' : '',
+    telemetryState === 'warn' ? 'stale telemetry' : '',
+    mcpMode === 'public' ? 'public MCP' : '',
+    props.network?.legacy_443 ? 'legacy route' : '',
+  ].filter(Boolean)
+  const systemState = !props.gatewayOk || telemetryState === 'error' ? 'error' : warnings.length ? 'warn' : 'ready'
+  const systemLabel = systemState === 'ready'
+    ? 'HEALTHY'
+    : systemState === 'error'
+      ? 'ERROR'
+      : `${warnings.length} WARNING${warnings.length === 1 ? '' : 'S'}`
   return (
     <div className="global-status-strip">
-      <div><span>SYSTEM</span><StateBadge state={systemState} /></div>
+      <div className="status-summary"><span>SYSTEM</span><strong>{systemLabel}</strong><StateBadge state={systemState} /></div>
       <div><span>GPU</span><strong>{ownerLabel || 'IDLE'}</strong></div>
       <div><span>JOB</span><strong>{job ? job.phase.replaceAll('_', ' ') : 'IDLE'}</strong></div>
+      <div><span>TELEMETRY</span><StateBadge state={telemetryState} /><small>{Number.isFinite(ageSeconds) ? Math.round(ageSeconds) + 's old' : 'no sample'}</small></div>
       <div><span>MQTT</span><StateBadge state={props.snapshot?.mqtt.connected ? 'ready' : 'stopped'} /></div>
       <div><span>TAILSCALE</span><StateBadge state={props.network?.online ? 'ready' : 'stopped'} /></div>
-      <div><span>MCP</span><strong className={funnel ? 'public-exposure' : ''}>
-        {props.network ? (funnel ? 'PUBLIC' : 'PRIVATE/OFF') : 'UNKNOWN'}
+      <div><span>MCP</span><strong className={mcpMode === 'public' ? 'public-exposure' : ''}>
+        {props.network ? mcpMode.toUpperCase() : 'UNKNOWN'}
       </strong></div>
     </div>
   )
@@ -409,6 +425,14 @@ export default function App() {
   const [busyServices, setBusyServices] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
   const [gatewayOk, setGatewayOk] = useState(false)
+  const [nowSeconds, setNowSeconds] = useState(0)
+
+  useEffect(() => {
+    const updateClock = () => setNowSeconds(Date.now() / 1000)
+    updateClock()
+    const timer = window.setInterval(updateClock, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const applySnapshot = useCallback((next: Snapshot) => {
     setSnapshot(next)
@@ -521,7 +545,8 @@ export default function App() {
     section === 'studio' ? (
       <StudioPanel onStart={(name) => serviceAction(name, 'start')} busy={busyServices} />
     ) :
-    section === 'setup' ? <SetupPanel snapshot={snapshot} models={models} /> :
+    section === 'setup' ? <SetupPanel snapshot={snapshot} models={models} network={network}
+      onNavigate={(next) => setSection(next)} /> :
     section === 'network' ? <NetworkPanel network={network} onNetwork={setNetwork} /> :
     section === 'system' ? (
       <SystemPanel models={models} status={status} onStopAll={stopAll} />
@@ -555,13 +580,13 @@ export default function App() {
           </div>
           <div className="gpu-pill">
             <Cpu size={15} />
-            <span>{snapshot?.machine.gpu?.name || 'RTX 3060'} Â· {((snapshot?.machine.gpu?.vram_total_mib || 12288) / 1024).toFixed(0)} GB</span>
+            <span>{snapshot?.machine.gpu?.name || 'RTX 3060'} · {((snapshot?.machine.gpu?.vram_total_mib || 12288) / 1024).toFixed(0)} GB</span>
           </div>
         </div>
       </aside>
 
       <main>
-        <GlobalStatusStrip snapshot={snapshot} network={network} gatewayOk={gatewayOk} models={models} />
+        <GlobalStatusStrip snapshot={snapshot} network={network} gatewayOk={gatewayOk} models={models} nowSeconds={nowSeconds} />
         {section === 'overview' ? (
           <ControlOverview
             snapshot={snapshot}

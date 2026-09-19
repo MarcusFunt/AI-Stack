@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 STATE_DIR = ROOT / "data" / "state"
-HOST_AGENT_VERSION = "1.1"
+HOST_AGENT_VERSION = "1.2"
 INSTALL_JOBS = {}
 INSTALL_LOCK = threading.Lock()
 
@@ -147,6 +147,22 @@ def model_config():
         for service, keys in MODEL_KEYS.items()
     }
 
+def model_inventory():
+    inventory = {"llm": []}
+    llm_root = ROOT / "models" / "llm"
+    if llm_root.exists():
+        for path in sorted(llm_root.glob("*.gguf"), key=lambda item: item.name.lower()):
+            try:
+                size_gib = round(path.stat().st_size / 1024 / 1024 / 1024, 3)
+            except OSError:
+                size_gib = None
+            inventory["llm"].append({
+                "name": path.name,
+                "config_path": "/models/" + path.name,
+                "size_gib": size_gib,
+            })
+    return inventory
+
 def update_env(updates):
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
     remaining = dict(updates)
@@ -254,11 +270,23 @@ def install_status(job_id=None):
                 tail = Path(job["log_path"]).read_text(encoding="utf-8", errors="replace")[-5000:]
             except OSError:
                 tail = ""
+            state = "running" if code is None else ("complete" if code == 0 else "failed")
+            progress_matches = re.findall(r"(?<![\d.])(\d{1,3}(?:\.\d+)?)%", tail)
+            progress_percent = float(progress_matches[-1]) if progress_matches else None
+            if state == "complete":
+                progress_percent = 100.0
+            progress_lines = [
+                line.strip() for line in re.split(r"[\r\n]+", tail)
+                if "%" in line and line.strip()
+            ]
+            progress_text = progress_lines[-1][-500:] if progress_lines else ""
             out.append({
                 "id": jid, "repo": job["repo"], "filename": job["filename"],
                 "target": job["target"], "started_at": job["started_at"],
-                "state": "running" if code is None else ("complete" if code == 0 else "failed"),
-                "exit_code": code, "log_tail": tail,
+                "state": state, "exit_code": code, "log_tail": tail,
+                "elapsed_s": round(time.time() - job["started_at"], 1),
+                "progress_percent": progress_percent,
+                "progress_text": progress_text,
             })
         return out[0] if job_id and out else (out if not job_id else None)
 
@@ -299,6 +327,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/models/config":
                 return self.send_json(200, {
                     "config": model_config(),
+                    "inventory": model_inventory(),
                     "installs": install_status(),
                     "installer_available": bool(shutil.which("hf")),
                     "hf_cli": shutil.which("hf"),
