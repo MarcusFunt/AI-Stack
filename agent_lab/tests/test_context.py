@@ -25,7 +25,6 @@ class RepositoryContextTests(unittest.TestCase):
             self.assertNotIn("SECRET = 42", context)
             self.assertNotIn('"token":"secret"', context)
             self.assertNotIn("DO_NOT_SEND", context)
-
     def test_context_respects_byte_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -48,6 +47,34 @@ class RepositoryContextTests(unittest.TestCase):
             self.assertIn("OK = True", context)
             self.assertNotIn("bad.py", context)
             self.assertNotIn("image.png", context)
+    def test_objective_prioritizes_relevant_file_before_large_earlier_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "aaa.md").write_text("A" * 5000, encoding="utf-8")
+            target = root / "agent_lab" / "worker"
+            target.mkdir(parents=True)
+            (target / "model.py").write_text("TARGET = True\n", encoding="utf-8")
+
+            context = collect_repository_context(
+                root,
+                max_bytes=1200,
+                objective="Improve agent_lab/worker/model.py usage accounting",
+            )
+            target_marker = "===== agent_lab/worker/model.py ====="
+            filler_marker = "===== aaa.md ====="
+            self.assertIn(target_marker, context)
+            self.assertIn("TARGET = True", context)
+            self.assertIn(filler_marker, context)
+            self.assertLess(context.index(target_marker), context.index(filler_marker))
+
+    def test_objective_keeps_deterministic_fallback_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "b.py").write_text("B = 1\n", encoding="utf-8")
+            (root / "a.py").write_text("A = 1\n", encoding="utf-8")
+
+            context = collect_repository_context(root, objective="unrelated objective")
+            self.assertLess(context.index("===== a.py ====="), context.index("===== b.py ====="))
 
 
 if __name__ == "__main__":

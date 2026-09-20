@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -11,13 +12,18 @@ _IGNORED_PARTS = {
     ".git", "node_modules", "dist", "__pycache__", "data",
     "models", "third_party", ".venv", ".agent_lab_holdout",
 }
+_TOKEN_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
 
 
-def collect_repository_context(workspace: Path, max_bytes: int = 60_000) -> str:
-    pieces: list[str] = []
-    used = 0
-    files = sorted(path for path in workspace.rglob("*") if path.is_file())
-    for path in files:
+def _eligible_files(workspace: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in workspace.rglob("*"):
+        try:
+            is_file = path.is_file()
+        except OSError:
+            continue
+        if not is_file:
+            continue
         rel = path.relative_to(workspace)
         if any(part in _IGNORED_PARTS for part in rel.parts):
             continue
@@ -25,7 +31,58 @@ def collect_repository_context(workspace: Path, max_bytes: int = 60_000) -> str:
             continue
         try:
             raw = path.read_bytes()
-            text = raw.decode("utf-8")
+            raw.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        files.append(path)
+    return files
+
+
+def _objective_relevance(path: Path, workspace: Path, objective: str) -> int:
+    rel = path.relative_to(workspace).as_posix().lower()
+    name = path.name.lower()
+    objective_lower = objective.lower()
+    score = 0
+
+    if rel in objective_lower:
+        score += 10_000
+    if name in objective_lower:
+        score += 2_000
+
+    objective_tokens = set(_TOKEN_RE.findall(objective_lower))
+    path_tokens = set(_TOKEN_RE.findall(rel))
+    score += 100 * len(objective_tokens & path_tokens)
+
+    for part in path.relative_to(workspace).parts:
+        part_lower = part.lower()
+        if part_lower in objective_lower:
+            score += 25
+    return score
+
+
+def collect_repository_context(
+    workspace: Path,
+    max_bytes: int = 60_000,
+    *,
+    objective: str | None = None,
+) -> str:
+    pieces: list[str] = []
+    used = 0
+    files = _eligible_files(workspace)
+    if objective:
+        files.sort(
+            key=lambda path: (
+                -_objective_relevance(path, workspace, objective),
+                path.relative_to(workspace).as_posix(),
+            )
+        )
+    else:
+        files.sort()
+
+    for path in files:
+        rel = path.relative_to(workspace)
+        try:
+            text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
         block = f"\n===== {rel.as_posix()} =====\n{text}\n"
