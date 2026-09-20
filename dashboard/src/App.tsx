@@ -16,19 +16,48 @@ import './index.css'
 type Section = 'overview' | 'models' | 'jobs' | 'health' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
-const nav = [
-  ['overview', Activity, 'Overview'],
-  ['models', BrainCircuit, 'Models'],
-  ['jobs', Gauge, 'Jobs'],
-  ['health', Cpu, 'Health'],
-  ['chat', MessageSquareText, 'Chat'],
-  ['speech', AudioLines, 'Speech'],
-  ['vision', Bot, 'Robot vision'],
-  ['studio', Sparkles, 'Studio'],
-  ['setup', Wrench, 'Setup'],
-  ['network', Network, 'Network'],
-  ['system', Wrench, 'API'],
+const navGroups = [
+  {
+    label: 'Monitor',
+    items: [
+      ['overview', Activity, 'Overview'],
+      ['models', BrainCircuit, 'Models'],
+      ['jobs', Gauge, 'Jobs'],
+      ['health', Cpu, 'Health'],
+    ],
+  },
+  {
+    label: 'Work',
+    items: [
+      ['chat', MessageSquareText, 'Chat'],
+      ['speech', AudioLines, 'Speech'],
+      ['vision', Bot, 'Robot vision'],
+      ['studio', Sparkles, 'Studio'],
+    ],
+  },
+  {
+    label: 'Configure',
+    items: [
+      ['setup', Wrench, 'Setup'],
+      ['network', Network, 'Network'],
+      ['system', Wrench, 'API'],
+    ],
+  },
 ] as const
+
+const sectionMeta: Record<Section, { title: string; context: string }> = {
+  overview: { title: 'Overview', context: 'Machine and scheduler' },
+  models: { title: 'Models', context: 'Fleet and runtime configuration' },
+  jobs: { title: 'Jobs', context: 'Recent inference activity' },
+  health: { title: 'Health', context: 'Control plane and diagnostics' },
+  chat: { title: 'Chat', context: 'Local language models' },
+  speech: { title: 'Speech', context: 'Transcription and voice' },
+  vision: { title: 'Robot vision', context: 'Visual reasoning' },
+  studio: { title: 'Studio', context: 'Image and video generation' },
+  setup: { title: 'Setup', context: 'Workstation configuration' },
+  network: { title: 'Network', context: 'Remote access and exposure' },
+  system: { title: 'API', context: 'Local interface and control' },
+}
 
 function prettyError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
@@ -552,51 +581,83 @@ export default function App() {
       <SystemPanel models={models} status={status} onStopAll={stopAll} />
     ) : null
 
+  const meta = sectionMeta[section]
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><Sparkles size={18} /></div>
-          <div><strong>LOCAL AI</strong><span>MARCUS COMPUTER</span></div>
+          <div className="brand-mark"><BrainCircuit size={19} /></div>
+          <div><strong>Local AI</strong><span>Marcus Computer</span></div>
         </div>
-        <nav>
-          {nav.map(([key, Icon, label]) => (
-            <button
-              key={key}
-              className={section === key ? 'active' : ''}
-              onClick={() => setSection(key)}
-            >
-              <Icon size={17} /><span>{label}</span>
-            </button>
+
+        <nav className="side-nav">
+          {navGroups.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <div className="nav-group-label">{group.label}</div>
+              {group.items.map(([key, Icon, label]) => (
+                <button
+                  key={key}
+                  className={section === key ? 'active' : ''}
+                  onClick={() => setSection(key)}
+                >
+                  <Icon size={17} strokeWidth={1.8} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
+
         <div className="sidebar-foot">
           <div className="machine-state">
             <StatusDot status={gatewayOk ? 'running' : 'offline'} />
             <div>
-              <strong>{gatewayOk ? 'Gateway online' : 'Gateway unavailable'}</strong>
-              <span>{snapshot?.mqtt.connected ? 'MQTT connected' : 'localhost:3000'}</span>
+              <strong>Marcus Computer</strong>
+              <span>{gatewayOk ? 'Control plane online' : 'Control plane unavailable'}</span>
             </div>
           </div>
           <div className="gpu-pill">
-            <Cpu size={15} />
-            <span>{snapshot?.machine.gpu?.name || 'RTX 3060'} · {((snapshot?.machine.gpu?.vram_total_mib || 12288) / 1024).toFixed(0)} GB</span>
+            <Cpu size={15} strokeWidth={1.8} />
+            <span>{snapshot?.machine.gpu?.name || 'RTX 3060'}</span>
+            <b>{((snapshot?.machine.gpu?.vram_total_mib || 12288) / 1024).toFixed(0)} GB</b>
           </div>
         </div>
       </aside>
 
-      <main>
-        <GlobalStatusStrip snapshot={snapshot} network={network} gatewayOk={gatewayOk} models={models} nowSeconds={nowSeconds} />
-        {section === 'overview' ? (
-          <ControlOverview
-            snapshot={snapshot}
-            models={models}
-            busy={busyServices}
-            onStart={(name) => serviceAction(name, 'start')}
-            onStop={(name) => serviceAction(name, 'stop')}
-            onRefresh={() => void refresh(true)}
-          />
-        ) : content}
+      <main className="main-shell">
+        <header className="app-topbar">
+          <div className="topbar-context">
+            <div className="topbar-path">
+              <span>Local AI</span><ChevronRight size={13} /><strong>{meta.title}</strong>
+            </div>
+            <p>{meta.context}</p>
+          </div>
+          <div className="topbar-state">
+            <div className="topbar-chip">
+              <StatusDot status={gatewayOk ? 'running' : 'offline'} />
+              <span>{gatewayOk ? 'Gateway online' : 'Gateway offline'}</span>
+            </div>
+            <div className="topbar-chip">
+              <Cpu size={14} />
+              <span>{snapshot?.machine.gpu ? Math.round(snapshot.machine.gpu.utilization_percent) + '% GPU' : 'GPU —'}</span>
+            </div>
+          </div>
+        </header>
+
+        <div className="main-content">
+          <GlobalStatusStrip snapshot={snapshot} network={network} gatewayOk={gatewayOk} models={models} nowSeconds={nowSeconds} />
+          {section === 'overview' ? (
+            <ControlOverview
+              snapshot={snapshot}
+              models={models}
+              busy={busyServices}
+              onStart={(name) => serviceAction(name, 'start')}
+              onStop={(name) => serviceAction(name, 'stop')}
+              onRefresh={() => void refresh(true)}
+            />
+          ) : content}
+        </div>
         {error && <div className="global-error error-banner">{error}</div>}
       </main>
     </div>
