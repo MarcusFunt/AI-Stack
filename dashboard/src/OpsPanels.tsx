@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { localAI } from './api'
 import type {
-  DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, RuntimeSettings, Snapshot,
+  ApiCapabilities, DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, RuntimeSettings, Snapshot,
 } from './api'
 import { isBadState } from './state'
 
@@ -31,6 +31,11 @@ function duration(seconds?: number | null) {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   return m + 'm ' + String(s).padStart(2, '0') + 's'
+}
+
+function cleanLogText(value: string) {
+  const escape = String.fromCharCode(27)
+  return value.replace(new RegExp(escape + '\\[[0-9;]*m', 'g'), '')
 }
 
 function tone(state: string) {
@@ -315,7 +320,11 @@ export function ControlOverview(props: {
           <span>JOBS</span><span>LOAD</span><span>AUTO STOP</span><span>LAST ERROR</span><span>ACTION</span>
         </div>
         {Object.keys(status?.services || {}).map((name) => {
-          const state = status?.service_states?.[name] || status?.services[name] || 'unknown'
+          const rawState = status?.services[name] || 'unknown'
+          const notCreated = rawState === 'not-created'
+          const state = notCreated
+            ? 'not installed'
+            : (status?.service_states?.[name] || rawState)
           const model = serviceModel(name, props.models)
           const metric = status?.service_metrics?.[name]
           const idle = status?.idle_stop_in_seconds[name]
@@ -324,7 +333,7 @@ export function ControlOverview(props: {
           return (
             <div className="fleet-row" key={'fleet-' + name}>
               <strong>{labels[name] || name}</strong>
-              <span>{model ? String(model.metadata.display_name || model.id) : 'managed worker'}</span>
+              <span>{model ? String(model.metadata.display_name || model.id) : notCreated ? 'optional worker' : 'managed worker'}</span>
               <StateBadge state={state} />
               <span className={status?.gpu_owner === name ? 'owner-pill' : ''}>
                 {status?.gpu_owner === name ? 'OWNER' : '—'}
@@ -337,11 +346,15 @@ export function ControlOverview(props: {
                 {metric?.last_error || '—'}
               </span>
               <button className={running ? 'fleet-action stop' : 'fleet-action'}
-                disabled={props.busy.has(name) || jobs > 0}
-                aria-label={(running ? 'Stop ' : 'Load ') + (labels[name] || name)}
+                disabled={notCreated || props.busy.has(name) || jobs > 0}
+                title={notCreated ? 'This optional worker has not been provisioned.' : undefined}
+                aria-label={notCreated
+                  ? (labels[name] || name) + ' not installed'
+                  : (running ? 'Stop ' : 'Load ') + (labels[name] || name)}
                 onClick={() => running ? props.onStop(name) : props.onStart(name)}>
                 {props.busy.has(name) ? <RefreshCw className="spin" size={14} /> :
-                  running ? <><Square size={13} /> Stop</> : <><Play size={13} /> Load</>}
+                  notCreated ? 'Not installed' :
+                    running ? <><Square size={13} /> Stop</> : <><Play size={13} /> Load</>}
               </button>
             </div>
           )
@@ -593,6 +606,102 @@ export function ModelsPanel({ models, snapshot }: { models: ModelInfo[]; snapsho
   )
 }
 
+export function LogsPanel({ snapshot }: { snapshot: Snapshot | null }) {
+  const services = Object.entries(snapshot?.supervisor.services || {})
+  const available = services.filter(([, state]) => state !== 'not-created')
+  const [service, setService] = useState('llm')
+  const [tail, setTail] = useState(200)
+  const [logs, setLogs] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+
+  const refreshLogs = async () => {
+    setBusy(true)
+    try {
+      const result = await localAI.logs(service, tail)
+      setLogs(cleanLogText(result.logs))
+      setError('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const result = await localAI.logs(service, tail)
+        if (!alive) return
+        setLogs(cleanLogText(result.logs))
+        setError('')
+      } catch (err) {
+        if (alive) setError(err instanceof Error ? err.message : String(err))
+      }
+    }
+    const initial = window.setTimeout(() => void load(), 0)
+    const timer = autoRefresh ? window.setInterval(() => void load(), 4000) : 0
+    return () => {
+      alive = false
+      window.clearTimeout(initial)
+      if (timer) window.clearInterval(timer)
+    }
+  }, [service, tail, autoRefresh])
+
+  const rawState = snapshot?.supervisor.services?.[service] || 'unknown'
+  const state = rawState === 'not-created'
+    ? 'not installed'
+    : (snapshot?.supervisor.service_states?.[service] || rawState)
+
+  return (
+    <section className="workspace">
+      <div className="workspace-head">
+        <div><span className="eyebrow">DIAGNOSTICS</span><h2>Worker logs</h2>
+          <p className="logs-subtitle">Read-only container output through the authenticated supervisor path.</p></div>
+        <div className="logs-toolbar">
+          <label>Service
+            <select value={service} onChange={(event) => setService(event.target.value)}>
+              {services.map(([name, raw]) => (
+                <option key={name} value={name} disabled={raw === 'not-created'}>
+                  {labels[name] || name}{raw === 'not-created' ? ' · not installed' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>Lines
+            <select value={tail} onChange={(event) => setTail(Number(event.target.value))}>
+              {[50, 100, 200, 500, 1000].map((count) => (
+                <option key={count} value={count}>{count}</option>
+              ))}
+            </select>
+          </label>
+          <label className="logs-auto">
+            <input type="checkbox" checked={autoRefresh}
+              onChange={(event) => setAutoRefresh(event.target.checked)} />
+            Auto refresh
+          </label>
+          <button className="secondary no-margin" onClick={() => void refreshLogs()} disabled={busy}>
+            <RefreshCw className={busy ? 'spin' : ''} size={14} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      <div className="logs-summary">
+        <div><strong>{labels[service] || service}</strong><span>{rawState}</span></div>
+        <StateBadge state={state} />
+        <span>{autoRefresh ? 'Refreshing every 4 seconds' : 'Paused'}</span>
+      </div>
+      <div className="log-console">
+        {logs ? <pre>{logs}</pre> : <div className="agent-empty">No log output available.</div>}
+      </div>
+      {error && <div className="error-banner">{error}</div>}
+      {!available.length && <div className="error-banner">No managed worker containers are available.</div>}
+    </section>
+  )
+}
+
 export function JobsPanel({ snapshot }: { snapshot: Snapshot | null }) {
   const jobs = snapshot?.jobs
   const all = [...(jobs?.active || []), ...(jobs?.recent || [])]
@@ -735,9 +844,13 @@ export function HealthPanel({ snapshot }: { snapshot: Snapshot | null }) {
       </div>
       <div className="section-title ops-title"><div><span className="eyebrow">WORKERS</span><h2>Semantic states</h2></div></div>
       <div className="health-worker-list">
-        {Object.entries(supervisor?.service_states || {}).map(([name, state]) => (
-          <div key={name}><strong>{labels[name] || name}</strong><span>{supervisor?.services[name]}</span><StateBadge state={state} /></div>
-        ))}
+        {Object.entries(supervisor?.service_states || {}).map(([name, state]) => {
+          const rawState = supervisor?.services[name] || 'unknown'
+          const displayState = rawState === 'not-created' ? 'not installed' : state
+          return (
+            <div key={name}><strong>{labels[name] || name}</strong><span>{rawState}</span><StateBadge state={displayState} /></div>
+          )
+        })}
       </div>
       <SelfTestPanel snapshot={snapshot} />
     </section>
@@ -976,6 +1089,20 @@ export function NetworkPanel(props: {
   const [initialized, setInitialized] = useState(false)
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
+  const [capabilities, setCapabilities] = useState<ApiCapabilities | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const initial = window.setTimeout(() => {
+      void localAI.capabilities()
+        .then((next) => { if (alive) setCapabilities(next) })
+        .catch(() => { if (alive) setCapabilities(null) })
+    }, 0)
+    return () => {
+      alive = false
+      window.clearTimeout(initial)
+    }
+  }, [])
 
   const effectiveDashboardEnabled = initialized
     ? dashboardEnabled
@@ -1169,15 +1296,19 @@ export function NetworkPanel(props: {
       </div>
       <div className="tool-card api-contract">
         <div className="setup-card-title"><div><Settings2 size={19} /><div>
-          <span className="eyebrow">UNIFIED API</span><h3>OpenAI-style local endpoints</h3></div></div>
-          <StateBadge state="ready" /></div>
+          <span className="eyebrow">UNIFIED API</span><h3>Gateway-advertised endpoints</h3></div></div>
+          <StateBadge state={capabilities ? 'ready' : 'waiting'} /></div>
+        <p className="api-contract-meta">{capabilities
+          ? capabilities.name + ' ' + capabilities.version + ' · '
+            + capabilities.transport + ' · ' + capabilities.authentication
+          : 'Loading the current API contract from the gateway…'}</p>
         <div className="api-endpoint-grid">
-          <code>POST /api/v1/chat/completions</code>
-          <code>POST /api/v1/audio/transcriptions</code>
-          <code>POST /api/v1/audio/speech</code>
-          <code>POST /api/v1/vision/analyze</code>
-          <code>GET /api/v1/models</code>
-          <code>GET /api/v1/system/status</code>
+          {Object.entries(capabilities?.endpoints || {}).map(([name, endpoint]) => (
+            <div className="api-endpoint-item" key={name}>
+              <span>{name.replaceAll('_', ' ')}</span>
+              <code>{'/api' + endpoint}</code>
+            </div>
+          ))}
         </div>
       </div>
 

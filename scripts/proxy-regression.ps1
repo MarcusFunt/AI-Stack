@@ -12,6 +12,11 @@ function Assert-GatewayProxy {
   if(-not $models.data -or @($models.data).Count -lt 1) {
     throw "dashboard proxy model discovery failed"
   }
+
+  $agentLab = Invoke-RestMethod "http://127.0.0.1:3000/agent-lab-api/health" -TimeoutSec 10
+  if($agentLab.service -ne "agent-lab" -or $agentLab.status -notin @("ok","degraded")) {
+    throw "dashboard Agent Lab proxy failed: $($agentLab | ConvertTo-Json -Compress)"
+  }
 }
 
 Assert-GatewayProxy
