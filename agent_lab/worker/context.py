@@ -9,7 +9,7 @@ _ALLOWED_SUFFIXES = {
 }
 _IGNORED_PARTS = {
     ".git", "node_modules", "dist", "__pycache__", "data",
-    "models", "third_party", ".venv",
+    "models", "third_party", ".venv", ".agent_lab_holdout",
 }
 
 

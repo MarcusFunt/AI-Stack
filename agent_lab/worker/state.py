@@ -16,5 +16,6 @@ class AgentState(TypedDict, total=False):
     proposed_edits: list[dict[str, str]]
     applied_edits: list[str]
     harness_result: dict[str, Any]
+    holdout_result: dict[str, Any]
     final_status: str
     error: str

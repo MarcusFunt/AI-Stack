@@ -137,6 +137,7 @@ Maintenance:
 .\scripts\ai.ps1 test-leases
 .\scripts\ai.ps1 test-proxy
 .\scripts\ai.ps1 test-agent-lab
+.\scripts\ai.ps1 bench-agent-lab
 .\scripts\ai.ps1 burn-in
 .\scripts\ai.ps1 bench llm
 .\scripts\ai.ps1 bench reasoning
@@ -178,21 +179,27 @@ The primary coding model is `ai-stack/local-fast` with a 32,768-token runtime co
 
 Agent Lab is the experimental LangGraph subsystem for reproducible local-agent development. Its API binds only to `127.0.0.1:8770`. A run is persisted in SQLite, resolved against a committed Git revision, and executed in a detached worktree created from Agent Lab's own bare mirror.
 
-The controller does not mount the live working tree, models, or the Docker socket. It receives only the repository's `.git` directory read-only plus `data/agent-lab` as private writable state. The v0.1 worker gives the model a bounded repository context and accepts at most five exact text replacements per iteration; it does not expose an unrestricted shell.
+The controller does not mount the live working tree, models, or the Docker socket. It receives only the repository's `.git` directory read-only plus `data/agent-lab` as private writable state. The v0.3 worker gives the model a bounded repository context and accepts at most five preflighted file operations per iteration. It can replace exact text or create a small new source/config/documentation file, but it does not expose an unrestricted shell. Test files, hidden holdouts, `.git`, and environment files are protected by the patch layer unless test editing is explicitly enabled for a task.
 
 Repository tests execute in a separate `agent-lab-sandbox` container. That sandbox has no network namespace, no AI/API credentials, a read-only mount of run workspaces, and only a root-owned file queue for returning structured results. The test subprocess is demoted to an unprivileged UID before repository code executes. This keeps arbitrary test/import code away from the controller's gateway credential and experiment database.
 
-Current v0.1 workflow:
+Current v0.3 workflow:
 - `POST /runs` creates a persisted isolated run and worktree.
 - `POST /runs/{id}/execute` starts the LangGraph repair loop.
 - `GET /runs/{id}` and `GET /runs/{id}/events` expose structured status and history.
-- `POST /runs/{id}/cancel` cancels a queued/ready run; active cancellation is not implemented yet.
+- `POST /runs/{id}/cancel` cancels queued runs immediately and active runs cooperatively. Active runs enter `cancelling` and cannot promote a candidate after cancellation is requested.
 - `POST /runs/{id}/cleanup` removes a terminal run's private worktree while retaining its history.
 - `GET /harnesses` lists available evaluation harnesses.
+- `GET /benchmarks/latest`, `GET /benchmarks/reference`, and `GET /benchmarks/history` expose persisted benchmark evidence. `latest` is the most recent execution; `reference` is the full-suite known-good regression baseline.
+- `GET /runs/{id}/promotion-review` performs a read-only candidate review. It checks run evidence, private candidate-ref integrity, base freshness, diff size, binary/deletion changes, protected paths, and self-modification policy. It never merges or mutates the source checkout.
 
-Only the `python-unit` harness exists in v0.1. By default a run must begin with a failing baseline so an unrelated already-green test suite cannot be treated as evidence that an objective was solved. Multi-harness execution, active-run cancellation, benchmark/holdout promotion, harness mutation, self-modification, and automatic promotion are intentionally deferred.
+The harness registry currently includes `python-unit` and `python-syntax`. Python-unit tasks can include a hidden `.agent_lab_holdout` suite: visible tests drive repair iterations, while hidden tests are excluded from model context and run only after a visible pass. By default a run must begin with a failing baseline so an unrelated already-green test suite cannot be treated as evidence that an objective was solved. Controller restarts recover stale preparing/running/cancelling records as errors instead of leaving them permanently in-flight.
 
-Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab`.
+The local benchmark is `agent-lab-core-v2`: 13 repair tasks covering behavioral bugs, hidden edge cases, syntax repair, new-module creation, and combined create+repair changes. The current `local-fast` reference is 13/13 on this small diagnostic suite; it is a plumbing/capability baseline, not a broad coding-quality claim. Full compatible runs compare case-by-case against a separate known-good reference. The reference advances only after a full-suite run with no failures and no regressions; subset/debug runs may update `latest` but cannot replace the reference. `.\scripts\ai.ps1 bench-agent-lab` fails on any current case failure or reference regression. The latest full v0.3 run had 0 regressions and a pass-rate delta of 0.
+
+Promotion remains deliberately manual. A small non-Agent-Lab candidate can become eligible for manual promotion review, but automatic promotion is disabled. Changes to Agent Lab or its control-plane integration are explicitly blocked by the review gate until candidate-specific benchmark execution exists, so the subsystem cannot use its own current benchmark result as evidence for untested self-modification.
+
+Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab` and the real-model regression gate with `.\scripts\ai.ps1 bench-agent-lab`. Multi-harness execution within a single run, model-token accounting, candidate-specific self-modification benchmarks, harness mutation, and automatic promotion remain deferred.
 
 ## Logical models
 

@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Query, status
 
 from . import __version__
 from .controller import AgentLabController
-from .schemas import EventRecord, RunCreate, RunRecord
+from .schemas import EventRecord, PromotionReview, RunCreate, RunRecord
 
 
 app = FastAPI(title="AI Stack Agent Lab", version=__version__)
@@ -31,6 +31,29 @@ def health() -> dict:
 @app.get("/harnesses")
 def harnesses() -> list[dict]:
     return controller().list_harnesses()
+
+
+@app.get("/benchmarks/latest")
+def latest_benchmark() -> dict:
+    try:
+        return controller().latest_benchmark()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="no benchmark results") from exc
+
+
+@app.get("/benchmarks/reference")
+def benchmark_reference() -> dict:
+    try:
+        return controller().benchmark_reference()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="no benchmark reference") from exc
+
+
+@app.get("/benchmarks/history")
+def benchmark_history(
+    limit: int = Query(default=20, ge=1, le=200),
+) -> list[dict]:
+    return controller().benchmark_history(limit)
 
 
 @app.post("/runs", response_model=RunRecord, status_code=status.HTTP_201_CREATED)
@@ -76,6 +99,14 @@ def cancel_run(run_id: str) -> RunRecord:
     try:
         return controller().cancel_run(run_id)
     except (KeyError, ValueError) as exc:
+        raise _not_found_or_bad_request(exc) from exc
+
+
+@app.get("/runs/{run_id}/promotion-review", response_model=PromotionReview)
+def promotion_review(run_id: str) -> PromotionReview:
+    try:
+        return controller().promotion_review(run_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
         raise _not_found_or_bad_request(exc) from exc
 
 

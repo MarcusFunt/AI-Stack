@@ -65,3 +65,33 @@ class PythonUnitHarness(Harness):
             checks=[check],
             metrics={"returncode": returncode, "duration_s": duration},
         )
+
+    def execute_holdout(self, task: TaskSpec, workspace: Path) -> HarnessResult | None:
+        holdout_dir = workspace / ".agent_lab_holdout"
+        if not holdout_dir.is_dir():
+            return None
+        if self.sandbox is None:
+            return None
+        timeout_s = min(task.budget.wall_time_minutes * 60, 600)
+        payload = self.sandbox.python_unit(
+            workspace.parent.name, timeout_s, suite="holdout"
+        )
+        duration = float(payload.get("duration_s", 0.0))
+        output = str(payload.get("output", ""))[-20_000:]
+        returncode = int(payload.get("returncode", 1))
+        no_tests = "Ran 0 tests" in output
+        passed = returncode == 0 and not no_tests
+        return HarnessResult(
+            harness_id=self.manifest.id,
+            harness_version=self.manifest.version,
+            status="passed" if passed else "failed",
+            checks=[
+                HarnessCheck(
+                    id="holdout-unittest",
+                    status="passed" if passed else "failed",
+                    duration_s=duration,
+                    message=output,
+                )
+            ],
+            metrics={"returncode": returncode, "duration_s": duration, "holdout": True},
+        )

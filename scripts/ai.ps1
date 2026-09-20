@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Position=0)]
-  [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","test-proxy","test-agent-lab","burn-in","bench","logs","down")]
+  [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","test-proxy","test-agent-lab","bench-agent-lab","burn-in","bench","logs","down")]
   [string]$Action = "status",
   [Parameter(Position=1)]
   [ValidateSet("gateway","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
@@ -262,6 +262,16 @@ switch ($Action) {
     Start-ControlPlane
     & docker run --rm ai-stack-agent-lab python -m unittest discover -s agent_lab/tests -v
     if ($LASTEXITCODE -ne 0) { throw "Agent Lab regression suite failed" }
+  }
+  "bench-agent-lab" {
+    Start-ControlPlane
+    try {
+      & docker exec ai-stack-agent-lab python -m agent_lab.benchmarks --fail-on-regression
+      if ($LASTEXITCODE -ne 0) { throw "Agent Lab benchmark failed" }
+    }
+    finally {
+      & $PSCommandPath stop-all
+    }
   }
   "burn-in" {
     & (Join-Path $PSScriptRoot "burn-in.ps1")
