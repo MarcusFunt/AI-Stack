@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "features": [
+    {
+      "slug": "harness-ranking",
+      "objective": "Add HarnessRegistry.rank(task, workspace) in agent_lab/harnesses/registry.py. Return deterministic dictionaries with keys id, version, applicability, selected. Respect allowed_harnesses. Sort by descending applicability then manifest.id ascending for ties. Refactor select() to use the same ordering while preserving required_harnesses behavior.",
+      "context_include": ["agent_lab/harnesses", "agent_lab/schemas.py"],
+      "context_exclude": ["agent_lab/tests"],
+      "max_attempts": 2,
+      "sealed_repeats": 2,
+      "public_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.harnesses.registry import HarnessRegistry\nfrom agent_lab.schemas import TaskSpec\nwith TemporaryDirectory() as td:\n p=Path(td); (p/'x.py').write_text('x=1\\n')\n t=TaskSpec(objective='x',task_type='python')\n r=HarnessRegistry(); rows=r.rank(t,p)\n assert rows and all({'id','version','applicability','selected'} <= set(x) for x in rows)\n assert sum(bool(x['selected']) for x in rows)==1\n chosen=next(x['id'] for x in rows if x['selected'])\n assert r.select(t,p).manifest.id==chosen\nprint('PUBLIC_OK')",
+      "hidden_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.harnesses.base import Harness,HarnessManifest\nfrom agent_lab.harnesses.registry import HarnessRegistry\nfrom agent_lab.schemas import HarnessResult,TaskSpec\nclass H(Harness):\n def __init__(self,i): self.manifest=HarnessManifest(i,'1',('python',),i)\n def applicability(self,t,w): return 0.5\n def execute(self,t,w): return HarnessResult(harness_id=self.manifest.id,harness_version='1',status='passed')\nwith TemporaryDirectory() as td:\n p=Path(td); (p/'x.py').write_text('x=1\\n')\n r=HarnessRegistry([H('zeta'),H('alpha')])\n t=TaskSpec(objective='x',task_type='python',allowed_harnesses=['zeta','alpha'])\n rows=r.rank(t,p)\n assert [x['id'] for x in rows]==['alpha','zeta']\n assert rows[0]['selected'] is True and rows[1]['selected'] is False\nprint('HIDDEN_OK')"
+    },
+    {
+      "slug": "patch-preview",
+      "objective": "Add preview_exact_edits(workspace, edits, allow_test_edits=False) in agent_lab/worker/patches.py. It must perform the same validation as apply_exact_edits without writing anything and return exact keys files, operations, total_bytes. Refactor shared planning logic so preview and apply cannot drift.",
+      "context_include": ["agent_lab/worker/patches.py"],
+      "context_exclude": ["agent_lab/tests"],
+      "edit_include": ["agent_lab/worker/patches.py"],
+      "edit_exclude": ["agent_lab/tests", "agent_eval", "scripts", "config"],
+      "max_attempts": 2,
+      "sealed_repeats": 2,
+      "public_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.worker.patches import preview_exact_edits\nwith TemporaryDirectory() as td:\n p=Path(td); f=p/'a.py'; f.write_text('x = 1\\n')\n edits=[{'op':'replace','path':'a.py','old':'x = 1','new':'x = 2'},{'op':'create','path':'b.py','content':'y = 3\\n'}]\n m=preview_exact_edits(p,edits)\n assert set(m)=={'files','operations','total_bytes'} and m['files']==['a.py','b.py'] and m['operations']==2\n assert f.read_text()=='x = 1\\n' and not (p/'b.py').exists()\nprint('PUBLIC_OK')",
+      "hidden_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.worker.patches import PatchError,preview_exact_edits\nwith TemporaryDirectory() as td:\n p=Path(td); (p/'a.py').write_text('value=1\\n')\n try:\n  preview_exact_edits(p,[{'op':'replace','path':'a.py','old':'missing','new':'x'}])\n  raise AssertionError('ambiguous invalid edit accepted')\n except PatchError: pass\n assert (p/'a.py').read_text()=='value=1\\n'\n try:\n  preview_exact_edits(p,[{'op':'create','path':'.env','content':'SECRET=1'}])\n  raise AssertionError('secret path accepted')\n except PatchError: pass\nprint('HIDDEN_OK')"
+    },
+    {
+      "slug": "context-stats",
+      "objective": "Add collect_repository_context_with_stats(workspace, max_bytes=60000, objective=None, include=None, exclude=None) in agent_lab/worker/context.py. Return (text, stats) where stats has exact keys files_included, bytes_used, truncated. Refactor collect_repository_context to delegate to it while preserving output and scoping behavior.",
+      "context_include": ["agent_lab/worker/context.py"],
+      "context_exclude": ["agent_lab/tests"],
+      "edit_include": ["agent_lab/worker/context.py"],
+      "edit_exclude": ["agent_lab/tests", "agent_eval", "scripts", "config"],
+      "max_attempts": 2,
+      "sealed_repeats": 2,
+      "public_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.worker.context import collect_repository_context,collect_repository_context_with_stats\nwith TemporaryDirectory() as td:\n p=Path(td); (p/'a.py').write_text('A=1\\n'); (p/'b.md').write_text('hello\\n')\n text,stats=collect_repository_context_with_stats(p,max_bytes=5000)\n assert text==collect_repository_context(p,max_bytes=5000)\n assert set(stats)=={'files_included','bytes_used','truncated'}\n assert stats['files_included']==2 and stats['bytes_used']==len(text.encode()) and stats['truncated'] is False\nprint('PUBLIC_OK')",
+      "hidden_validator": "from pathlib import Path\nfrom tempfile import TemporaryDirectory\nfrom agent_lab.worker.context import collect_repository_context_with_stats\nwith TemporaryDirectory() as td:\n p=Path(td); (p/'target.py').write_text('TARGET=1\\n'); (p/'huge.md').write_text('x'*5000)\n text,stats=collect_repository_context_with_stats(p,max_bytes=700,objective='target.py')\n assert 'TARGET=1' in text\n assert stats['bytes_used']==len(text.encode()) and stats['bytes_used']<=700\n assert stats['truncated'] is True and stats['files_included']>=1\nprint('HIDDEN_OK')"
+    }
+  ]
+}

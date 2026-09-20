@@ -56,6 +56,44 @@ class SandboxClient:
         request.unlink(missing_ok=True)
         raise SandboxError(f"sandbox job {job_id} timed out waiting for a result")
 
+    def python_validator(
+        self,
+        run_id: str,
+        code: str,
+        timeout_s: int = 120,
+    ) -> dict[str, Any]:
+        if not isinstance(code, str) or not code.strip():
+            raise SandboxError("validator code is empty")
+        if len(code.encode("utf-8")) > 50_000:
+            raise SandboxError("validator code exceeds 50000 bytes")
+        job_id = uuid.uuid4().hex
+        request = self.requests / f"{job_id}.json"
+        result = self.results / f"{job_id}.json"
+        bounded_timeout = max(1, min(int(timeout_s), 600))
+        self._atomic_json(
+            request,
+            {
+                "job_id": job_id,
+                "run_id": run_id,
+                "kind": "python-validator",
+                "code": code,
+                "timeout_s": bounded_timeout,
+            },
+        )
+        deadline = time.monotonic() + max(15, bounded_timeout + 15)
+        while time.monotonic() < deadline:
+            if result.exists():
+                try:
+                    payload = json.loads(result.read_text(encoding="utf-8"))
+                finally:
+                    result.unlink(missing_ok=True)
+                if payload.get("error"):
+                    raise SandboxError(str(payload["error"]))
+                return payload
+            time.sleep(0.1)
+        request.unlink(missing_ok=True)
+        raise SandboxError(f"sandbox job {job_id} timed out waiting for a result")
+
     def healthy(self, max_age_s: float = 10.0) -> bool:
         heartbeat = self.root / "heartbeat.json"
         try:

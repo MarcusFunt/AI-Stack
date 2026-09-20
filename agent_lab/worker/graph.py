@@ -89,7 +89,12 @@ class AgentRunner:
 
     def _inspect(self, state: AgentState) -> dict:
         self._guard()
-        context = collect_repository_context(self.workspace, objective=self.task.objective)
+        context = collect_repository_context(
+            self.workspace,
+            objective=self.task.objective,
+            include=self.task.context_include,
+            exclude=self.task.context_exclude,
+        )
         self.emit("repository_inspected", {"context_chars": len(context)})
         return {"repo_context": context, "iteration": 0, "applied_edits": []}
 
@@ -128,7 +133,12 @@ class AgentRunner:
     def _propose(self, state: AgentState) -> dict:
         self._guard()
         iteration = int(state.get("iteration", 0)) + 1
-        context = collect_repository_context(self.workspace, objective=self.task.objective)
+        context = collect_repository_context(
+            self.workspace,
+            objective=self.task.objective,
+            include=self.task.context_include,
+            exclude=self.task.context_exclude,
+        )
         remaining = self._remaining_wall_time_seconds()
         self.emit(
             "model_iteration_started",
@@ -185,6 +195,8 @@ class AgentRunner:
                 self.workspace,
                 edits,
                 allow_test_edits=self.task.allow_test_edits,
+                include=self.task.edit_include,
+                exclude=self.task.edit_exclude,
             )
         except (PatchError, OSError, UnicodeError) as exc:
             message = f"patch rejected: {exc}"

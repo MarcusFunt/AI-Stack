@@ -46,6 +46,46 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(result["returncode"], 0, result["output"])
             self.assertIn("OK", result["output"])
 
+    @unittest.skipUnless(
+        os.environ.get("AGENT_LAB_SANDBOX_TEST") == "1",
+        "run in the agent-lab-sandbox container",
+    )
+    def test_python_validator_can_import_candidate_without_controller_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            workspace = runs / ("f" * 32) / "workspace"
+            workspace.mkdir(parents=True)
+            for path in (root, runs, workspace.parent, workspace):
+                path.chmod(0o755)
+            (workspace / "candidate_module.py").write_text(
+                "VALUE = 7\n",
+                encoding="utf-8",
+            )
+            (workspace / "candidate_module.py").chmod(0o644)
+
+            previous_root = sandbox.RUNS_ROOT
+            previous_secret = os.environ.get("AI_API_KEY")
+            sandbox.RUNS_ROOT = runs.resolve()
+            os.environ["AI_API_KEY"] = "must-not-reach-validator"
+            try:
+                result = sandbox.execute_python_validator(
+                    "f" * 32,
+                    "import os\nfrom candidate_module import VALUE\n"
+                    "assert VALUE == 7\nassert 'AI_API_KEY' not in os.environ\n"
+                    "print('VALIDATOR_OK')\n",
+                    30,
+                )
+            finally:
+                sandbox.RUNS_ROOT = previous_root
+                if previous_secret is None:
+                    os.environ.pop("AI_API_KEY", None)
+                else:
+                    os.environ["AI_API_KEY"] = previous_secret
+
+            self.assertEqual(result["returncode"], 0, result["output"])
+            self.assertIn("VALIDATOR_OK", result["output"])
+
 
 if __name__ == "__main__":
     unittest.main()

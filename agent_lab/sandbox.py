@@ -32,9 +32,7 @@ def drop_to_unprivileged() -> None:
     os.setuid(65534)
 
 
-def execute_python_unit(
-    run_id: str, timeout_s: int, suite: str = "public"
-) -> dict[str, Any]:
+def resolve_workspace(run_id: str) -> Path:
     if not ID_RE.fullmatch(run_id):
         raise ValueError("invalid run id")
     workspace = (RUNS_ROOT / run_id / "workspace").resolve()
@@ -44,6 +42,32 @@ def execute_python_unit(
         raise ValueError("workspace escapes runs root") from exc
     if not workspace.is_dir():
         raise FileNotFoundError(f"workspace not found: {run_id}")
+    return workspace
+
+
+def restricted_env() -> dict[str, str]:
+    env = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+    }
+    if os.name == "posix":
+        env.update({
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
+        })
+    else:
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
+    return env
+
+
+def execute_python_unit(
+    run_id: str, timeout_s: int, suite: str = "public"
+) -> dict[str, Any]:
+    workspace = resolve_workspace(run_id)
 
     if suite == "public":
         command = [sys.executable, "-m", "unittest", "discover", "-v"]
@@ -63,23 +87,7 @@ def execute_python_unit(
     else:
         raise ValueError(f"unsupported test suite: {suite}")
 
-    env = {
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONUNBUFFERED": "1",
-    }
-    if os.name == "posix":
-        env.update(
-            {
-                "PATH": "/usr/local/bin:/usr/bin:/bin",
-                "HOME": "/tmp",
-                "TMPDIR": "/tmp",
-            }
-        )
-    else:
-        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
-            value = os.environ.get(key)
-            if value:
-                env[key] = value
+    env = restricted_env()
     started = time.monotonic()
     kwargs: dict[str, Any] = {}
     if os.name == "posix":
@@ -101,19 +109,59 @@ def execute_python_unit(
     }
 
 
+def execute_python_validator(
+    run_id: str,
+    code: str,
+    timeout_s: int,
+) -> dict[str, Any]:
+    workspace = resolve_workspace(run_id)
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("validator code is empty")
+    if len(code.encode("utf-8")) > 50_000:
+        raise ValueError("validator code exceeds 50000 bytes")
+    started = time.monotonic()
+    kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        kwargs["preexec_fn"] = drop_to_unprivileged
+    bootstrap = "import sys; sys.path.insert(0, '.'); exec(" + repr(code) + ")"
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", bootstrap],
+        cwd=workspace,
+        env=restricted_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=max(1, min(int(timeout_s), 600)),
+        **kwargs,
+    )
+    return {
+        "returncode": proc.returncode,
+        "output": proc.stdout[-20_000:],
+        "duration_s": round(time.monotonic() - started, 3),
+    }
+
+
 def process_request(path: Path) -> None:
     try:
         request = json.loads(path.read_text(encoding="utf-8"))
         job_id = str(request.get("job_id", ""))
         if not ID_RE.fullmatch(job_id):
             raise ValueError("invalid job id")
-        if request.get("kind") != "python-unit":
+        kind = str(request.get("kind", ""))
+        if kind == "python-unit":
+            payload = execute_python_unit(
+                str(request.get("run_id", "")),
+                int(request.get("timeout_s", 600)),
+                str(request.get("suite", "public")),
+            )
+        elif kind == "python-validator":
+            payload = execute_python_validator(
+                str(request.get("run_id", "")),
+                str(request.get("code", "")),
+                int(request.get("timeout_s", 120)),
+            )
+        else:
             raise ValueError("unsupported sandbox job kind")
-        payload = execute_python_unit(
-            str(request.get("run_id", "")),
-            int(request.get("timeout_s", 600)),
-            str(request.get("suite", "public")),
-        )
     except subprocess.TimeoutExpired as exc:
         payload = {
             "error": f"test process timed out after {exc.timeout}s",

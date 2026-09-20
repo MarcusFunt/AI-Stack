@@ -76,6 +76,28 @@ class RepositoryContextTests(unittest.TestCase):
             context = collect_repository_context(root, objective="unrelated objective")
             self.assertLess(context.index("===== a.py ====="), context.index("===== b.py ====="))
 
+    def test_context_include_and_exclude_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "agent_lab" / "worker"
+            tests = root / "agent_lab" / "tests"
+            evaluator = root / "agent_eval"
+            worker.mkdir(parents=True)
+            tests.mkdir(parents=True)
+            evaluator.mkdir()
+            (worker / "model.py").write_text("VISIBLE = 1\n", encoding="utf-8")
+            (tests / "test_model.py").write_text("TEST = 1\n", encoding="utf-8")
+            (evaluator / "secret.py").write_text("SECRET = 1\n", encoding="utf-8")
+
+            context = collect_repository_context(
+                root,
+                include=["agent_lab"],
+                exclude=["agent_lab/tests"],
+            )
+            self.assertIn("VISIBLE = 1", context)
+            self.assertNotIn("TEST = 1", context)
+            self.assertNotIn("SECRET = 1", context)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,10 @@ class TaskSpec(BaseModel):
     required_harnesses: list[str] = Field(default_factory=list)
     require_failing_baseline: bool = True
     allow_test_edits: bool = False
+    context_include: list[str] = Field(default_factory=list)
+    context_exclude: list[str] = Field(default_factory=list)
+    edit_include: list[str] = Field(default_factory=list)
+    edit_exclude: list[str] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
 
 

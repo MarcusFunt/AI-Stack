@@ -12,6 +12,9 @@ _ROOT_TRUST_PATHS = {
     "scripts/ai.ps1",
     "scripts/doctor.ps1",
     "scripts/source_hash.py",
+    "scripts/self_improve.py",
+    "scripts/self-improve.ps1",
+    "config/self-improve-features.json",
     "agent_lab/app.py",
     "agent_lab/controller.py",
     "agent_lab/evaluator_client.py",
@@ -49,6 +52,8 @@ def _self_modification_class(path: str) -> str | None:
     if any(normalized.startswith(prefix) for prefix in _EXPERIMENTAL_SELF_PREFIXES):
         return "experimental"
     if normalized.startswith("agent_lab/"):
+        return "root-trust"
+    if normalized.startswith("agent_eval/"):
         return "root-trust"
     return None
 

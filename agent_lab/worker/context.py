@@ -15,7 +15,27 @@ _IGNORED_PARTS = {
 _TOKEN_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
 
 
-def _eligible_files(workspace: Path) -> list[Path]:
+def _normalize_scope(value: str) -> str:
+    return value.replace("\\", "/").strip("/").lower()
+
+
+def _matches_scope(rel: Path, prefixes: list[str]) -> bool:
+    if not prefixes:
+        return False
+    path = rel.as_posix().lower()
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for raw in prefixes
+        if (prefix := _normalize_scope(raw))
+    )
+
+
+def _eligible_files(
+    workspace: Path,
+    *,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> list[Path]:
     files: list[Path] = []
     for path in workspace.rglob("*"):
         try:
@@ -26,6 +46,10 @@ def _eligible_files(workspace: Path) -> list[Path]:
             continue
         rel = path.relative_to(workspace)
         if any(part in _IGNORED_PARTS for part in rel.parts):
+            continue
+        if include and not _matches_scope(rel, include):
+            continue
+        if exclude and _matches_scope(rel, exclude):
             continue
         if path.suffix.lower() not in _ALLOWED_SUFFIXES:
             continue
@@ -65,10 +89,12 @@ def collect_repository_context(
     max_bytes: int = 60_000,
     *,
     objective: str | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> str:
     pieces: list[str] = []
     used = 0
-    files = _eligible_files(workspace)
+    files = _eligible_files(workspace, include=include, exclude=exclude)
     if objective:
         files.sort(
             key=lambda path: (

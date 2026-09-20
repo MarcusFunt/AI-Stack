@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_lab.promotion import review_candidate
+from agent_lab.promotion import _self_modification_class, review_candidate
 from agent_lab.schemas import RunRecord, RunStatus, TaskSpec
 from agent_lab.worktrees import WorktreeManager
 
@@ -180,6 +180,24 @@ class PromotionReviewTests(unittest.TestCase):
                 c for c in review.checks if c.id == "self-modification"
             )
             self.assertEqual(self_check.status, "pass")
+
+    def test_evaluator_tree_is_root_trust(self):
+        self.assertEqual(
+            _self_modification_class("agent_eval/controller.py"),
+            "root-trust",
+        )
+        self.assertEqual(
+            _self_modification_class("agent_eval/runner_runtime.py"),
+            "root-trust",
+        )
+        self.assertEqual(
+            _self_modification_class("scripts/self_improve.py"),
+            "root-trust",
+        )
+        self.assertEqual(
+            _self_modification_class("config/self-improve-features.json"),
+            "root-trust",
+        )
 
     def test_root_trust_change_remains_blocked_even_with_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

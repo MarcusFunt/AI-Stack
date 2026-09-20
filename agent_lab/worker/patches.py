@@ -19,7 +19,29 @@ class PatchError(RuntimeError):
     pass
 
 
-def _resolve_candidate(root: Path, rel: str, allow_test_edits: bool) -> Path:
+def _normalize_scope(value: str) -> str:
+    return value.replace("\\", "/").strip("/").lower()
+
+
+def _matches_scope(path: str, prefixes: list[str] | None) -> bool:
+    if not prefixes:
+        return False
+    normalized = path.replace("\\", "/").strip("/").lower()
+    return any(
+        normalized == prefix or normalized.startswith(prefix + "/")
+        for raw in prefixes
+        if (prefix := _normalize_scope(raw))
+    )
+
+
+def _resolve_candidate(
+    root: Path,
+    rel: str,
+    allow_test_edits: bool,
+    *,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> Path:
     normalized = rel.replace("\\", "/").strip("/")
     if not normalized:
         raise PatchError("missing edit path")
@@ -29,6 +51,11 @@ def _resolve_candidate(root: Path, rel: str, allow_test_edits: bool) -> Path:
     except ValueError as exc:
         raise PatchError(f"path escapes workspace: {rel}") from exc
 
+    relative_posix = relative.as_posix()
+    if include and not _matches_scope(relative_posix, include):
+        raise PatchError(f"path is outside allowed edit scope: {rel}")
+    if exclude and _matches_scope(relative_posix, exclude):
+        raise PatchError(f"path is inside blocked edit scope: {rel}")
     if any(part in _BLOCKED_PARTS for part in relative.parts):
         raise PatchError(f"blocked path: {rel}")
     if candidate.name in _BLOCKED_NAMES or candidate.name.startswith(".env"):
@@ -52,6 +79,8 @@ def apply_exact_edits(
     edits: list[dict[str, Any]],
     *,
     allow_test_edits: bool = False,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> list[str]:
     if len(edits) > 5:
         raise PatchError("model proposed more than 5 file operations")
@@ -69,7 +98,13 @@ def apply_exact_edits(
             raise PatchError("malformed edit")
         op = str(edit.get("op", "replace")).lower()
         rel = str(edit.get("path", ""))
-        candidate = _resolve_candidate(root, rel, allow_test_edits)
+        candidate = _resolve_candidate(
+            root,
+            rel,
+            allow_test_edits,
+            include=include,
+            exclude=exclude,
+        )
         if candidate in planned:
             raise PatchError(f"multiple operations target the same file: {rel}")
 

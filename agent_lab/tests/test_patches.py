@@ -155,5 +155,39 @@ class PatchTests(unittest.TestCase):
             self.assertEqual(changed, ["test_feature.py"])
             self.assertEqual(target.read_text(encoding="utf-8"), "x = 2\n")
 
+    def test_edit_scope_blocks_outside_and_excluded_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "agent_lab" / "worker"
+            worker.mkdir(parents=True)
+            (worker / "model.py").write_text("x = 1\n", encoding="utf-8")
+            evaluator = root / "agent_eval"
+            evaluator.mkdir()
+            (evaluator / "controller.py").write_text("x = 1\n", encoding="utf-8")
+
+            changed = apply_exact_edits(
+                root,
+                [{
+                    "path": "agent_lab/worker/model.py",
+                    "old": "x = 1",
+                    "new": "x = 2",
+                }],
+                include=["agent_lab/worker"],
+                exclude=["agent_eval"],
+            )
+            self.assertEqual(changed, ["agent_lab/worker/model.py"])
+            with self.assertRaisesRegex(PatchError, "outside allowed edit scope"):
+                apply_exact_edits(
+                    root,
+                    [{
+                        "path": "agent_eval/controller.py",
+                        "old": "x = 1",
+                        "new": "x = 2",
+                    }],
+                    include=["agent_lab/worker"],
+                    exclude=["agent_eval"],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
