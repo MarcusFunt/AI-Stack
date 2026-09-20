@@ -42,9 +42,11 @@ class ModelClient:
         feedback = json.dumps(prior_result, ensure_ascii=False) if prior_result else "none"
         system = (
             "You are a coding agent in an isolated Git worktree. "
-            "Return ONLY valid JSON. You may make exact text replacements in files "
-            "shown in the repository context. Never modify secrets, .git, generated "
-            "state, tests solely to make a failure disappear, or files not shown."
+            "Return ONLY valid JSON. You may replace exact text in existing files "
+            "shown in the repository context, or create a small new source/config/"
+            "documentation file when the objective requires it. Never modify tests, "
+            "hidden evaluation files, secrets, .git, or generated state. Do not "
+            "weaken checks to make a failure disappear."
         )
         user = f"""Objective:
 {objective}
@@ -59,10 +61,21 @@ Return this JSON shape:
 {{
   "summary": "short reasoning summary",
   "edits": [
-    {{"path": "relative/path.py", "old": "exact existing text", "new": "replacement"}}
+    {{
+      "op": "replace",
+      "path": "relative/path.py",
+      "old": "exact existing text",
+      "new": "replacement"
+    }},
+    {{
+      "op": "create",
+      "path": "relative/new_file.py",
+      "content": "complete new file contents"
+    }}
   ]
 }}
-Use at most 5 edits. If no safe edit is justified, return an empty edits list."""
+Use only the operations you actually need and at most 5 file operations total.
+Do not edit test files. If no safe edit is justified, return an empty edits list."""
         raw = self._request(
             [{"role": "system", "content": system}, {"role": "user", "content": user}]
         )

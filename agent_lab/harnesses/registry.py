@@ -4,12 +4,16 @@ from pathlib import Path
 
 from agent_lab.schemas import TaskSpec
 from .base import Harness
+from .python_syntax import PythonSyntaxHarness
 from .python_unit import PythonUnitHarness
 
 
 class HarnessRegistry:
     def __init__(self, harnesses: list[Harness] | None = None, sandbox=None):
-        items = harnesses or [PythonUnitHarness(sandbox=sandbox)]
+        items = harnesses or [
+            PythonUnitHarness(sandbox=sandbox),
+            PythonSyntaxHarness(),
+        ]
         self._harnesses = {item.manifest.id: item for item in items}
 
     def list(self) -> list[dict]:

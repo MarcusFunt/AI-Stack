@@ -11,6 +11,7 @@ class RunStatus(str, Enum):
     PREPARING = "preparing"
     READY = "ready"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     PASSED = "passed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -31,6 +32,7 @@ class TaskSpec(BaseModel):
     allowed_harnesses: list[str] = Field(default_factory=list)
     required_harnesses: list[str] = Field(default_factory=list)
     require_failing_baseline: bool = True
+    allow_test_edits: bool = False
     budget: Budget = Field(default_factory=Budget)
 
 
@@ -74,3 +76,21 @@ class EventRecord(BaseModel):
     ts: datetime
     kind: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewCheck(BaseModel):
+    id: str
+    status: str
+    message: str = ""
+
+
+class PromotionReview(BaseModel):
+    run_id: str
+    eligible_for_manual_promotion: bool
+    candidate_commit: str | None = None
+    base_commit: str | None = None
+    current_source_commit: str | None = None
+    files_changed: list[str] = Field(default_factory=list)
+    insertions: int = 0
+    deletions: int = 0
+    checks: list[ReviewCheck] = Field(default_factory=list)

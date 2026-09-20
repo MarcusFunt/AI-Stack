@@ -4,7 +4,7 @@ from pathlib import Path
 
 from agent_lab.harnesses import HarnessRegistry
 from agent_lab.schemas import Budget, TaskSpec
-from agent_lab.worker.graph import AgentRunner
+from agent_lab.worker.graph import AgentCancelled, AgentRunner
 
 
 class FakeModel:
@@ -77,6 +77,24 @@ class GraphTests(unittest.TestCase):
             self.assertEqual(result["final_status"], "failed")
             self.assertEqual(model.calls, 0)
             self.assertIn("baseline harness already passed", result["error"])
+    def test_cancellation_stops_before_agent_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "calculator.py").write_text(
+                "def add(a, b):\n    return a - b\n", encoding="utf-8"
+            )
+            model = FakeModel()
+            task = TaskSpec(objective="Fix the function.")
+            runner = AgentRunner(
+                task,
+                workspace,
+                HarnessRegistry(),
+                model,
+                cancelled=lambda: True,
+            )
+            with self.assertRaises(AgentCancelled):
+                runner.run("c" * 32)
+            self.assertEqual(model.calls, 0)
 
 
 if __name__ == "__main__":

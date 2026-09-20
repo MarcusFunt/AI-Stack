@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,14 @@ from .state import AgentState
 EventSink = Callable[[str, dict[str, Any]], None]
 
 
+class AgentCancelled(RuntimeError):
+    pass
+
+
+class AgentBudgetExceeded(RuntimeError):
+    pass
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -23,13 +32,23 @@ class AgentRunner:
         registry: HarnessRegistry,
         model: Any,
         emit: EventSink | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ):
         self.task = task
         self.workspace = workspace
         self.registry = registry
         self.model = model
         self.emit = emit or (lambda _kind, _payload: None)
+        self.cancelled = cancelled or (lambda: False)
+        self.started_at = time.monotonic()
         self.graph = self._build_graph()
+
+    def _guard(self) -> None:
+        if self.cancelled():
+            raise AgentCancelled("run cancellation requested")
+        elapsed = time.monotonic() - self.started_at
+        if elapsed > self.task.budget.wall_time_minutes * 60:
+            raise AgentBudgetExceeded("run wall-time budget exceeded")
 
     def _build_graph(self):
         graph = StateGraph(AgentState)
@@ -39,6 +58,7 @@ class AgentRunner:
         graph.add_node("propose", self._propose)
         graph.add_node("apply", self._apply)
         graph.add_node("evaluate", self._evaluate)
+        graph.add_node("holdout", self._holdout)
         graph.add_node("finalize", self._finalize)
         graph.add_edge(START, "inspect")
         graph.add_edge("inspect", "select_harness")
@@ -54,22 +74,26 @@ class AgentRunner:
         )
         graph.add_conditional_edges(
             "evaluate", self._route_evaluation,
-            {"propose": "propose", "finalize": "finalize"},
+            {"propose": "propose", "holdout": "holdout", "finalize": "finalize"},
         )
+        graph.add_edge("holdout", "finalize")
         graph.add_edge("finalize", END)
         return graph.compile()
 
     def _inspect(self, state: AgentState) -> dict:
+        self._guard()
         context = collect_repository_context(self.workspace)
         self.emit("repository_inspected", {"context_chars": len(context)})
         return {"repo_context": context, "iteration": 0, "applied_edits": []}
 
     def _select_harness(self, state: AgentState) -> dict:
+        self._guard()
         harness = self.registry.select(self.task, self.workspace)
         self.emit("harness_selected", {"harness": harness.manifest.id})
         return {"selected_harness": harness.manifest.id}
 
     def _evaluate(self, state: AgentState) -> dict:
+        self._guard()
         harness_id = state["selected_harness"]
         harness = self.registry.get(harness_id)
         self.emit("harness_started", {"harness": harness_id})
@@ -80,7 +104,22 @@ class AgentRunner:
         )
         return {"harness_result": result}
 
+    def _holdout(self, state: AgentState) -> dict:
+        self._guard()
+        harness_id = state["selected_harness"]
+        harness = self.registry.get(harness_id)
+        self.emit("holdout_started", {"harness": harness_id})
+        result = harness.execute_holdout(self.task, self.workspace)
+        if result is None:
+            payload = {"status": "skipped"}
+            self.emit("holdout_finished", payload)
+            return {"holdout_result": payload}
+        payload = result.model_dump()
+        self.emit("holdout_finished", {"status": payload["status"]})
+        return {"holdout_result": payload}
+
     def _propose(self, state: AgentState) -> dict:
+        self._guard()
         iteration = int(state.get("iteration", 0)) + 1
         context = collect_repository_context(self.workspace)
         self.emit("model_iteration_started", {"iteration": iteration})
@@ -110,11 +149,16 @@ class AgentRunner:
             }
 
     def _apply(self, state: AgentState) -> dict:
+        self._guard()
         edits = state.get("proposed_edits", [])
         if not edits:
             return {}
         try:
-            changed = apply_exact_edits(self.workspace, edits)
+            changed = apply_exact_edits(
+                self.workspace,
+                edits,
+                allow_test_edits=self.task.allow_test_edits,
+            )
         except (PatchError, OSError, UnicodeError) as exc:
             self.emit("patch_rejected", {"error": str(exc)})
             return {"error": f"patch rejected: {exc}", "proposed_edits": []}
@@ -134,19 +178,24 @@ class AgentRunner:
 
     def _route_evaluation(self, state: AgentState) -> str:
         if state["harness_result"]["status"] == "passed":
-            return "finalize"
+            return "holdout"
         if int(state.get("iteration", 0)) >= self.task.budget.max_iterations:
             return "finalize"
         return "propose"
 
     def _finalize(self, state: AgentState) -> dict:
+        self._guard()
         passed = state.get("harness_result", {}).get("status") == "passed"
         baseline_only = int(state.get("iteration", 0)) == 0
         baseline_unproven = baseline_only and self.task.require_failing_baseline and passed
+        holdout = state.get("holdout_result", {})
+        holdout_failed = holdout.get("status") == "failed"
         error = state.get("error", "")
         if baseline_unproven:
             error = "baseline harness already passed; objective is not proven by a failing regression"
-        status = "passed" if passed and not error else "failed"
+        elif holdout_failed:
+            error = "candidate passed visible checks but failed hidden holdout validation"
+        status = "passed" if passed and not holdout_failed and not error else "failed"
         self.emit(
             "agent_finished",
             {"status": status, "iterations": state.get("iteration", 0)},
@@ -154,6 +203,7 @@ class AgentRunner:
         return {"final_status": status, "error": error}
 
     def run(self, run_id: str) -> AgentState:
+        self.started_at = time.monotonic()
         initial: AgentState = {
             "run_id": run_id,
             "objective": self.task.objective,

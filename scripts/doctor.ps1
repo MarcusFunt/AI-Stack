@@ -115,6 +115,15 @@ try {
   }
 } catch { Fail "agent-lab" $_ }
 
+try {
+  $bench = Invoke-RestMethod -Uri "http://127.0.0.1:8770/benchmarks/reference" -TimeoutSec 4
+  if($bench.suite -eq "agent-lab-core-v2" -and $bench.cases -ge 13 -and $bench.failed -eq 0 -and $bench.passed -eq $bench.cases) {
+    Pass "agent-lab-benchmark-reference" ($bench.model + "; " + $bench.passed + "/" + $bench.cases + " passed")
+  } else {
+    Fail "agent-lab-benchmark-reference" ("unexpected reference: " + ($bench | Select-Object suite,model,cases,passed,failed | ConvertTo-Json -Compress))
+  }
+} catch { Fail "agent-lab-benchmark-reference" $_ }
+
 $drives=Get-PSDrive C,D -ErrorAction SilentlyContinue
 foreach($d in $drives) { Pass ("disk:"+$d.Name) (([math]::Round($d.Free/1GB,1)).ToString()+" GiB free") }
 

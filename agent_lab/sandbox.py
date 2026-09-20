@@ -29,7 +29,9 @@ def drop_to_unprivileged() -> None:
     os.setuid(65534)
 
 
-def execute_python_unit(run_id: str, timeout_s: int) -> dict[str, Any]:
+def execute_python_unit(
+    run_id: str, timeout_s: int, suite: str = "public"
+) -> dict[str, Any]:
     if not ID_RE.fullmatch(run_id):
         raise ValueError("invalid run id")
     workspace = (RUNS_ROOT / run_id / "workspace").resolve()
@@ -40,6 +42,24 @@ def execute_python_unit(run_id: str, timeout_s: int) -> dict[str, Any]:
     if not workspace.is_dir():
         raise FileNotFoundError(f"workspace not found: {run_id}")
 
+    if suite == "public":
+        command = ["python", "-m", "unittest", "discover", "-v"]
+    elif suite == "holdout":
+        holdout = workspace / ".agent_lab_holdout"
+        if not holdout.is_dir():
+            return {
+                "returncode": 0,
+                "output": "NO_HOLDOUT_SUITE",
+                "duration_s": 0.0,
+                "skipped": True,
+            }
+        command = [
+            "python", "-m", "unittest", "discover", "-v",
+            "-s", ".agent_lab_holdout",
+        ]
+    else:
+        raise ValueError(f"unsupported test suite: {suite}")
+
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": "/tmp",
@@ -49,7 +69,7 @@ def execute_python_unit(run_id: str, timeout_s: int) -> dict[str, Any]:
     }
     started = time.monotonic()
     proc = subprocess.run(
-        ["python", "-m", "unittest", "discover", "-v"],
+        command,
         cwd=workspace,
         env=env,
         text=True,
@@ -74,7 +94,9 @@ def process_request(path: Path) -> None:
         if request.get("kind") != "python-unit":
             raise ValueError("unsupported sandbox job kind")
         payload = execute_python_unit(
-            str(request.get("run_id", "")), int(request.get("timeout_s", 600))
+            str(request.get("run_id", "")),
+            int(request.get("timeout_s", 600)),
+            str(request.get("suite", "public")),
         )
     except subprocess.TimeoutExpired as exc:
         payload = {

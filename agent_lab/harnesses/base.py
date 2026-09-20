@@ -26,3 +26,6 @@ class Harness(ABC):
     @abstractmethod
     def execute(self, task: TaskSpec, workspace: Path) -> HarnessResult:
         raise NotImplementedError
+
+    def execute_holdout(self, task: TaskSpec, workspace: Path) -> HarnessResult | None:
+        return None

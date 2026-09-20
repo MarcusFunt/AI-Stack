@@ -24,7 +24,11 @@ class SandboxClient:
         temp.write_text(json.dumps(payload), encoding="utf-8")
         temp.replace(path)
 
-    def python_unit(self, run_id: str, timeout_s: int) -> dict[str, Any]:
+    def python_unit(
+        self, run_id: str, timeout_s: int, suite: str = "public"
+    ) -> dict[str, Any]:
+        if suite not in {"public", "holdout"}:
+            raise SandboxError(f"unsupported test suite: {suite}")
         job_id = uuid.uuid4().hex
         request = self.requests / f"{job_id}.json"
         result = self.results / f"{job_id}.json"
@@ -34,6 +38,7 @@ class SandboxClient:
                 "job_id": job_id,
                 "run_id": run_id,
                 "kind": "python-unit",
+                "suite": suite,
                 "timeout_s": max(1, min(int(timeout_s), 600)),
             },
         )
