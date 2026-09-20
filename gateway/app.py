@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 import paho.mqtt.client as mqtt
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
@@ -1221,6 +1221,10 @@ async def control_stop(service: str):
 @app.post("/control/stop-all")
 async def control_stop_all():
     return await supervisor("POST", "/stop-all", timeout=120)
+
+@app.get("/control/logs/{service}")
+async def control_logs(service: str, tail: int = Query(default=200, ge=1, le=1000)):
+    return await supervisor("GET", f"/logs/{service}?tail={tail}", timeout=15)
 
 @app.api_route("/v1/chat/completions", methods=["POST"])
 async def chat(request: Request):

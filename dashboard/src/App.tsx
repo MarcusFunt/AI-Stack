@@ -6,14 +6,15 @@ import {
   RefreshCw, Sparkles, Video, Volume2, Wrench,
 } from 'lucide-react'
 import { localAI } from './api'
-import type { ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
+import { AgentLabPanel } from './AgentLabPanel'
+import type { ApiCapabilities, ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
 import {
-  ControlOverview, HealthPanel, JobsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
+  ControlOverview, HealthPanel, JobsPanel, LogsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
 } from './OpsPanels'
 import { isBadState } from './state'
 import './index.css'
 
-type Section = 'overview' | 'models' | 'jobs' | 'health' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
+type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 const navGroups = [
@@ -23,12 +24,14 @@ const navGroups = [
       ['overview', Activity, 'Overview'],
       ['models', BrainCircuit, 'Models'],
       ['jobs', Gauge, 'Jobs'],
+      ['logs', Activity, 'Logs'],
       ['health', Cpu, 'Health'],
     ],
   },
   {
     label: 'Work',
     items: [
+      ['agentlab', Bot, 'Agent Lab'],
       ['chat', MessageSquareText, 'Chat'],
       ['speech', AudioLines, 'Speech'],
       ['vision', Bot, 'Robot vision'],
@@ -49,7 +52,9 @@ const sectionMeta: Record<Section, { title: string; context: string }> = {
   overview: { title: 'Overview', context: 'Machine and scheduler' },
   models: { title: 'Models', context: 'Fleet and runtime configuration' },
   jobs: { title: 'Jobs', context: 'Recent inference activity' },
+  logs: { title: 'Logs', context: 'Managed worker diagnostics' },
   health: { title: 'Health', context: 'Control plane and diagnostics' },
+  agentlab: { title: 'Agent Lab', context: 'Autonomous coding runs and evaluation' },
   chat: { title: 'Chat', context: 'Local language models' },
   speech: { title: 'Speech', context: 'Transcription and voice' },
   vision: { title: 'Robot vision', context: 'Visual reasoning' },
@@ -399,6 +404,21 @@ function SystemPanel(props: {
   status: SupervisorStatus | null
   onStopAll: () => void
 }) {
+  const [capabilities, setCapabilities] = useState<ApiCapabilities | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const initial = window.setTimeout(() => {
+      void localAI.capabilities()
+        .then((next) => { if (alive) setCapabilities(next) })
+        .catch(() => { if (alive) setCapabilities(null) })
+    }, 0)
+    return () => {
+      alive = false
+      window.clearTimeout(initial)
+    }
+  }, [])
+
   return (
     <section className="workspace">
       <div className="workspace-head">
@@ -429,10 +449,20 @@ function SystemPanel(props: {
       <div className="split-grid system-grid">
         <div className="tool-card">
           <h3>Unified API</h3>
-          <code>POST /v1/chat/completions</code>
-          <code>POST /v1/audio/transcriptions</code>
-          <code>POST /v1/audio/speech</code>
-          <code>POST /v1/vision/analyze</code>
+          <p className="api-contract-meta">
+            {capabilities
+              ? capabilities.name + ' ' + capabilities.version + ' · '
+                + capabilities.transport + ' · ' + capabilities.authentication
+              : 'Loading API contract…'}
+          </p>
+          <div className="api-capability-list">
+            {Object.entries(capabilities?.endpoints || {}).map(([name, endpoint]) => (
+              <div key={name}><span>{name.replaceAll('_', ' ')}</span><code>{endpoint}</code></div>
+            ))}
+          </div>
+          {capabilities && <small className="api-model-count">
+            {capabilities.models.length} logical models advertised by the gateway
+          </small>}
         </div>
         <div className="tool-card">
           <h3>Supervisor</h3>
@@ -567,7 +597,9 @@ export default function App() {
 
   const content = section === 'models' ? <ModelsPanel models={models} snapshot={snapshot} /> :
     section === 'jobs' ? <JobsPanel snapshot={snapshot} /> :
+    section === 'logs' ? <LogsPanel snapshot={snapshot} /> :
     section === 'health' ? <HealthPanel snapshot={snapshot} /> :
+    section === 'agentlab' ? <AgentLabPanel /> :
     section === 'chat' ? <ChatPanel models={models} /> :
     section === 'speech' ? <SpeechPanel /> :
     section === 'vision' ? <VisionPanel /> :

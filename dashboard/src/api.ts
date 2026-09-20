@@ -83,6 +83,15 @@ export type SelfTests = {
   results: Record<string, SelfTestResult>
 }
 
+export type ApiCapabilities = {
+  name: string
+  version: string
+  transport: string
+  authentication: string
+  models: string[]
+  endpoints: Record<string, string>
+}
+
 export type NetworkStatus = {
   installed: boolean
   online: boolean
@@ -197,6 +206,7 @@ export const localAI = {
   status: () => request<SupervisorStatus>('/control/status'),
   snapshot: () => request<Snapshot>('/control/snapshot'),
   models: () => request<ModelsResponse>('/v1/models'),
+  capabilities: () => request<ApiCapabilities>('/v1/capabilities'),
   doctor: () => request<{ status: string; checks: DoctorCheck[] }>('/control/doctor'),
   settings: () => request<RuntimeSettings>('/control/settings'),
   updateSettings: (settings: RuntimeSettings) =>
@@ -257,6 +267,10 @@ export const localAI = {
   stop: (service: string) =>
     request('/control/stop/' + encodeURIComponent(service), { method: 'POST' }),
   stopAll: () => request('/control/stop-all', { method: 'POST' }),
+  logs: (service: string, tail = 200) =>
+    request<{ service: string; logs: string }>(
+      '/control/logs/' + encodeURIComponent(service) + '?tail=' + encodeURIComponent(tail),
+    ),
 
   async chat(model: string, messages: Array<{ role: string; content: string }>) {
     return request<{
