@@ -70,7 +70,11 @@ class AgentRunner:
         graph.add_edge("propose", "apply")
         graph.add_conditional_edges(
             "apply", self._route_apply,
-            {"evaluate": "evaluate", "finalize": "finalize"},
+            {
+                "propose": "propose",
+                "evaluate": "evaluate",
+                "finalize": "finalize",
+            },
         )
         graph.add_conditional_edges(
             "evaluate", self._route_evaluation,
@@ -160,8 +164,22 @@ class AgentRunner:
                 allow_test_edits=self.task.allow_test_edits,
             )
         except (PatchError, OSError, UnicodeError) as exc:
+            message = f"patch rejected: {exc}"
             self.emit("patch_rejected", {"error": str(exc)})
-            return {"error": f"patch rejected: {exc}", "proposed_edits": []}
+            return {
+                "error": message,
+                "proposed_edits": [],
+                "harness_result": {
+                    "status": "failed",
+                    "checks": [
+                        {
+                            "id": "patch-application",
+                            "status": "failed",
+                            "message": message,
+                        }
+                    ],
+                },
+            }
         applied = list(state.get("applied_edits", [])) + changed
         self.emit("patch_applied", {"files": changed})
         return {"applied_edits": applied}
@@ -173,6 +191,8 @@ class AgentRunner:
 
     def _route_apply(self, state: AgentState) -> str:
         if state.get("error") or not state.get("proposed_edits"):
+            if int(state.get("iteration", 0)) < self.task.budget.max_iterations:
+                return "propose"
             return "finalize"
         return "evaluate"
 

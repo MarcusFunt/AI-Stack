@@ -11,6 +11,8 @@ CONTEXTS = {
     "dashboard": ROOT / "dashboard",
     "mcp": ROOT / "mcp",
     "agent-lab": ROOT / "agent_lab",
+    "agent-evaluator": ROOT / "agent_eval",
+    "agent-eval-runner": ROOT / "agent_eval",
     "stt": ROOT / "stt",
     "vlm": ROOT / "vlm",
 }

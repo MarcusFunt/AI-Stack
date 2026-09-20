@@ -10,6 +10,7 @@ from typing import Any
 from . import __version__
 from .benchmark_history import list_history, load_latest, load_reference
 from .db import RunStore
+from .evaluator_client import EvaluatorClient
 from .harnesses import HarnessRegistry
 from .promotion import review_candidate
 from .schemas import PromotionReview, RunRecord, RunStatus, TaskSpec
@@ -28,6 +29,9 @@ class AgentLabController:
         gateway_url = os.environ.get("GATEWAY_URL", "http://gateway:8000")
         api_key = os.environ.get("AI_API_KEY", "")
         model_name = os.environ.get("AGENT_LAB_MODEL", "local-fast")
+        evaluator_url = os.environ.get(
+            "AGENT_EVALUATOR_URL", "http://agent-evaluator:8000"
+        )
         workers = int(os.environ.get("AGENT_LAB_MAX_WORKERS", "1"))
 
         self.data_root = data_root
@@ -37,6 +41,7 @@ class AgentLabController:
         self.sandbox = SandboxClient(data_root / "sandbox")
         self.registry = HarnessRegistry(sandbox=self.sandbox)
         self.model = ModelClient(gateway_url, api_key, model_name)
+        self.evaluator = EvaluatorClient(evaluator_url)
         self.executor = ThreadPoolExecutor(max_workers=max(1, workers))
         self._active: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
@@ -63,12 +68,19 @@ class AgentLabController:
         with self._lock:
             active = sorted(self._active)
         sandbox_ok = self.sandbox.healthy()
+        try:
+            evaluator = self.evaluator.health()
+            evaluator_ok = evaluator.get("status") == "ok"
+        except Exception as exc:
+            evaluator = {"status": "unavailable", "error": str(exc)}
+            evaluator_ok = False
         return {
-            "status": "ok" if sandbox_ok else "degraded",
+            "status": "ok" if sandbox_ok and evaluator_ok else "degraded",
             "service": "agent-lab",
             "version": __version__,
             "active_runs": active,
             "sandbox": "ok" if sandbox_ok else "unavailable",
+            "evaluator": evaluator,
         }
 
     def create_run(self, task: TaskSpec, auto_start: bool = False) -> RunRecord:
@@ -225,7 +237,40 @@ class AgentLabController:
 
     def promotion_review(self, run_id: str) -> PromotionReview:
         run = self.store.get_run(run_id)
-        return review_candidate(run, self.worktrees)
+        try:
+            evidence = self.evaluator.latest_passing(run_id)
+        except Exception:
+            evidence = None
+        return review_candidate(
+            run,
+            self.worktrees,
+            self_eval_evidence=evidence,
+        )
+
+    def start_candidate_evaluation(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if run.status != RunStatus.PASSED:
+            raise ValueError("only passed runs can be candidate-evaluated")
+        result = run.result or {}
+        candidate = result.get("candidate_commit")
+        if not candidate or not run.base_commit:
+            raise ValueError("run has no candidate/base commit")
+        return self.evaluator.create(
+            run_id=run.id,
+            candidate_commit=str(candidate),
+            base_commit=run.base_commit,
+            token_budget=min(run.task.budget.model_tokens, 100_000),
+            wall_time_seconds=min(run.task.budget.wall_time_minutes * 60, 1800),
+        )
+
+    def candidate_evaluations(self, run_id: str) -> list[dict[str, Any]]:
+        self.store.get_run(run_id)
+        return self.evaluator.by_run(run_id)
+
+    def cancel_candidate_evaluation(
+        self, evaluation_id: str
+    ) -> dict[str, Any]:
+        return self.evaluator.cancel(evaluation_id)
 
     def latest_benchmark(self) -> dict[str, Any]:
         latest = load_latest(self.data_root)

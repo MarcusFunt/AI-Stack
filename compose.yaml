@@ -234,6 +234,77 @@ services:
       timeout: 3s
       retries: 6
 
+  agent-eval-runner:
+    build:
+      context: ./agent_eval
+      dockerfile: Runner.Dockerfile
+      args:
+        SOURCE_HASH: ${AI_STACK_AGENT_EVAL_RUNNER_SOURCE_HASH:-unknown}
+    container_name: ai-stack-agent-eval-runner
+    restart: unless-stopped
+    init: true
+    read_only: true
+    network_mode: "none"
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    environment:
+      AGENT_EVAL_EXCHANGE: /exchange
+    volumes:
+      - ./data/agent-eval/exchange:/exchange
+    healthcheck:
+      test: ["CMD","python","-c","import json,time,pathlib; p=json.loads(pathlib.Path('/exchange/runner-heartbeat.json').read_text()); assert time.time()-float(p['ts']) < 5 and p.get('network_isolated') is True"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  agent-evaluator:
+    build:
+      context: ./agent_eval
+      args:
+        SOURCE_HASH: ${AI_STACK_AGENT_EVALUATOR_SOURCE_HASH:-unknown}
+    container_name: ai-stack-agent-evaluator
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AGENT_EVAL_DATA_ROOT: /data
+      AGENT_EVAL_EXCHANGE: /exchange
+      AGENT_EVAL_CANDIDATE_REPO: /candidate.git
+      AGENT_EVAL_DB: /data/evaluator.sqlite3
+      AGENT_EVAL_SOURCE_HASH: ${AI_STACK_AGENT_EVALUATOR_SOURCE_HASH:-unknown}
+      GATEWAY_URL: http://gateway:8000
+      AI_API_KEY: ${AI_API_KEY}
+    depends_on:
+      gateway:
+        condition: service_healthy
+      agent-eval-runner:
+        condition: service_healthy
+    volumes:
+      - ./data/agent-lab/repo.git:/candidate.git:ro
+      - ./data/agent-eval:/data
+      - ./data/agent-eval/exchange:/exchange
+    ports:
+      - "127.0.0.1:${AGENT_EVALUATOR_PORT:-8771}:8000"
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)); assert d.get('status') == 'ok' and d.get('runner',{}).get('network_isolated') is True"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
   agent-lab:
     build:
       context: ./agent_lab
@@ -255,12 +326,15 @@ services:
       AGENT_LAB_DB: /data/agent-lab.sqlite3
       AGENT_LAB_MODEL: local-fast
       AGENT_LAB_MAX_WORKERS: "1"
+      AGENT_EVALUATOR_URL: http://agent-evaluator:8000
       GATEWAY_URL: http://gateway:8000
       AI_API_KEY: ${AI_API_KEY}
     depends_on:
       gateway:
         condition: service_healthy
       agent-lab-sandbox:
+        condition: service_healthy
+      agent-evaluator:
         condition: service_healthy
     volumes:
       - ./.git:/source.git:ro

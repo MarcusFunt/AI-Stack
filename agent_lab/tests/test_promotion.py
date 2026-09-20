@@ -27,7 +27,9 @@ def make_source(root: Path, *, self_mod: bool = False) -> tuple[Path, str]:
     git(source, "init")
     git(source, "config", "user.name", "Test")
     git(source, "config", "user.email", "test@example.invalid")
-    target = source / ("agent_lab/example.py" if self_mod else "feature.py")
+    target = source / (
+        "agent_lab/worker/example.py" if self_mod else "feature.py"
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("VALUE = 1\n", encoding="utf-8")
     git(source, "add", ".")
@@ -120,7 +122,7 @@ class PromotionReviewTests(unittest.TestCase):
             manager = WorktreeManager(source, root / "data")
             run_id = "3" * 32
             workspace, _ = manager.create(run_id)
-            target = workspace / "agent_lab" / "example.py"
+            target = workspace / "agent_lab" / "worker" / "example.py"
             target.write_text("VALUE = 2\n", encoding="utf-8")
             candidate = manager.save_candidate(workspace, run_id)
 
@@ -130,6 +132,109 @@ class PromotionReviewTests(unittest.TestCase):
             self.assertFalse(review.eligible_for_manual_promotion)
             self_check = next(c for c in review.checks if c.id == "self-modification")
             self.assertEqual(self_check.status, "block")
+
+    def test_verified_self_evaluation_allows_experimental_worker_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, base = make_source(root, self_mod=True)
+            manager = WorktreeManager(source, root / "data")
+            run_id = "5" * 32
+            workspace, _ = manager.create(run_id)
+            target = workspace / "agent_lab" / "worker" / "example.py"
+            target.write_text("VALUE = 2\n", encoding="utf-8")
+            candidate = manager.save_candidate(workspace, run_id)
+            evidence = {
+                "verified": True,
+                "evaluation": {
+                    "run_id": run_id,
+                    "candidate_commit": candidate,
+                    "base_commit": base,
+                    "status": "passed",
+                },
+                "attestation": {
+                    "status": "passed",
+                    "suite": "agent-lab-selfmod-v1",
+                    "reference_hash": "r" * 64,
+                    "comparison": {
+                        "compatible": True,
+                        "regressions": [],
+                        "improvements": [],
+                        "meets_reference": True,
+                    },
+                    "critical_checks": {
+                        "runner_network_isolated": True,
+                        "candidate_source_unchanged": True,
+                    },
+                    "case_results": [
+                        {"case": "sealed-a", "status": "passed"}
+                    ],
+                },
+            }
+            review = review_candidate(
+                passed_run(run_id, workspace, base, candidate),
+                manager,
+                self_eval_evidence=evidence,
+            )
+            self.assertTrue(review.eligible_for_manual_promotion)
+            self_check = next(
+                c for c in review.checks if c.id == "self-modification"
+            )
+            self.assertEqual(self_check.status, "pass")
+
+    def test_root_trust_change_remains_blocked_even_with_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            git(source, "init")
+            git(source, "config", "user.name", "Test")
+            git(source, "config", "user.email", "test@example.invalid")
+            target = source / "agent_lab" / "promotion.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            git(source, "add", ".")
+            git(source, "commit", "-m", "initial")
+            base = git(source, "rev-parse", "HEAD")
+            manager = WorktreeManager(source, root / "data")
+            run_id = "6" * 32
+            workspace, _ = manager.create(run_id)
+            (workspace / "agent_lab" / "promotion.py").write_text(
+                "VALUE = 2\n", encoding="utf-8"
+            )
+            candidate = manager.save_candidate(workspace, run_id)
+            evidence = {
+                "verified": True,
+                "evaluation": {
+                    "run_id": run_id,
+                    "candidate_commit": candidate,
+                    "base_commit": base,
+                    "status": "passed",
+                },
+                "attestation": {
+                    "status": "passed",
+                    "suite": "agent-lab-selfmod-v1",
+                    "reference_hash": "r" * 64,
+                    "comparison": {
+                        "compatible": True,
+                        "regressions": [],
+                        "improvements": [],
+                        "meets_reference": True,
+                    },
+                    "critical_checks": {"x": True},
+                    "case_results": [{"case": "x", "status": "passed"}],
+                },
+            }
+            review = review_candidate(
+                passed_run(run_id, workspace, base, candidate),
+                manager,
+                self_eval_evidence=evidence,
+            )
+            self.assertFalse(review.eligible_for_manual_promotion)
+            self_check = next(
+                c for c in review.checks if c.id == "self-modification"
+            )
+            self.assertEqual(self_check.status, "block")
+            self.assertIn("root-of-trust", self_check.message)
 
 
 if __name__ == "__main__":
