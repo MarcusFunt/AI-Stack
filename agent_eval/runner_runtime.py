@@ -138,7 +138,13 @@ class QueueModelClient:
         self.capability = capability
         self.timeout_s = timeout_s
 
-    def propose_patch(self, objective, repo_context, prior_result):
+    def propose_patch(
+        self,
+        objective,
+        repo_context,
+        prior_result,
+        timeout_seconds=None,
+    ):
         feedback = json.dumps(prior_result, ensure_ascii=False) if prior_result else "none"
         system = (
             "You are a coding agent in an isolated Git worktree. Return ONLY valid JSON. "
@@ -179,7 +185,10 @@ Use only needed operations and at most five. Do not edit tests."""
                 "max_tokens": 2048,
             },
         )
-        deadline = time.monotonic() + self.timeout_s
+        effective_timeout = self.timeout_s
+        if timeout_seconds is not None:
+            effective_timeout = min(self.timeout_s, max(1.0, float(timeout_seconds)))
+        deadline = time.monotonic() + effective_timeout
         while time.monotonic() < deadline:
             if result.exists():
                 payload = json.loads(result.read_text(encoding="utf-8"))
