@@ -57,7 +57,7 @@ try {
   }
 } catch { Fail "docker-socket-isolation" $_ }
 
-foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
+foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard","mcp","agent-lab","stt","vlm","comfyui","wangp")) {
   $container = "ai-stack-$svc"
   $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
   $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
@@ -66,7 +66,22 @@ foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard
   else { Fail ("image-sync:" + $svc) "container uses an older image; recreate it" }
 }
 
-foreach($svc in @("docker-control","supervisor","telemetry","gateway","dashboard","mcp","stt","vlm")) {
+try {
+  $sandboxInfo = @((& docker inspect ai-stack-agent-lab-sandbox) | ConvertFrom-Json)[0]
+  $sandboxImage = $sandboxInfo.Image
+  $agentLabImage = (& docker image inspect "ai-stack-agent-lab:latest" --format "{{.Id}}" 2>$null)
+  $runsMount = @($sandboxInfo.Mounts | Where-Object { $_.Destination -eq "/runs" -and -not $_.RW }).Count -eq 1
+  $jobsMount = @($sandboxInfo.Mounts | Where-Object { $_.Destination -eq "/jobs" -and $_.RW }).Count -eq 1
+  $networkless = $sandboxInfo.HostConfig.NetworkMode -eq "none"
+  $noSecret = @($sandboxInfo.Config.Env | Where-Object { $_ -like "AI_API_KEY=*" -or $_ -like "SUPERVISOR_TOKEN=*" -or $_ -like "LLAMA_API_KEY=*" }).Count -eq 0
+  if($sandboxImage -eq $agentLabImage -and $runsMount -and $jobsMount -and $networkless -and $noSecret) {
+    Pass "agent-lab-sandbox-isolation" "current image; network=none; runs=ro; no AI credentials"
+  } else {
+    Fail "agent-lab-sandbox-isolation" ("imageCurrent=" + ($sandboxImage -eq $agentLabImage) + "; runsRO=$runsMount; jobsRW=$jobsMount; networkNone=$networkless; noSecrets=$noSecret")
+  }
+} catch { Fail "agent-lab-sandbox-isolation" $_ }
+
+foreach($svc in @("docker-control","supervisor","telemetry","gateway","dashboard","mcp","agent-lab","stt","vlm")) {
   $currentHash = (& python (Join-Path $PSScriptRoot "source_hash.py") $svc).Trim()
   $imageJson = & docker image inspect ("ai-stack-" + $svc + ":latest") 2>$null
   $builtHash = $null
@@ -90,6 +105,15 @@ try {
   if($proxy.service -eq "gateway") { Pass "dashboard-proxy" ("gateway v" + $proxy.version) }
   else { Fail "dashboard-proxy" ("unexpected backend: " + ($proxy | ConvertTo-Json -Compress)) }
 } catch { Fail "dashboard-proxy" $_ }
+
+try {
+  $lab = Invoke-RestMethod -Uri "http://127.0.0.1:8770/health" -TimeoutSec 4
+  if($lab.service -eq "agent-lab" -and $lab.status -eq "ok" -and $lab.sandbox -eq "ok") {
+    Pass "agent-lab" ("v" + $lab.version + "; sandbox=ok; activeRuns=" + @($lab.active_runs).Count)
+  } else {
+    Fail "agent-lab" ("unexpected response: " + ($lab | ConvertTo-Json -Compress))
+  }
+} catch { Fail "agent-lab" $_ }
 
 $drives=Get-PSDrive C,D -ErrorAction SilentlyContinue
 foreach($d in $drives) { Pass ("disk:"+$d.Name) (([math]::Round($d.Free/1GB,1)).ToString()+" GiB free") }

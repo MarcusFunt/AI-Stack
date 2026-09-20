@@ -136,6 +136,7 @@ Maintenance:
 .\scripts\ai.ps1 smoke
 .\scripts\ai.ps1 test-leases
 .\scripts\ai.ps1 test-proxy
+.\scripts\ai.ps1 test-agent-lab
 .\scripts\ai.ps1 burn-in
 .\scripts\ai.ps1 bench llm
 .\scripts\ai.ps1 bench reasoning
@@ -172,6 +173,26 @@ Common commands:
 The OpenCode server binds only to `127.0.0.1:4096` and uses a generated credential stored only in the ignored `.env`. The coding agent is explicitly denied reads of `.env`/environment override files, asks before destructive Git/Compose operations, and denies Docker system pruning.
 
 The primary coding model is `ai-stack/local-fast` with a 32,768-token runtime context. For deeper reasoning, OpenCode should call the attached `local-ai` MCP server's `ask_local_ai` tool in reasoning mode. The 8,192-token reasoning worker is intentionally not exposed as an OpenCode primary model because OpenCode's own instruction/tool context is too large for that runtime setting.
+
+## Agent Lab
+
+Agent Lab is the experimental LangGraph subsystem for reproducible local-agent development. Its API binds only to `127.0.0.1:8770`. A run is persisted in SQLite, resolved against a committed Git revision, and executed in a detached worktree created from Agent Lab's own bare mirror.
+
+The controller does not mount the live working tree, models, or the Docker socket. It receives only the repository's `.git` directory read-only plus `data/agent-lab` as private writable state. The v0.1 worker gives the model a bounded repository context and accepts at most five exact text replacements per iteration; it does not expose an unrestricted shell.
+
+Repository tests execute in a separate `agent-lab-sandbox` container. That sandbox has no network namespace, no AI/API credentials, a read-only mount of run workspaces, and only a root-owned file queue for returning structured results. The test subprocess is demoted to an unprivileged UID before repository code executes. This keeps arbitrary test/import code away from the controller's gateway credential and experiment database.
+
+Current v0.1 workflow:
+- `POST /runs` creates a persisted isolated run and worktree.
+- `POST /runs/{id}/execute` starts the LangGraph repair loop.
+- `GET /runs/{id}` and `GET /runs/{id}/events` expose structured status and history.
+- `POST /runs/{id}/cancel` cancels a queued/ready run; active cancellation is not implemented yet.
+- `POST /runs/{id}/cleanup` removes a terminal run's private worktree while retaining its history.
+- `GET /harnesses` lists available evaluation harnesses.
+
+Only the `python-unit` harness exists in v0.1. By default a run must begin with a failing baseline so an unrelated already-green test suite cannot be treated as evidence that an objective was solved. Multi-harness execution, active-run cancellation, benchmark/holdout promotion, harness mutation, self-modification, and automatic promotion are intentionally deferred.
+
+Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab`.
 
 ## Logical models
 

@@ -10,6 +10,7 @@ CONTEXTS = {
     "gateway": ROOT / "gateway",
     "dashboard": ROOT / "dashboard",
     "mcp": ROOT / "mcp",
+    "agent-lab": ROOT / "agent_lab",
     "stt": ROOT / "stt",
     "vlm": ROOT / "vlm",
 }

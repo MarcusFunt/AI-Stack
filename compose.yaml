@@ -205,6 +205,75 @@ services:
       timeout: 4s
       retries: 6
 
+  agent-lab-sandbox:
+    image: ai-stack-agent-lab:latest
+    container_name: ai-stack-agent-lab-sandbox
+    restart: unless-stopped
+    init: true
+    read_only: true
+    network_mode: "none"
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    environment:
+      AGENT_LAB_RUNS_ROOT: /runs
+      AGENT_LAB_JOBS_ROOT: /jobs
+    volumes:
+      - ./data/agent-lab/runs:/runs:ro
+      - ./data/agent-lab/sandbox:/jobs
+    command: ["python", "-m", "agent_lab.sandbox"]
+    healthcheck:
+      test: ["CMD","python","-c","import json,time,pathlib; p=json.loads(pathlib.Path('/jobs/heartbeat.json').read_text()); assert time.time()-float(p['ts']) < 5"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  agent-lab:
+    build:
+      context: ./agent_lab
+      args:
+        SOURCE_HASH: ${AI_STACK_AGENT_LAB_SOURCE_HASH:-unknown}
+    container_name: ai-stack-agent-lab
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AGENT_LAB_SOURCE_REPO: /source.git
+      AGENT_LAB_DATA_ROOT: /data
+      AGENT_LAB_DB: /data/agent-lab.sqlite3
+      AGENT_LAB_MODEL: local-fast
+      AGENT_LAB_MAX_WORKERS: "1"
+      GATEWAY_URL: http://gateway:8000
+      AI_API_KEY: ${AI_API_KEY}
+    depends_on:
+      gateway:
+        condition: service_healthy
+      agent-lab-sandbox:
+        condition: service_healthy
+    volumes:
+      - ./.git:/source.git:ro
+      - ./data/agent-lab:/data
+    ports:
+      - "127.0.0.1:${AGENT_LAB_PORT:-8770}:8000"
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)); assert d.get('status') == 'ok' and d.get('sandbox') == 'ok'"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
   llm:
     <<: *gpu-base
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
