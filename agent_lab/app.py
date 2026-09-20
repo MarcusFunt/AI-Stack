@@ -102,6 +102,30 @@ def cancel_run(run_id: str) -> RunRecord:
         raise _not_found_or_bad_request(exc) from exc
 
 
+@app.post("/runs/{run_id}/evaluate", status_code=202)
+def evaluate_candidate(run_id: str) -> dict:
+    try:
+        return controller().start_candidate_evaluation(run_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _not_found_or_bad_request(exc) from exc
+
+
+@app.get("/runs/{run_id}/evaluations")
+def candidate_evaluations(run_id: str) -> list[dict]:
+    try:
+        return controller().candidate_evaluations(run_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _not_found_or_bad_request(exc) from exc
+
+
+@app.post("/evaluations/{evaluation_id}/cancel")
+def cancel_candidate_evaluation(evaluation_id: str) -> dict:
+    try:
+        return controller().cancel_candidate_evaluation(evaluation_id)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise _not_found_or_bad_request(exc) from exc
+
+
 @app.get("/runs/{run_id}/promotion-review", response_model=PromotionReview)
 def promotion_review(run_id: str) -> PromotionReview:
     try:

@@ -7,12 +7,24 @@ from .worktrees import WorktreeError, WorktreeManager
 
 
 _PROTECTED_TOP_LEVEL = {"data", "models", "third_party"}
-_SELF_MODIFICATION_PATHS = {
+_ROOT_TRUST_PATHS = {
     "compose.yaml",
     "scripts/ai.ps1",
     "scripts/doctor.ps1",
     "scripts/source_hash.py",
+    "agent_lab/app.py",
+    "agent_lab/controller.py",
+    "agent_lab/evaluator_client.py",
+    "agent_lab/promotion.py",
+    "agent_lab/sandbox.py",
+    "agent_lab/sandbox_client.py",
+    "agent_lab/schemas.py",
+    "agent_lab/worktrees.py",
 }
+_EXPERIMENTAL_SELF_PREFIXES = (
+    "agent_lab/worker/",
+    "agent_lab/harnesses/",
+)
 
 
 def _protected_path(path: str) -> str | None:
@@ -30,9 +42,56 @@ def _protected_path(path: str) -> str | None:
     return None
 
 
-def _is_self_modification(path: str) -> bool:
+def _self_modification_class(path: str) -> str | None:
     normalized = path.replace("\\", "/")
-    return normalized.startswith("agent_lab/") or normalized in _SELF_MODIFICATION_PATHS
+    if normalized in _ROOT_TRUST_PATHS:
+        return "root-trust"
+    if any(normalized.startswith(prefix) for prefix in _EXPERIMENTAL_SELF_PREFIXES):
+        return "experimental"
+    if normalized.startswith("agent_lab/"):
+        return "root-trust"
+    return None
+
+
+def _valid_self_eval_evidence(
+    evidence: dict | None,
+    *,
+    run_id: str,
+    candidate_commit: str,
+    base_commit: str,
+) -> tuple[bool, str]:
+    if not evidence:
+        return False, "no verified candidate-specific evaluator evidence"
+    if not evidence.get("verified"):
+        return False, "candidate evaluator attestation is not verified"
+    evaluation = evidence.get("evaluation") or {}
+    attestation = evidence.get("attestation") or {}
+    if evaluation.get("run_id") != run_id:
+        return False, "evaluation run id does not match candidate run"
+    if evaluation.get("candidate_commit") != candidate_commit:
+        return False, "evaluation candidate commit does not match"
+    if evaluation.get("base_commit") != base_commit:
+        return False, "evaluation base commit does not match"
+    if evaluation.get("status") != "passed" or attestation.get("status") != "passed":
+        return False, "candidate-specific evaluation did not pass"
+    if attestation.get("suite") != "agent-lab-selfmod-v1":
+        return False, "unexpected evaluator suite"
+    critical = attestation.get("critical_checks") or {}
+    if not critical or not all(bool(value) for value in critical.values()):
+        return False, "one or more evaluator critical checks failed"
+    case_results = attestation.get("case_results") or []
+    if not case_results:
+        return False, "sealed evaluator returned no case results"
+    comparison = attestation.get("comparison") or {}
+    if not comparison.get("compatible"):
+        return False, "sealed evaluator result is not reference-compatible"
+    if comparison.get("regressions"):
+        return False, "sealed evaluator detected regressions"
+    if not comparison.get("meets_reference"):
+        return False, "candidate does not meet sealed evaluator reference"
+    if not attestation.get("reference_hash"):
+        return False, "sealed evaluator attestation is not bound to a reference"
+    return True, "verified sealed candidate-specific evaluation passed"
 
 
 def review_candidate(
@@ -41,6 +100,7 @@ def review_candidate(
     *,
     max_files: int = 10,
     max_changed_lines: int = 500,
+    self_eval_evidence: dict | None = None,
 ) -> PromotionReview:
     checks: list[ReviewCheck] = []
 
@@ -175,13 +235,37 @@ def review_candidate(
             else:
                 check("file-deletions", "pass", "no files deleted")
 
-            self_changes = [path for path in files if _is_self_modification(path)]
-            if self_changes:
+            self_changes = {
+                path: _self_modification_class(path)
+                for path in files
+                if _self_modification_class(path) is not None
+            }
+            root_trust = [
+                path for path, kind in self_changes.items()
+                if kind == "root-trust"
+            ]
+            experimental = [
+                path for path, kind in self_changes.items()
+                if kind == "experimental"
+            ]
+            if root_trust:
                 check(
                     "self-modification",
                     "block",
-                    "Agent Lab/control-plane changes require candidate-specific "
-                    "benchmarking before promotion: " + ", ".join(self_changes),
+                    "root-of-trust files are always manual-only: "
+                    + ", ".join(root_trust),
+                )
+            elif experimental:
+                valid, message = _valid_self_eval_evidence(
+                    self_eval_evidence,
+                    run_id=run.id,
+                    candidate_commit=str(recorded_candidate),
+                    base_commit=str(base_commit),
+                )
+                check(
+                    "self-modification",
+                    "pass" if valid else "block",
+                    message + ": " + ", ".join(experimental),
                 )
             else:
                 check("self-modification", "pass", "candidate does not alter Agent Lab")

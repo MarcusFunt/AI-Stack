@@ -24,6 +24,8 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def drop_to_unprivileged() -> None:
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        return
     os.setgroups([])
     os.setgid(65534)
     os.setuid(65534)
