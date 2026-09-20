@@ -43,11 +43,14 @@ class AgentRunner:
         self.started_at = time.monotonic()
         self.graph = self._build_graph()
 
+    def _remaining_wall_time_seconds(self) -> float:
+        elapsed = time.monotonic() - self.started_at
+        return max(0.0, self.task.budget.wall_time_minutes * 60 - elapsed)
+
     def _guard(self) -> None:
         if self.cancelled():
             raise AgentCancelled("run cancellation requested")
-        elapsed = time.monotonic() - self.started_at
-        if elapsed > self.task.budget.wall_time_minutes * 60:
+        if self._remaining_wall_time_seconds() <= 0:
             raise AgentBudgetExceeded("run wall-time budget exceeded")
 
     def _build_graph(self):
@@ -126,10 +129,17 @@ class AgentRunner:
         self._guard()
         iteration = int(state.get("iteration", 0)) + 1
         context = collect_repository_context(self.workspace)
-        self.emit("model_iteration_started", {"iteration": iteration})
+        remaining = self._remaining_wall_time_seconds()
+        self.emit(
+            "model_iteration_started",
+            {"iteration": iteration, "remaining_wall_time_s": round(remaining, 3)},
+        )
         try:
             proposal = self.model.propose_patch(
-                self.task.objective, context, state.get("harness_result")
+                self.task.objective,
+                context,
+                state.get("harness_result"),
+                timeout_seconds=remaining,
             )
             edits = proposal.get("edits", [])
             summary = str(proposal.get("summary", ""))
@@ -143,20 +153,33 @@ class AgentRunner:
                 "plan": summary,
                 "proposed_edits": edits,
                 "error": "",
+                "budget_exhausted": False,
             }
         except Exception as exc:
-            self.emit("model_iteration_failed", {"iteration": iteration, "error": str(exc)})
+            exhausted = self._remaining_wall_time_seconds() <= 0
+            message = f"model proposal failed: {exc}"
+            if exhausted:
+                message += "; run wall-time budget exhausted"
+            self.emit(
+                "model_iteration_failed",
+                {
+                    "iteration": iteration,
+                    "error": str(exc),
+                    "budget_exhausted": exhausted,
+                },
+            )
             return {
                 "iteration": iteration,
                 "proposed_edits": [],
-                "error": f"model proposal failed: {exc}",
+                "error": message,
+                "budget_exhausted": exhausted,
             }
 
     def _apply(self, state: AgentState) -> dict:
-        self._guard()
         edits = state.get("proposed_edits", [])
-        if not edits:
+        if state.get("budget_exhausted") or not edits:
             return {}
+        self._guard()
         try:
             changed = apply_exact_edits(
                 self.workspace,
@@ -190,6 +213,8 @@ class AgentRunner:
         return "propose"
 
     def _route_apply(self, state: AgentState) -> str:
+        if state.get("budget_exhausted"):
+            return "finalize"
         if state.get("error") or not state.get("proposed_edits"):
             if int(state.get("iteration", 0)) < self.task.budget.max_iterations:
                 return "propose"
@@ -204,13 +229,14 @@ class AgentRunner:
         return "propose"
 
     def _finalize(self, state: AgentState) -> dict:
-        self._guard()
         passed = state.get("harness_result", {}).get("status") == "passed"
         baseline_only = int(state.get("iteration", 0)) == 0
         baseline_unproven = baseline_only and self.task.require_failing_baseline and passed
         holdout = state.get("holdout_result", {})
         holdout_failed = holdout.get("status") == "failed"
         error = state.get("error", "")
+        if state.get("budget_exhausted") and not error:
+            error = "run wall-time budget exhausted"
         if baseline_unproven:
             error = "baseline harness already passed; objective is not proven by a failing regression"
         elif holdout_failed:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ def execute_python_unit(
         raise FileNotFoundError(f"workspace not found: {run_id}")
 
     if suite == "public":
-        command = ["python", "-m", "unittest", "discover", "-v"]
+        command = [sys.executable, "-m", "unittest", "discover", "-v"]
     elif suite == "holdout":
         holdout = workspace / ".agent_lab_holdout"
         if not holdout.is_dir():
@@ -56,20 +57,33 @@ def execute_python_unit(
                 "skipped": True,
             }
         command = [
-            "python", "-m", "unittest", "discover", "-v",
+            sys.executable, "-m", "unittest", "discover", "-v",
             "-s", ".agent_lab_holdout",
         ]
     else:
         raise ValueError(f"unsupported test suite: {suite}")
 
     env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "HOME": "/tmp",
-        "TMPDIR": "/tmp",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
     }
+    if os.name == "posix":
+        env.update(
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "HOME": "/tmp",
+                "TMPDIR": "/tmp",
+            }
+        )
+    else:
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
     started = time.monotonic()
+    kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        kwargs["preexec_fn"] = drop_to_unprivileged
     proc = subprocess.run(
         command,
         cwd=workspace,
@@ -78,7 +92,7 @@ def execute_python_unit(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=max(1, min(int(timeout_s), 600)),
-        preexec_fn=drop_to_unprivileged,
+        **kwargs,
     )
     return {
         "returncode": proc.returncode,

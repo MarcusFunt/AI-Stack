@@ -19,3 +19,4 @@ class AgentState(TypedDict, total=False):
     holdout_result: dict[str, Any]
     final_status: str
     error: str
+    budget_exhausted: bool

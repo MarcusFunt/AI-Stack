@@ -101,6 +101,40 @@ class PatchTests(unittest.TestCase):
                         ],
                     )
 
+    def test_rejects_ambiguous_replacement_and_duplicate_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "example.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(PatchError, "exactly once"):
+                apply_exact_edits(
+                    root,
+                    [{"path": "example.py", "old": "x = 1", "new": "x = 2"}],
+                )
+            (root / "example.py").write_text("x = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(PatchError, "same file"):
+                apply_exact_edits(
+                    root,
+                    [
+                        {"path": "example.py", "old": "x = 1", "new": "x = 2"},
+                        {"path": "example.py", "old": "x = 1", "new": "x = 3"},
+                    ],
+                )
+
+    def test_rejects_excess_operations_and_unsupported_new_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            edits = [
+                {"op": "create", "path": f"f{i}.py", "content": "x = 1\n"}
+                for i in range(6)
+            ]
+            with self.assertRaisesRegex(PatchError, "more than 5"):
+                apply_exact_edits(root, edits)
+            with self.assertRaisesRegex(PatchError, "unsupported new-file type"):
+                apply_exact_edits(
+                    root,
+                    [{"op": "create", "path": "payload.exe", "content": "nope"}],
+                )
+
     def test_test_edits_require_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -120,7 +154,6 @@ class PatchTests(unittest.TestCase):
             )
             self.assertEqual(changed, ["test_feature.py"])
             self.assertEqual(target.read_text(encoding="utf-8"), "x = 2\n")
-
 
 if __name__ == "__main__":
     unittest.main()

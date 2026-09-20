@@ -45,7 +45,7 @@ class HoldoutFailHarness(Harness):
 
 
 class RepairModel:
-    def propose_patch(self, objective, repo_context, prior_result):
+    def propose_patch(self, objective, repo_context, prior_result, timeout_seconds=None):
         return {
             "summary": "repair visible behavior",
             "edits": [

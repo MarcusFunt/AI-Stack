@@ -273,13 +273,13 @@ class AgentLabController:
         return self.evaluator.cancel(evaluation_id)
 
     def latest_benchmark(self) -> dict[str, Any]:
-        latest = load_latest(self.data_root)
+        latest = load_latest(self.data_root, self.model.model)
         if latest is None:
             raise KeyError("no benchmark results")
         return latest
 
     def benchmark_reference(self) -> dict[str, Any]:
-        reference = load_reference(self.data_root)
+        reference = load_reference(self.data_root, self.model.model)
         if reference is None:
             raise KeyError("no benchmark reference")
         return reference

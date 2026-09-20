@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,17 @@ class RunStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -55,7 +65,7 @@ class RunStore:
 
     def create_run(self, run_id: str, task: TaskSpec) -> RunRecord:
         now = utcnow()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 "INSERT INTO runs(id,status,task_json,created_at,updated_at) VALUES(?,?,?,?,?)",
                 (run_id, RunStatus.PREPARING.value, task.model_dump_json(), now, now),
@@ -82,7 +92,7 @@ class RunStore:
             values.append(value)
         fields.append("updated_at=?")
         values.extend([utcnow(), run_id])
-        with self._connect() as conn:
+        with self._connection() as conn:
             cur = conn.execute(
                 f"UPDATE runs SET {', '.join(fields)} WHERE id=?", values
             )
@@ -105,28 +115,28 @@ class RunStore:
         )
 
     def get_run(self, run_id: str) -> RunRecord:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             raise KeyError(run_id)
         return self._row_to_run(row)
 
     def list_runs(self, limit: int = 100) -> list[RunRecord]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [self._row_to_run(row) for row in rows]
 
     def add_event(self, run_id: str, kind: str, payload: dict[str, Any] | None = None) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 "INSERT INTO events(run_id,ts,kind,payload_json) VALUES(?,?,?,?)",
                 (run_id, utcnow(), kind, json.dumps(payload or {})),
             )
 
     def list_events(self, run_id: str) -> list[EventRecord]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM events WHERE run_id=? ORDER BY id", (run_id,)
             ).fetchall()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ class EvaluationStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS evaluations (
@@ -50,6 +51,15 @@ class EvaluationStore:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def create(
         self,
         evaluation_id: str,
@@ -63,7 +73,7 @@ class EvaluationStore:
         wall_time_seconds: int,
     ) -> EvaluationRecord:
         now = utcnow()
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO evaluations(
@@ -99,7 +109,7 @@ class EvaluationStore:
             values.append(value)
         fields.append("updated_at=?")
         values.extend([utcnow(), evaluation_id])
-        with self._connect() as conn:
+        with self._connection() as conn:
             cur = conn.execute(
                 f"UPDATE evaluations SET {', '.join(fields)} WHERE id=?",
                 values,
@@ -129,7 +139,7 @@ class EvaluationStore:
         )
 
     def get(self, evaluation_id: str) -> EvaluationRecord:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM evaluations WHERE id=?", (evaluation_id,)
             ).fetchone()
@@ -138,7 +148,7 @@ class EvaluationStore:
         return self._row(row)
 
     def by_run(self, run_id: str, limit: int = 20) -> list[EvaluationRecord]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM evaluations WHERE run_id=? ORDER BY created_at DESC LIMIT ?",
                 (run_id, limit),
@@ -146,7 +156,7 @@ class EvaluationStore:
         return [self._row(row) for row in rows]
 
     def list(self, limit: int = 100) -> list[EvaluationRecord]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM evaluations ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
@@ -159,7 +169,7 @@ class EvaluationStore:
             EvaluationStatus.RUNNING.value,
             EvaluationStatus.CANCELLING.value,
         }
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 "SELECT id,status FROM evaluations WHERE status IN (?,?,?,?)",
                 tuple(inflight),

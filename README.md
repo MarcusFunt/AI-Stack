@@ -195,11 +195,20 @@ Current v0.3 workflow:
 
 The harness registry currently includes `python-unit` and `python-syntax`. Python-unit tasks can include a hidden `.agent_lab_holdout` suite: visible tests drive repair iterations, while hidden tests are excluded from model context and run only after a visible pass. By default a run must begin with a failing baseline so an unrelated already-green test suite cannot be treated as evidence that an objective was solved. Controller restarts recover stale preparing/running/cancelling records as errors instead of leaving them permanently in-flight.
 
-The local benchmark is `agent-lab-core-v2`: 13 repair tasks covering behavioral bugs, hidden edge cases, syntax repair, new-module creation, and combined create+repair changes. The current `local-fast` reference is 13/13 on this small diagnostic suite; it is a plumbing/capability baseline, not a broad coding-quality claim. Full compatible runs compare case-by-case against a separate known-good reference. The reference advances only after a full-suite run with no failures and no regressions; subset/debug runs may update `latest` but cannot replace the reference. `.\scripts\ai.ps1 bench-agent-lab` fails on any current case failure or reference regression. The latest full v0.3 run had 0 regressions and a pass-rate delta of 0.
+The local benchmark is `agent-lab-core-v2`: 16 repair tasks covering behavioral bugs, hidden edge cases, syntax repair, new-module creation, combined create+repair changes, input-mutation safety, numeric parsing/clamping, and configuration merging. Benchmark `latest` and `reference` state is kept separately for each logical model, so `local-fast` and `local-reasoning` cannot overwrite each other's regression baselines. A subset/debug run can compare its selected cases against the same cases in a compatible full-suite reference, but only a completely green full-suite run may advance that model's reference. The previously stored 13-case `local-fast` reference remains usable only where its case set covers the requested comparison. `.\scripts\ai.ps1 bench-agent-lab` fails on any current case failure or compatible reference regression.
 
 Promotion remains deliberately manual. A small non-Agent-Lab candidate can become eligible for manual promotion review, but automatic promotion is disabled. Changes to Agent Lab or its control-plane integration are explicitly blocked by the review gate until candidate-specific benchmark execution exists, so the subsystem cannot use its own current benchmark result as evidence for untested self-modification.
 
-Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab` and the real-model regression gate with `.\scripts\ai.ps1 bench-agent-lab`. Multi-harness execution within a single run, model-token accounting, candidate-specific self-modification benchmarks, harness mutation, and automatic promotion remain deferred.
+Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab` and the real-model regression gate with `.\scripts\ai.ps1 bench-agent-lab`. Two higher-level entry points cover the broader testing pass:
+
+```powershell
+.\scripts\test-code.ps1
+.\scripts\test-ai.ps1 -Model local-fast
+.\scripts\test-ai.ps1 -Model local-reasoning
+.\scripts\test-ai.ps1 -Model both -FullAgentCoding
+```
+
+`test-code.ps1` validates Compose/Python, runs Agent Lab and sealed-evaluator unit tests, and executes the sandbox privilege/secrecy check in the actual networkless sandbox container. `test-ai.ps1` first runs deterministic raw-model contract checks and then coding-agent tasks with visible tests plus hidden holdouts; it reports all stages before failing so one bad model check does not hide later coding results. Raw-model summaries are persisted under `data\agent-lab\model-quality`, while coding benchmark evidence remains under `data\agent-lab\benchmarks`. Multi-harness execution within a single run, model-token accounting, harness mutation, and automatic promotion remain deferred.
 
 ## Logical models
 

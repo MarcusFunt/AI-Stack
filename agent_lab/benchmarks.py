@@ -16,6 +16,7 @@ from agent_lab.benchmark_history import (
     compare_summaries,
     load_latest,
     load_reference,
+    save_latest,
     save_reference,
 )
 from agent_lab.harnesses import HarnessRegistry
@@ -328,6 +329,123 @@ class Holdout(unittest.TestCase):
         self.assertEqual(greet("linus"), "Hello, linus")
 """,
     ),
+    BenchmarkCase(
+        id="bounded-history",
+        objective=(
+            "Fix append_bounded(items, value, limit) so it returns a new list "
+            "containing the newest at most limit items after appending value, "
+            "does not mutate items, and raises ValueError when limit is below 1."
+        ),
+        files={
+            "history.py": (
+                "def append_bounded(items, value, limit):\n"
+                "    items.append(value)\n"
+                "    return items\n"
+            )
+        },
+        public_tests="""import unittest
+from history import append_bounded
+
+class Tests(unittest.TestCase):
+    def test_trims_oldest(self):
+        self.assertEqual(append_bounded([1, 2, 3], 4, 3), [2, 3, 4])
+""",
+        holdout_tests="""import unittest
+from history import append_bounded
+
+class Holdout(unittest.TestCase):
+    def test_does_not_mutate_input(self):
+        original = [1, 2]
+        self.assertEqual(append_bounded(original, 3, 5), [1, 2, 3])
+        self.assertEqual(original, [1, 2])
+
+    def test_limit_one(self):
+        self.assertEqual(append_bounded([1, 2], 3, 1), [3])
+
+    def test_invalid_limit(self):
+        with self.assertRaises(ValueError):
+            append_bounded([], 1, 0)
+""",
+    ),
+    BenchmarkCase(
+        id="parse-timeout",
+        objective=(
+            "Fix parse_timeout(value, default=5.0, cap=60.0). Accept numbers "
+            "and numeric strings, return default for None or invalid values, "
+            "and clamp valid values into the inclusive range 0..cap."
+        ),
+        files={
+            "timeouts.py": (
+                "def parse_timeout(value, default=5.0, cap=60.0):\n"
+                "    return float(value)\n"
+            )
+        },
+        public_tests="""import unittest
+from timeouts import parse_timeout
+
+class Tests(unittest.TestCase):
+    def test_numeric_string(self):
+        self.assertEqual(parse_timeout("12.5"), 12.5)
+
+    def test_cap(self):
+        self.assertEqual(parse_timeout(90), 60.0)
+""",
+        holdout_tests="""import unittest
+from timeouts import parse_timeout
+
+class Holdout(unittest.TestCase):
+    def test_none_and_invalid_use_default(self):
+        self.assertEqual(parse_timeout(None, default=3.0), 3.0)
+        self.assertEqual(parse_timeout("bad", default=4.0), 4.0)
+
+    def test_negative_clamps_to_zero(self):
+        self.assertEqual(parse_timeout(-2), 0.0)
+
+    def test_custom_cap(self):
+        self.assertEqual(parse_timeout("9", cap=7.0), 7.0)
+""",
+    ),
+    BenchmarkCase(
+        id="merge-defaults",
+        objective=(
+            "Create defaults.py defining DEFAULTS = {'retries': 3, 'timeout': 5}. "
+            "Fix merged_settings(overrides) in config.py so it returns a new dict "
+            "containing DEFAULTS updated by overrides without mutating either input."
+        ),
+        files={
+            "config.py": (
+                "def merged_settings(overrides):\n"
+                "    return overrides\n"
+            )
+        },
+        public_tests="""import unittest
+from config import merged_settings
+
+class Tests(unittest.TestCase):
+    def test_override(self):
+        self.assertEqual(
+            merged_settings({"timeout": 9}),
+            {"retries": 3, "timeout": 9},
+        )
+""",
+        holdout_tests="""import unittest
+from config import merged_settings
+from defaults import DEFAULTS
+
+class Holdout(unittest.TestCase):
+    def test_defaults_constant(self):
+        self.assertEqual(DEFAULTS, {"retries": 3, "timeout": 5})
+
+    def test_inputs_are_not_mutated(self):
+        overrides = {"retries": 8}
+        self.assertEqual(
+            merged_settings(overrides),
+            {"retries": 8, "timeout": 5},
+        )
+        self.assertEqual(overrides, {"retries": 8})
+        self.assertEqual(DEFAULTS, {"retries": 3, "timeout": 5})
+""",
+    ),
 )
 
 
@@ -387,6 +505,11 @@ def _case_result(
         "holdout_status": holdout.get("status"),
         "files_changed": sorted(set(state.get("applied_edits", []))),
         "error": state.get("error", ""),
+        "public_checks": (
+            public.get("checks", [])
+            if public.get("status") != "passed"
+            else []
+        ),
         "duration_s": round(elapsed, 3),
     }
 
@@ -414,7 +537,7 @@ def run_suite(
         raise ValueError("no benchmark cases selected")
     _validate_cases(cases)
 
-    previous = load_reference(data_root) or load_latest(data_root)
+    previous = load_reference(data_root, model_name) or load_latest(data_root, model_name)
     full_case_ids = {case.id for case in CASES}
     is_full_suite = {case.id for case in cases} == full_case_ids
     suite_started = time.monotonic()
@@ -505,9 +628,7 @@ def run_suite(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = out_root / f"{stamp}-{model_name}.json"
     out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    (out_root / "latest.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
+    save_latest(data_root, summary)
     if reference_ok:
         save_reference(data_root, summary)
     print(

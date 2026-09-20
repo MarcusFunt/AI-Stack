@@ -6,17 +6,19 @@ from pathlib import Path
 from agent_lab.benchmark_history import (
     benchmark_root,
     compare_summaries,
+    load_latest,
     load_reference,
+    save_latest,
     save_reference,
 )
 
 
-def summary(statuses):
+def summary(statuses, model="local-fast"):
     results = [{"case": case, "status": status} for case, status in statuses.items()]
     passed = sum(status == "passed" for status in statuses.values())
     return {
         "suite": "agent-lab-core-v2",
-        "model": "local-fast",
+        "model": model,
         "case_ids": list(statuses),
         "cases": len(statuses),
         "passed": passed,
@@ -36,12 +38,44 @@ class BenchmarkHistoryTests(unittest.TestCase):
         self.assertEqual(comparison["improvements"], ["b"])
         self.assertFalse(comparison["no_regressions"])
 
-    def test_different_case_sets_are_not_compared(self):
+    def test_subset_compares_against_covered_full_suite(self):
+        comparison = compare_summaries(
+            summary({"a": "passed", "b": "failed"}),
+            summary({"a": "failed"}),
+        )
+        self.assertTrue(comparison["compatible"])
+        self.assertEqual(comparison["scope"], "subset")
+        self.assertEqual(comparison["regressions"], ["a"])
+        self.assertEqual(comparison["pass_rate_delta"], -1.0)
+        self.assertIsNone(comparison["duration_delta_s"])
+
+    def test_previous_subset_cannot_cover_larger_current_suite(self):
         comparison = compare_summaries(
             summary({"a": "passed"}),
             summary({"a": "passed", "b": "passed"}),
         )
         self.assertFalse(comparison["compatible"])
+
+    def test_model_references_and_latest_results_are_isolated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fast = summary({"a": "passed", "b": "passed"})
+            reasoning = summary(
+                {"a": "passed", "b": "failed"},
+                model="local-reasoning",
+            )
+            save_reference(root, fast)
+            save_reference(root, reasoning)
+            save_latest(root, fast)
+            save_latest(root, reasoning)
+
+            self.assertEqual(load_reference(root, "local-fast")["model"], "local-fast")
+            self.assertEqual(
+                load_reference(root, "local-reasoning")["model"],
+                "local-reasoning",
+            )
+            self.assertEqual(load_latest(root, "local-fast")["passed"], 2)
+            self.assertEqual(load_latest(root, "local-reasoning")["passed"], 1)
 
     def test_subset_latest_does_not_replace_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,11 +83,8 @@ class BenchmarkHistoryTests(unittest.TestCase):
             full = summary({"a": "passed", "b": "passed"})
             subset = summary({"a": "passed"})
             save_reference(root, full)
-            bench_root = benchmark_root(root)
-            (bench_root / "latest.json").write_text(
-                json.dumps(subset), encoding="utf-8"
-            )
-            reference = load_reference(root)
+            save_latest(root, subset)
+            reference = load_reference(root, "local-fast")
             self.assertEqual(reference["case_ids"], full["case_ids"])
             self.assertEqual(reference["cases"], 2)
 

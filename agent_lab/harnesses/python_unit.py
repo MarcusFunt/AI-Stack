@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -39,9 +41,13 @@ class PythonUnitHarness(Harness):
             returncode = int(payload.get("returncode", 1))
         else:
             started = time.monotonic()
+            env = os.environ.copy()
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONUNBUFFERED"] = "1"
             proc = subprocess.run(
-                ["python", "-m", "unittest", "discover", "-v"],
+                [sys.executable, "-m", "unittest", "discover", "-v"],
                 cwd=workspace,
+                env=env,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

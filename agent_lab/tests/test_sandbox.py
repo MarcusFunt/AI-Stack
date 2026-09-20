@@ -7,6 +7,10 @@ import agent_lab.sandbox as sandbox
 
 
 class SandboxTests(unittest.TestCase):
+    @unittest.skipUnless(
+        os.environ.get("AGENT_LAB_SANDBOX_TEST") == "1",
+        "run in the agent-lab-sandbox container",
+    )
     def test_python_tests_run_without_controller_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

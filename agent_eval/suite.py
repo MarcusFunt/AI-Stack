@@ -108,7 +108,7 @@ class Tests(unittest.TestCase):
 from words import count_words
 class Hidden(unittest.TestCase):
     def test_tabs_newlines(self):
-        self.assertEqual(count_words("one\ttwo\nthree"), 3)
+        self.assertEqual(count_words("one\\ttwo\\nthree"), 3)
     def test_blank(self):
         self.assertEqual(count_words("   "), 0)
 """,
@@ -210,6 +210,69 @@ class Hidden(unittest.TestCase):
         self.assertEqual(first_or_none([0,2]), 0)
     def test_tuple(self):
         self.assertEqual(first_or_none(("x","y")), "x")
+""",
+    ),
+    SealedCase(
+        id="bounded-history",
+        objective=(
+            "Fix append_bounded(items, value, limit) so it returns a new list "
+            "with the newest at most limit values, never mutates items, and "
+            "raises ValueError when limit is below 1."
+        ),
+        files={
+            "history.py": (
+                "def append_bounded(items, value, limit):\n"
+                "    items.append(value)\n"
+                "    return items\n"
+            )
+        },
+        public_tests="""import unittest
+from history import append_bounded
+class Tests(unittest.TestCase):
+    def test_trim(self):
+        self.assertEqual(append_bounded([1,2,3], 4, 3), [2,3,4])
+""",
+        hidden_tests="""import unittest
+from history import append_bounded
+class Hidden(unittest.TestCase):
+    def test_no_mutation(self):
+        values = [1,2]
+        self.assertEqual(append_bounded(values, 3, 5), [1,2,3])
+        self.assertEqual(values, [1,2])
+    def test_invalid_limit(self):
+        with self.assertRaises(ValueError):
+            append_bounded([], 1, 0)
+""",
+    ),
+    SealedCase(
+        id="parse-timeout",
+        objective=(
+            "Fix parse_timeout(value, default=5.0, cap=60.0). Accept numeric "
+            "values and strings, use default for None or invalid input, and "
+            "clamp valid values to the inclusive range 0..cap."
+        ),
+        files={
+            "timeouts.py": (
+                "def parse_timeout(value, default=5.0, cap=60.0):\n"
+                "    return float(value)\n"
+            )
+        },
+        public_tests="""import unittest
+from timeouts import parse_timeout
+class Tests(unittest.TestCase):
+    def test_string_and_cap(self):
+        self.assertEqual(parse_timeout("12.5"), 12.5)
+        self.assertEqual(parse_timeout(90), 60.0)
+""",
+        hidden_tests="""import unittest
+from timeouts import parse_timeout
+class Hidden(unittest.TestCase):
+    def test_default_paths(self):
+        self.assertEqual(parse_timeout(None, default=3), 3)
+        self.assertEqual(parse_timeout("bad", default=4), 4)
+    def test_negative_and_custom_cap(self):
+        self.assertEqual(parse_timeout(-1), 0.0)
+        self.assertEqual(parse_timeout("9", cap=7), 7.0)
 """,
     ),
 )
