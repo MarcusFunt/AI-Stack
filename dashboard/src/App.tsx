@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { localAI } from './api'
 import { AgentLabPanel } from './AgentLabPanel'
+import { MaintenancePanel } from './MaintenancePanel'
 import type { ApiCapabilities, ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
 import {
   ControlOverview, HealthPanel, JobsPanel, LogsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
@@ -14,7 +15,7 @@ import {
 import { isBadState } from './state'
 import './index.css'
 
-type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'system'
+type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'maintenance' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 const navGroups = [
@@ -43,6 +44,7 @@ const navGroups = [
     items: [
       ['setup', Wrench, 'Setup'],
       ['network', Network, 'Network'],
+      ['maintenance', Wrench, 'Maintenance'],
       ['system', Wrench, 'API'],
     ],
   },
@@ -61,6 +63,7 @@ const sectionMeta: Record<Section, { title: string; context: string }> = {
   studio: { title: 'Studio', context: 'Image and video generation' },
   setup: { title: 'Setup', context: 'Workstation configuration' },
   network: { title: 'Network', context: 'Remote access and exposure' },
+  maintenance: { title: 'Maintenance', context: 'Host operations and recovery' },
   system: { title: 'API', context: 'Local interface and control' },
 }
 
@@ -336,20 +339,21 @@ function VisionPanel() {
   )
 }
 
-function StudioPanel(props: { onStart: (name: string) => void; busy: Set<string> }) {
+function StudioPanel(props: { onStart: (name: string) => void; busy: Set<string>; network: NetworkStatus | null }) {
+  const localBrowser = ['localhost', '127.0.0.1'].includes(window.location.hostname)
   const studios = [
     {
       name: 'comfyui',
       title: 'Image Studio',
       desc: 'ComfyUI workflows for generation, editing, ControlNet and upscaling.',
-      href: 'http://127.0.0.1:8188',
+      href: props.network?.comfyui_url || (localBrowser ? 'http://127.0.0.1:8189' : ''),
       icon: ImageIcon,
     },
     {
       name: 'wangp',
       title: 'Video Studio',
       desc: 'WanGP for long-running image-to-video and text-to-video jobs.',
-      href: 'http://127.0.0.1:7860',
+      href: props.network?.wangp_url || (localBrowser ? 'http://127.0.0.1:7870' : ''),
       icon: Video,
     },
   ]
@@ -380,9 +384,15 @@ function StudioPanel(props: { onStart: (name: string) => void; busy: Set<string>
                   {props.busy.has(studio.name) ? <RefreshCw className="spin" size={15} /> : <Play size={15} />}
                   Load on GPU
                 </button>
-                <a className="primary link-button" href={studio.href} target="_blank" rel="noreferrer">
-                  Open studio <ChevronRight size={15} />
-                </a>
+                {studio.href ? (
+                  <a className="primary link-button" href={studio.href} target="_blank" rel="noreferrer">
+                    Open studio <ChevronRight size={15} />
+                  </a>
+                ) : (
+                  <button className="primary" disabled title="Enable private studio routes on the Network page.">
+                    Remote route off
+                  </button>
+                )}
               </div>
             </div>
           )
@@ -391,8 +401,8 @@ function StudioPanel(props: { onStart: (name: string) => void; busy: Set<string>
       <div className="info-strip">
         <Gauge size={18} />
         <span>
-          Loading either studio automatically evicts the current heavyweight GPU service.
-          Active requests are allowed to finish first.
+          Studio links use loopback proxies locally and private Tailscale routes remotely.
+          Loading a studio still uses the GPU scheduler, so active work is allowed to finish first.
         </span>
       </div>
     </section>
@@ -604,11 +614,12 @@ export default function App() {
     section === 'speech' ? <SpeechPanel /> :
     section === 'vision' ? <VisionPanel /> :
     section === 'studio' ? (
-      <StudioPanel onStart={(name) => serviceAction(name, 'start')} busy={busyServices} />
+      <StudioPanel onStart={(name) => serviceAction(name, 'start')} busy={busyServices} network={network} />
     ) :
     section === 'setup' ? <SetupPanel snapshot={snapshot} models={models} network={network}
       onNavigate={(next) => setSection(next)} /> :
     section === 'network' ? <NetworkPanel network={network} onNetwork={setNetwork} /> :
+    section === 'maintenance' ? <MaintenancePanel /> :
     section === 'system' ? (
       <SystemPanel models={models} status={status} onStopAll={stopAll} />
     ) : null

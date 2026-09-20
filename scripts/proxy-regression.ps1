@@ -17,6 +17,24 @@ function Assert-GatewayProxy {
   if($agentLab.service -ne "agent-lab" -or $agentLab.status -notin @("ok","degraded")) {
     throw "dashboard Agent Lab proxy failed: $($agentLab | ConvertTo-Json -Compress)"
   }
+
+  $platform = Invoke-RestMethod "http://127.0.0.1:3000/api/control/platform-health" -TimeoutSec 15
+  $componentNames = @($platform.components | ForEach-Object { $_.name })
+  foreach($required in @("gateway","supervisor","telemetry","docker-control","mcp","agent-lab","agent-evaluator","host-agent","tailscale")) {
+    if($componentNames -notcontains $required) {
+      throw "platform health is missing component: $required"
+    }
+  }
+
+  $maintenance = Invoke-RestMethod "http://127.0.0.1:3000/api/control/maintenance" -TimeoutSec 15
+  if($null -eq $maintenance.operations -or $null -eq $maintenance.snapshots -or $null -eq $maintenance.opencode) {
+    throw "dashboard maintenance control response is incomplete"
+  }
+
+  $network = Invoke-RestMethod "http://127.0.0.1:3000/api/control/network" -TimeoutSec 15
+  if($null -eq $network.studio_routes) {
+    throw "host-agent network status does not expose studio route state"
+  }
 }
 
 Assert-GatewayProxy

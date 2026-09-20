@@ -100,12 +100,73 @@ export type NetworkStatus = {
   serve_status: string
   status_error?: string | null
   dashboard_url?: string | null
+  comfyui_url?: string | null
+  wangp_url?: string | null
   mcp_url?: string | null
   dashboard_enabled?: boolean
+  studio_enabled?: boolean
+  studio_routes?: { comfyui?: boolean; wangp?: boolean }
   mcp_mode?: 'public' | 'private' | 'off'
   legacy_443?: boolean
   route_state?: Record<string, unknown>
   host_agent_version?: string
+}
+
+export type PlatformComponent = {
+  name: string
+  label: string
+  state: string
+  detail: string
+  required: boolean
+  payload?: Record<string, unknown>
+}
+
+export type PlatformHealth = {
+  status: string
+  timestamp: number
+  components: PlatformComponent[]
+}
+
+export type OpenCodeStatus = {
+  installed: boolean
+  executable?: string | null
+  version?: string
+  version_error?: string
+  config_present: boolean
+  server_running: boolean
+  server_url: string
+  server_info?: Record<string, unknown>
+  server_error?: string
+  log_tail?: string
+  error_tail?: string
+}
+
+export type MaintenanceOperation = {
+  id: string
+  action: string
+  state: string
+  started_at: number
+  finished_at?: number | null
+  exit_code?: number | null
+  pid?: number
+  snapshot?: string | null
+  note?: string
+  log_tail: string
+}
+
+export type RollbackSnapshot = {
+  file: string
+  timestamp: string
+  created_at: number
+  comfyui_sha?: string | null
+  wangp_sha?: string | null
+  images: string[]
+}
+
+export type MaintenanceState = {
+  operations: MaintenanceOperation[]
+  snapshots: RollbackSnapshot[]
+  opencode: OpenCodeStatus
 }
 
 export type InstallJob = {
@@ -208,6 +269,24 @@ export const localAI = {
   models: () => request<ModelsResponse>('/v1/models'),
   capabilities: () => request<ApiCapabilities>('/v1/capabilities'),
   doctor: () => request<{ status: string; checks: DoctorCheck[] }>('/control/doctor'),
+  platformHealth: () => request<PlatformHealth>('/control/platform-health'),
+  openCode: () => request<OpenCodeStatus>('/control/opencode'),
+  startOpenCode: () => request<{ ok: boolean; status: OpenCodeStatus }>(
+    '/control/opencode/start', { method: 'POST' },
+  ),
+  stopOpenCode: () => request<{ ok: boolean; status: OpenCodeStatus }>(
+    '/control/opencode/stop', { method: 'POST' },
+  ),
+  maintenance: () => request<MaintenanceState>('/control/maintenance'),
+  startMaintenance: (payload: {
+    action: 'update' | 'rollback' | 'burn-in' | 'opencode-smoke'
+    snapshot?: string
+  }) => request<MaintenanceOperation>('/control/maintenance/start', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  maintenanceOperation: (id: string) =>
+    request<MaintenanceOperation>('/control/maintenance/' + encodeURIComponent(id)),
   settings: () => request<RuntimeSettings>('/control/settings'),
   updateSettings: (settings: RuntimeSettings) =>
     request<RuntimeSettings>('/control/settings', {
@@ -217,6 +296,7 @@ export const localAI = {
   network: () => request<NetworkStatus>('/control/network'),
   configureTailscale: (settings: {
     dashboard_enabled: boolean
+    studio_enabled?: boolean
     mcp_mode: 'public' | 'private' | 'off'
     clear_legacy_443?: boolean
   }) => request<{ ok: boolean; status: NetworkStatus }>('/control/network/tailscale', {

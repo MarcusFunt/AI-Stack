@@ -166,6 +166,8 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${DASHBOARD_PORT:-3000}:80"
+      - "127.0.0.1:${COMFYUI_PROXY_PORT:-8189}:8188"
+      - "127.0.0.1:${WANGP_PROXY_PORT:-7870}:7860"
     networks: [ai]
     healthcheck:
       test: ["CMD-SHELL","wget -q -O - http://127.0.0.1/api/health | grep -q '\"service\":\"gateway\"'"]

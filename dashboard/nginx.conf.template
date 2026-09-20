@@ -46,3 +46,46 @@ server {
     try_files $uri $uri/ /index.html;
   }
 }
+
+
+# Private studio bridges. Host ports are loopback-only; Tailscale Serve can
+# expose these listeners to the tailnet without publishing the raw AI apps.
+server {
+  listen 8188;
+  server_name _;
+  client_max_body_size 512m;
+  resolver 127.0.0.11 ipv6=off valid=1s;
+  resolver_timeout 2s;
+  set $comfyui_backend http://comfyui:8188;
+
+  location / {
+    proxy_pass $comfyui_backend;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+  }
+}
+
+server {
+  listen 7860;
+  server_name _;
+  client_max_body_size 512m;
+  resolver 127.0.0.11 ipv6=off valid=1s;
+  resolver_timeout 2s;
+  set $wangp_backend http://wangp:7860;
+
+  location / {
+    proxy_pass $wangp_backend;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+  }
+}
