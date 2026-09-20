@@ -7,14 +7,11 @@ import urllib.error
 import urllib.request
 import uuid
 
+from env_utils import require_env_value
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AI_PS1 = os.path.join(ROOT, "scripts", "ai.ps1")
-with open(os.path.join(ROOT, ".env"), encoding="utf-8") as f:
-    API_KEY = next(
-        line.split("=", 1)[1].strip()
-        for line in f
-        if line.startswith("AI_API_KEY=")
-    )
+API_KEY = require_env_value(os.path.join(ROOT, ".env"), "AI_API_KEY")
 BASE = "http://127.0.0.1:8090"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
 
@@ -104,6 +101,25 @@ try:
     )
     assert status == 200 and b"data:" in stream_body
     checkpoint("llm-streaming")
+
+    reasoning_payload = {
+        "model": "local-reasoning",
+        "messages": [{
+            "role": "user",
+            "content": "State the result of 2+2 in one short sentence.",
+        }],
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+    status, reasoning = json_api(
+        "POST", "/v1/chat/completions", reasoning_payload, timeout=600
+    )
+    assert status == 200 and reasoning.get("choices")
+    reasoning_message = reasoning["choices"][0].get("message", {})
+    reasoning_text = str(reasoning_message.get("content") or "").strip()
+    assert reasoning_text, reasoning
+    checkpoint("reasoning-inference", reasoning_text[:100])
+
     tts_payload = {
         "model": "qwen3-tts-base",
         "input": "Local AI stack smoke test.",

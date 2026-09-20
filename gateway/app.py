@@ -861,11 +861,11 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
 async def health():
     try:
         await supervisor("GET", "/status", timeout=5)
-        return {"status": "ok", "version": app.version}
+        return {"status": "ok", "service": "gateway", "version": app.version}
     except Exception:
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "version": app.version},
+            content={"status": "degraded", "service": "gateway", "version": app.version},
         )
 
 @app.get("/ready")

@@ -44,7 +44,20 @@ $running = @(docker ps --format "{{.Names}}" | Where-Object { $_ -match "^ai-sta
 if($running.Count -le 1) { Pass "gpu-exclusivity" ($running -join ",") }
 else { Fail "gpu-exclusivity" ($running -join ",") }
 
-foreach($svc in @("telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
+try {
+  $supervisorInfo = @((& docker inspect ai-stack-supervisor) | ConvertFrom-Json)[0]
+  $controlInfo = @((& docker inspect ai-stack-docker-control) | ConvertFrom-Json)[0]
+  $supervisorSocket = @($supervisorInfo.Mounts | Where-Object { $_.Destination -eq "/var/run/docker.sock" }).Count -gt 0
+  $controlSocket = @($controlInfo.Mounts | Where-Object { $_.Destination -eq "/var/run/docker.sock" }).Count -gt 0
+  $controlInternal = ((& docker network inspect ai-stack-docker-control-net --format "{{.Internal}}") -join "").Trim().ToLowerInvariant() -eq "true"
+  if(-not $supervisorSocket -and $controlSocket -and $controlInternal) {
+    Pass "docker-socket-isolation" "socket restricted to docker-control on internal network"
+  } else {
+    Fail "docker-socket-isolation" ("supervisorSocket=$supervisorSocket; controlSocket=$controlSocket; internalNetwork=$controlInternal")
+  }
+} catch { Fail "docker-socket-isolation" $_ }
+
+foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
   $container = "ai-stack-$svc"
   $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
   $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
@@ -52,6 +65,31 @@ foreach($svc in @("telemetry","supervisor","gateway","dashboard","mcp","stt","vl
   if($containerImage -eq $latestImage) { Pass ("image-sync:" + $svc) "current" }
   else { Fail ("image-sync:" + $svc) "container uses an older image; recreate it" }
 }
+
+foreach($svc in @("docker-control","supervisor","telemetry","gateway","dashboard","mcp","stt","vlm")) {
+  $currentHash = (& python (Join-Path $PSScriptRoot "source_hash.py") $svc).Trim()
+  $imageJson = & docker image inspect ("ai-stack-" + $svc + ":latest") 2>$null
+  $builtHash = $null
+  if($imageJson) {
+    $imageInfo = @($imageJson | ConvertFrom-Json)[0]
+    if($imageInfo.Config.Labels) {
+      $builtHash = $imageInfo.Config.Labels.'io.ai-stack.source-hash'
+    }
+  }
+  if(-not $builtHash -or $builtHash -eq "unknown") {
+    Fail ("source-sync:" + $svc) "image has no source fingerprint; rebuild it"
+  } elseif($builtHash -eq $currentHash) {
+    Pass ("source-sync:" + $svc) "image matches current source"
+  } else {
+    Fail ("source-sync:" + $svc) "source changed since image build"
+  }
+}
+
+try {
+  $proxy = Invoke-RestMethod -Uri "http://127.0.0.1:3000/api/health" -TimeoutSec 4
+  if($proxy.service -eq "gateway") { Pass "dashboard-proxy" ("gateway v" + $proxy.version) }
+  else { Fail "dashboard-proxy" ("unexpected backend: " + ($proxy | ConvertTo-Json -Compress)) }
+} catch { Fail "dashboard-proxy" $_ }
 
 $drives=Get-PSDrive C,D -ErrorAction SilentlyContinue
 foreach($d in $drives) { Pass ("disk:"+$d.Name) (([math]::Round($d.Free/1GB,1)).ToString()+" GiB free") }

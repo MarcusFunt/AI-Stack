@@ -4,13 +4,10 @@ import threading
 import time
 import urllib.request
 
+from env_utils import require_env_value
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-with open(os.path.join(ROOT, ".env"), encoding="utf-8") as f:
-    API_KEY = next(
-        line.split("=", 1)[1].strip()
-        for line in f
-        if line.startswith("AI_API_KEY=")
-    )
+API_KEY = require_env_value(os.path.join(ROOT, ".env"), "AI_API_KEY")
 
 BASE = "http://127.0.0.1:8090"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}

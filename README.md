@@ -68,7 +68,7 @@ The MCP exposes only status, model discovery, API capability discovery, and `ask
 
 | Logical model | Actual model | GGUF size | Native context | Runtime context | VRAM | Generation |
 |---|---|---:|---:|---:|---:|---:|
-| `local-fast` | Qwen3.5-9B | 5.290 GiB | 262,144 | 16,384 | ~7.4 GiB | ~53 tok/s |
+| `local-fast` | Qwen3.5-9B | 5.290 GiB | 262,144 | 32,768 | ~8.6 GiB total GPU use while loaded | ~53 tok/s* |
 | `local-reasoning` | Qwen3.8-27B | 17.671 GiB | 262,144 | 8,192 | ~10.25 GiB | ~4.8 tok/s |
 
 The smaller runtime contexts are deliberate so KV cache does not crowd model weights on a 12 GB GPU.
@@ -78,11 +78,14 @@ Both GGUFs advertise GGUF v3, quantization version 2, file type 15. Metadata can
 .\scripts\ai.ps1 model-info
 ```
 
-Latest measured fast-model run:
+Latest measured fast-model benchmark (taken before the OpenCode context increase):
 - prompt: ~380 tok/s on a 25-token prompt
 - generation: ~53.1 tok/s
-- VRAM: ~7.4 GiB
+- previous 16k-context VRAM: ~7.4 GiB
+- current 32k-context whole-GPU usage while loaded: ~8.6 GiB
 - `LLM_GPU_LAYERS=999` (full offload)
+
+*The generation figure is the previous benchmark and should be re-benchmarked if a precise 32k-context performance figure is required.
 
 Latest reasoning-model run:
 - prompt: ~8.7 tok/s
@@ -132,6 +135,8 @@ Maintenance:
 .\scripts\ai.ps1 model-info
 .\scripts\ai.ps1 smoke
 .\scripts\ai.ps1 test-leases
+.\scripts\ai.ps1 test-proxy
+.\scripts\ai.ps1 burn-in
 .\scripts\ai.ps1 bench llm
 .\scripts\ai.ps1 bench reasoning
 .\scripts\ai.ps1 logs reasoning
@@ -139,6 +144,34 @@ Maintenance:
 .\scripts\ai.ps1 update
 .\scripts\ai.ps1 rollback
 ```
+
+## OpenCode
+
+OpenCode v2 is integrated as a host-side coding agent. It runs on Windows so it can work directly on this checkout and use the existing PowerShell/Docker workflow, while all model traffic still goes through the authenticated AI-Stack gateway.
+
+Integration files:
+- `opencode.jsonc` defines the `ai-stack/local-fast` provider, Local AI MCP bridge, local-context compaction settings, and agent permissions.
+- `AGENTS.md` gives OpenCode the repository architecture, safety invariants, and verification workflow.
+- `scripts\opencode.ps1` manages the loopback OpenCode server and provides TUI, scripted-run, MCP/status, API, and diagnostic commands.
+- `scripts\opencode-smoke.ps1` performs a real end-to-end coding-agent completion through the gateway/supervisor/LLM path.
+
+Common commands:
+
+```powershell
+.\scripts\opencode.ps1 doctor
+.\scripts\opencode.ps1 tui
+.\scripts\opencode.ps1 run "Review the gateway and identify one concrete reliability issue."
+.\scripts\opencode.ps1 mini
+.\scripts\opencode.ps1 models
+.\scripts\opencode.ps1 mcp
+.\scripts\opencode.ps1 serve
+.\scripts\opencode.ps1 pair
+.\scripts\opencode-smoke.ps1
+```
+
+The OpenCode server binds only to `127.0.0.1:4096` and uses a generated credential stored only in the ignored `.env`. The coding agent is explicitly denied reads of `.env`/environment override files, asks before destructive Git/Compose operations, and denies Docker system pruning.
+
+The primary coding model is `ai-stack/local-fast` with a 32,768-token runtime context. For deeper reasoning, OpenCode should call the attached `local-ai` MCP server's `ask_local_ai` tool in reasoning mode. The 8,192-token reasoning worker is intentionally not exposed as an OpenCode primary model because OpenCode's own instruction/tool context is too large for that runtime setting.
 
 ## Logical models
 
@@ -196,7 +229,7 @@ After manual testing:
 .\scripts\ai.ps1 stop-all
 ```
 
-Use `doctor` before or after significant changes. It checks Docker, Compose, the RTX 3060, required secrets, model files, Compose validity, the Windows host agent/autostart entry, GPU exclusivity, image synchronization, and disk headroom.
+Use `doctor` before or after significant changes. It checks Docker, Compose, the RTX 3060, required secrets, model files, Compose validity, the Windows host agent/autostart entry, GPU exclusivity, Docker-socket isolation, running-image synchronization, local source fingerprints, dashboard proxy identity, and disk headroom. Use `burn-in` for the long regression pass: strict doctor before/after, forced gateway-IP replacement, lease concurrency and disconnect handling, plus end-to-end LLM/reasoning/TTS/STT/VLM/ComfyUI/WanGP checks. The transcript is written to `data\state\full-burnin-latest.log`.
 
 ## Dashboard telemetry and setup
 

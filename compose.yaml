@@ -9,9 +9,40 @@ x-gpu-base: &gpu-base
   stop_grace_period: 30s
 
 services:
+  docker-control:
+    build:
+      context: ./docker-control
+      args:
+        SOURCE_HASH: ${AI_STACK_DOCKER_CONTROL_SOURCE_HASH:-unknown}
+    container_name: ai-stack-docker-control
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      CONFIG_PATH: /config/models.json
+      DOCKER_CONTROL_TOKEN: ${SUPERVISOR_TOKEN}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/config:ro
+    networks: [docker-control]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   supervisor:
     build:
       context: ./supervisor
+      args:
+        SOURCE_HASH: ${AI_STACK_SUPERVISOR_SOURCE_HASH:-unknown}
     container_name: ai-stack-supervisor
     restart: unless-stopped
     init: true
@@ -29,12 +60,16 @@ services:
       LEASE_STATE_PATH: /state/supervisor-leases.json
       RUNTIME_SETTINGS_PATH: /state/runtime-settings.json
       SERVICE_METRICS_PATH: /state/supervisor-metrics.json
+      DOCKER_CONTROL_URL: http://docker-control:8000
+      DOCKER_CONTROL_TOKEN: ${SUPERVISOR_TOKEN}
       PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      docker-control:
+        condition: service_healthy
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./config:/config:ro
       - ./data/state:/state
-    networks: [ai]
+    networks: [ai, docker-control]
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 5s
@@ -44,6 +79,8 @@ services:
   telemetry:
     build:
       context: ./telemetry
+      args:
+        SOURCE_HASH: ${AI_STACK_TELEMETRY_SOURCE_HASH:-unknown}
     container_name: ai-stack-telemetry
     restart: unless-stopped
     init: true
@@ -74,6 +111,8 @@ services:
   gateway:
     build:
       context: ./gateway
+      args:
+        SOURCE_HASH: ${AI_STACK_GATEWAY_SOURCE_HASH:-unknown}
     container_name: ai-stack-gateway
     restart: unless-stopped
     init: true
@@ -115,6 +154,8 @@ services:
   dashboard:
     build:
       context: ./dashboard
+      args:
+        SOURCE_HASH: ${AI_STACK_DASHBOARD_SOURCE_HASH:-unknown}
     container_name: ai-stack-dashboard
     restart: unless-stopped
     init: true
@@ -127,7 +168,7 @@ services:
       - "127.0.0.1:${DASHBOARD_PORT:-3000}:80"
     networks: [ai]
     healthcheck:
-      test: ["CMD","wget","-q","-O","-","http://127.0.0.1/"]
+      test: ["CMD-SHELL","wget -q -O - http://127.0.0.1/api/health | grep -q '\"service\":\"gateway\"'"]
       interval: 10s
       timeout: 4s
       retries: 6
@@ -135,6 +176,8 @@ services:
   mcp:
     build:
       context: ./mcp
+      args:
+        SOURCE_HASH: ${AI_STACK_MCP_SOURCE_HASH:-unknown}
     container_name: ai-stack-mcp
     restart: unless-stopped
     init: true
@@ -178,7 +221,7 @@ services:
       - --port
       - "8080"
       - -c
-      - ${LLM_CONTEXT:-16384}
+      - ${LLM_CONTEXT:-32768}
       - -np
       - "1"
       - -ngl
@@ -213,11 +256,19 @@ services:
       - ${LLAMA_API_KEY}
       - --cors-origins
       - localhost
+    healthcheck:
+      test: ["CMD","curl","-f","http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 420s
 
   stt:
     <<: *gpu-base
     build:
       context: ./stt
+      args:
+        SOURCE_HASH: ${AI_STACK_STT_SOURCE_HASH:-unknown}
     container_name: ai-stack-stt
     environment:
       STT_MODEL: ${STT_MODEL:-large-v3}
@@ -245,6 +296,8 @@ services:
     <<: *gpu-base
     build:
       context: ./vlm
+      args:
+        SOURCE_HASH: ${AI_STACK_VLM_SOURCE_HASH:-unknown}
     container_name: ai-stack-vlm
     environment:
       VLM_MODEL: ${VLM_MODEL:-Qwen/Qwen3-VL-4B-Instruct}
@@ -311,6 +364,9 @@ services:
 networks:
   ai:
     name: ai-stack-net
+  docker-control:
+    name: ai-stack-docker-control-net
+    internal: true
 
 volumes:
   qwen_tts_hf_cache:

@@ -9,25 +9,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from env_utils import load_env_file
+
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 STATE_DIR = ROOT / "data" / "state"
-HOST_AGENT_VERSION = "1.2"
+HOST_AGENT_VERSION = "1.3"
 INSTALL_JOBS = {}
 INSTALL_LOCK = threading.Lock()
 
 def load_env():
-    out = {}
-    try:
-        for raw in ENV_PATH.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            out[key.strip()] = value.strip()
-    except OSError:
-        pass
-    return out
+    return load_env_file(ENV_PATH)
 
 def token():
     return load_env().get("HOST_AGENT_TOKEN", "")
@@ -133,7 +125,7 @@ MODEL_KEYS = {
     "vlm": ["VLM_MODEL"],
 }
 DEFAULTS = {
-    "LLM_MODEL": "/models/daily.gguf", "LLM_CONTEXT": "16384", "LLM_GPU_LAYERS": "999",
+    "LLM_MODEL": "/models/daily.gguf", "LLM_CONTEXT": "32768", "LLM_GPU_LAYERS": "999",
     "REASONING_MODEL": "/models/reasoning.gguf", "REASONING_CONTEXT": "8192",
     "REASONING_GPU_LAYERS": "28", "STT_MODEL": "large-v3",
     "STT_COMPUTE_TYPE": "float16", "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",

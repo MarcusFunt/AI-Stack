@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Position=0)]
-  [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","bench","logs","down")]
+  [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","test-proxy","burn-in","bench","logs","down")]
   [string]$Action = "status",
   [Parameter(Position=1)]
   [ValidateSet("gateway","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
@@ -14,7 +14,17 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $GpuServices = @("llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")
+$BuildHashServices = @("docker-control","supervisor","telemetry","gateway","dashboard","mcp","stt","vlm")
 Set-Location $Root
+
+function Set-BuildSourceHashes {
+  foreach($svc in $BuildHashServices) {
+    $hash = (& python (Join-Path $PSScriptRoot "source_hash.py") $svc).Trim()
+    if($LASTEXITCODE -ne 0 -or -not $hash) { throw "failed to compute source hash for $svc" }
+    $envName = "AI_STACK_" + $svc.ToUpperInvariant().Replace("-", "_") + "_SOURCE_HASH"
+    [Environment]::SetEnvironmentVariable($envName, $hash, "Process")
+  }
+}
 
 function Invoke-Compose {
   param([Parameter(Mandatory=$true)][string[]]$CommandArgs)
@@ -147,10 +157,12 @@ switch ($Action) {
     try { Invoke-Supervisor "GET" "/status" 10 } catch { Write-Warning $_ }
   }
   "build" {
-    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
+    Set-BuildSourceHashes
+    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
   }
   "create" {
-    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
+    Set-BuildSourceHashes
+    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("pull","llm","reasoning")
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
     Start-ControlPlane
@@ -162,7 +174,7 @@ switch ($Action) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
     $rollbackImages = [ordered]@{}
-    foreach($svc in @("telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
+    foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")) {
       $tag = Save-RollbackImage ("ai-stack-" + $svc + ":latest") ("ai-stack-" + $svc + ":rollback-" + $stamp)
       if($tag) { $rollbackImages[$svc] = $tag }
     }
@@ -190,9 +202,10 @@ switch ($Action) {
     if ($LASTEXITCODE -ne 0) { throw "Wan2GP update failed" }
 
     Invoke-Compose -CommandArgs @("pull","llm","reasoning")
-    Invoke-Compose -CommandArgs @("build","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
+    Set-BuildSourceHashes
+    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","dashboard","mcp","stt","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
-    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","telemetry","supervisor","gateway","dashboard","mcp")
+    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","docker-control","telemetry","supervisor","gateway","dashboard","mcp")
     Write-Output "Update complete. Rollback snapshot: $statePath"
   }
   "rollback" {
@@ -224,7 +237,7 @@ switch ($Action) {
     }
 
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
-    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","telemetry","supervisor","gateway","dashboard","mcp")
+    Invoke-Compose -CommandArgs @("up","-d","--force-recreate","docker-control","telemetry","supervisor","gateway","dashboard","mcp")
     Write-Output "Rollback complete from: $Snapshot"
   }
   "doctor" { & (Join-Path $PSScriptRoot "doctor.ps1") }
@@ -239,6 +252,14 @@ switch ($Action) {
     finally {
       & $PSCommandPath stop-all
     }
+  }
+  "test-proxy" {
+    Start-ControlPlane
+    & (Join-Path $PSScriptRoot "proxy-regression.ps1")
+  }
+  "burn-in" {
+    & (Join-Path $PSScriptRoot "burn-in.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "burn-in suite failed" }
   }
   "bench" { & (Join-Path $PSScriptRoot "benchmark-llm.ps1") -Service $Service }
   "logs" { & docker logs --tail 200 "ai-stack-$Service" }

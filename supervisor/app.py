@@ -6,7 +6,6 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-import docker
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -21,9 +20,12 @@ if not SUPERVISOR_TOKEN:
 LLAMA_API_KEY = os.getenv("LLAMA_API_KEY", "").strip()
 if not LLAMA_API_KEY:
     raise RuntimeError("LLAMA_API_KEY must be set")
+DOCKER_CONTROL_URL = os.getenv("DOCKER_CONTROL_URL", "http://docker-control:8000").rstrip("/")
+DOCKER_CONTROL_TOKEN = os.getenv("DOCKER_CONTROL_TOKEN", "").strip()
+if not DOCKER_CONTROL_TOKEN:
+    raise RuntimeError("DOCKER_CONTROL_TOKEN must be set")
 
-app = FastAPI(title="Local AI GPU Supervisor", version="0.4.0")
-docker_client = docker.from_env()
+app = FastAPI(title="Local AI GPU Supervisor", version="0.5.0")
 transition_lock = asyncio.Lock()
 lease_condition = asyncio.Condition()
 LEASE_STATE_PATH = Path(os.getenv("LEASE_STATE_PATH", "/state/supervisor-leases.json"))
@@ -224,13 +226,48 @@ def schedule_idle_stop(service: str):
     if delay > 0:
         idle_tasks[service] = asyncio.create_task(idle_stop_after(service, delay))
 
+def docker_control_request(method: str, path: str, timeout: int = 30):
+    headers = {"X-Docker-Control-Token": DOCKER_CONTROL_TOKEN}
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.request(method, DOCKER_CONTROL_URL + path, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f"docker-control unavailable: {exc}") from exc
+    if response.status_code >= 400:
+        detail = response.text[-1200:]
+        raise HTTPException(response.status_code, f"docker-control: {detail}")
+    return response
+
+
+class RemoteContainer:
+    def __init__(self, service: str):
+        self.service = service
+        self.status = None
+
+    def reload(self):
+        payload = docker_control_request("GET", f"/containers/{self.service}").json()
+        self.status = payload.get("status")
+        return self
+
+    def start(self):
+        payload = docker_control_request("POST", f"/containers/{self.service}/start", timeout=120).json()
+        self.status = payload.get("status")
+
+    def stop(self, timeout=30):
+        payload = docker_control_request(
+            "POST", f"/containers/{self.service}/stop?timeout={int(timeout)}", timeout=timeout + 30
+        ).json()
+        self.status = payload.get("status")
+
+    def logs(self, tail=100):
+        response = docker_control_request("GET", f"/containers/{self.service}/logs?tail={int(tail)}")
+        return response.content
+
+
 def get_container(service: str):
     if service not in SERVICES:
         raise HTTPException(404, f"unknown service: {service}")
-    try:
-        return docker_client.containers.get(SERVICES[service]["container"])
-    except docker.errors.NotFound as exc:
-        raise HTTPException(503, f"{service} container has not been created") from exc
+    return RemoteContainer(service)
 
 def container_status(service: str):
     try:
@@ -249,10 +286,10 @@ def current_gpu_services():
 async def stop_service(service: str):
     try:
         c = get_container(service)
+        c.reload()
     except HTTPException:
         service_phase[service] = "stopped"
         return
-    c.reload()
     if c.status == "running":
         service_phase[service] = "unloading"
         await asyncio.to_thread(c.stop, timeout=30)
@@ -471,13 +508,12 @@ async def update_settings(request: Request):
 def doctor():
     checks = []
     try:
-        docker_client.ping()
-        info = docker_client.info()
+        info = docker_control_request("GET", "/info", timeout=5).json()
         checks.append({
             "id": "docker",
             "label": "Docker Engine",
             "status": "pass",
-            "detail": info.get("ServerVersion", "reachable"),
+            "detail": info.get("server_version", "reachable") + " via restricted docker-control",
         })
     except Exception as exc:
         checks.append({"id": "docker", "label": "Docker Engine", "status": "fail", "detail": str(exc)})

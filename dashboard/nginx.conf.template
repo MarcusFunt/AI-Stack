@@ -5,8 +5,14 @@ server {
   index index.html;
   client_max_body_size 512m;
 
+  # Docker container IPs can change when gateway is recreated. Resolve the
+  # service name for each request instead of caching its startup-time address.
+  resolver 127.0.0.11 ipv6=off valid=1s;
+  resolver_timeout 2s;
+  set $gateway_backend http://gateway:8000;
+
   location = /api/events {
-    proxy_pass http://gateway:8000/events;
+    proxy_pass $gateway_backend/events;
     proxy_set_header Authorization "Bearer ${AI_API_KEY}";
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
@@ -15,7 +21,8 @@ server {
   }
 
   location /api/ {
-    proxy_pass http://gateway:8000/;
+    rewrite ^/api/(.*)$ /$1 break;
+    proxy_pass $gateway_backend;
     proxy_set_header Authorization "Bearer ${AI_API_KEY}";
     proxy_http_version 1.1;
     proxy_buffering off;

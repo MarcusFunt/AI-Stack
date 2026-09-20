@@ -7,5 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
+ARG SOURCE_HASH=unknown
+LABEL io.ai-stack.source-hash=$SOURCE_HASH
 EXPOSE 8000
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","8000"]
