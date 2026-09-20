@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { localAI } from './api'
 import type {
-  ApiCapabilities, DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, RuntimeSettings, Snapshot,
+  ApiCapabilities, DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, PlatformHealth, RuntimeSettings, Snapshot,
 } from './api'
 import { isBadState } from './state'
 
@@ -770,7 +770,7 @@ function SelfTestPanel({ snapshot }: { snapshot: Snapshot | null }) {
           <h3>Service verification</h3></div></div>
         <button className="primary no-margin" disabled={active || !!busy} onClick={() => void run()}>
           {active || busy === 'all' ? <RefreshCw className="spin" size={14} /> : <TestTube2 size={14} />}
-          Test entire stack
+          Test inference stack
         </button>
       </div>
 
@@ -778,7 +778,7 @@ function SelfTestPanel({ snapshot }: { snapshot: Snapshot | null }) {
         <div className="self-test-summary">
           <div className="self-test-summary-copy">
             <div>
-              <span className="eyebrow">{active ? 'FULL TEST IN PROGRESS' : 'LAST FULL TEST'}</span>
+              <span className="eyebrow">{active ? 'INFERENCE TEST IN PROGRESS' : 'LAST INFERENCE TEST'}</span>
               <strong>{active
                 ? `${completed.length} / ${services.length} complete${currentService ? ' · now ' + (labels[currentService] || currentService) : ''}`
                 : `${String(tests?.run.state || 'unknown').toUpperCase()}${lastFinished ? ' · ' + lastFinished : ''}`}</strong>
@@ -817,20 +817,66 @@ export function HealthPanel({ snapshot }: { snapshot: Snapshot | null }) {
   const supervisor = snapshot?.supervisor
   const machine = snapshot?.machine
   const unhealthy = Object.entries(supervisor?.service_states || {}).filter(([, state]) => isBadState(state))
-  const gatewayState = snapshot?.gateway.status === 'online' ? 'ready' : 'error'
-  const telemetryState = machine?.gpu ? 'ready' : 'error'
+  const [platform, setPlatform] = useState<PlatformHealth | null>(null)
+  const [platformError, setPlatformError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const next = await localAI.platformHealth()
+        if (!alive) return
+        setPlatform(next)
+        setPlatformError('')
+      } catch (err) {
+        if (alive) setPlatformError(err instanceof Error ? err.message : String(err))
+      }
+    }
+    const initial = window.setTimeout(() => void load(), 0)
+    const timer = window.setInterval(() => void load(), 8000)
+    return () => {
+      alive = false
+      window.clearTimeout(initial)
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  const platformState = platform?.status || (snapshot?.gateway.status === 'online' ? 'waiting' : 'error')
   return (
     <section className="workspace">
-      <div className="workspace-head"><div><span className="eyebrow">HEALTH & TOPOLOGY</span><h2>Control plane</h2></div></div>
-      <div className="topology">
-        <div className="topology-node"><Router size={19} /><strong>Dashboard</strong><StateBadge state="ready" /></div>
-        <span>→</span>
-        <div className="topology-node"><Wifi size={19} /><strong>Gateway</strong><StateBadge state={gatewayState} /></div>
-        <span>→</span>
-        <div className="topology-node"><Settings2 size={19} /><strong>Supervisor</strong><StateBadge state={supervisor ? 'ready' : 'error'} /></div>
-        <span>→</span>
-        <div className="topology-node"><Gauge size={19} /><strong>Telemetry</strong><StateBadge state={telemetryState} /></div>
+      <div className="workspace-head">
+        <div><span className="eyebrow">HEALTH & TOPOLOGY</span><h2>Whole platform</h2>
+          <p className="health-subtitle">Control plane, remote access, agent services and optional developer tooling.</p></div>
+        <StateBadge state={platformState} />
       </div>
+
+      <div className="platform-matrix">
+        {(platform?.components || []).map((component) => {
+          const Icon = component.name === 'tailscale' ? Wifi
+            : component.name === 'docker-control' ? Box
+              : component.name === 'telemetry' ? Gauge
+                : component.name === 'mcp' ? Router
+                  : component.name.includes('agent') || component.name === 'opencode' ? BrainCircuit
+                    : Settings2
+          return (
+            <div className="platform-component" key={component.name}>
+              <Icon size={17} />
+              <div>
+                <div className="platform-component-title">
+                  <strong>{component.label}</strong>
+                  <span>{component.required ? 'CORE' : 'OPTIONAL'}</span>
+                </div>
+                <small>{component.detail}</small>
+              </div>
+              <StateBadge state={component.state} />
+            </div>
+          )
+        })}
+        {!platform && !platformError && <div className="platform-loading"><RefreshCw className="spin" size={16} /> Loading platform health…</div>}
+      </div>
+      {platformError && <div className="error-banner">{platformError}</div>}
+
+      <div className="section-title ops-title"><div><span className="eyebrow">RUNTIME</span><h2>Machine health</h2></div></div>
       <div className="health-grid">
         <div className="health-card"><Cpu size={20} /><div><span>GPU</span><strong>{machine?.gpu?.name || 'Unavailable'}</strong>
           <small>{fmt(machine?.gpu?.temperature_c, 0)}°C · {fmt(machine?.gpu?.power_w, 1)} W</small></div><StateBadge state={machine?.gpu ? 'ready' : 'error'} /></div>
@@ -842,7 +888,8 @@ export function HealthPanel({ snapshot }: { snapshot: Snapshot | null }) {
           <strong>{snapshot?.mqtt.connected ? 'Connected' : 'Not connected'}</strong><small>{snapshot?.mqtt.last_error || 'optional telemetry output'}</small></div>
           <StateBadge state={snapshot?.mqtt.connected ? 'ready' : 'stopped'} /></div>
       </div>
-      <div className="section-title ops-title"><div><span className="eyebrow">WORKERS</span><h2>Semantic states</h2></div></div>
+
+      <div className="section-title ops-title"><div><span className="eyebrow">GPU WORKERS</span><h2>Semantic states</h2></div></div>
       <div className="health-worker-list">
         {Object.entries(supervisor?.service_states || {}).map(([name, state]) => {
           const rawState = supervisor?.services[name] || 'unknown'
@@ -1083,10 +1130,10 @@ export function NetworkPanel(props: {
   network: NetworkStatus | null
   onNetwork: (status: NetworkStatus | null) => void
 }) {
-  const [dashboardEnabled, setDashboardEnabled] = useState(true)
-  const [mcpMode, setMcpMode] = useState<'public' | 'private' | 'off'>('public')
+  const [dashboardEnabled, setDashboardEnabled] = useState<boolean | null>(null)
+  const [studioEnabled, setStudioEnabled] = useState<boolean | null>(null)
+  const [mcpMode, setMcpMode] = useState<'public' | 'private' | 'off' | null>(null)
   const [clearLegacy, setClearLegacy] = useState(false)
-  const [initialized, setInitialized] = useState(false)
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [capabilities, setCapabilities] = useState<ApiCapabilities | null>(null)
@@ -1104,12 +1151,12 @@ export function NetworkPanel(props: {
     }
   }, [])
 
-  const effectiveDashboardEnabled = initialized
-    ? dashboardEnabled
-    : (props.network?.dashboard_enabled ?? !!props.network?.dashboard_url)
-  const effectiveMcpMode: 'public' | 'private' | 'off' = initialized
-    ? mcpMode
-    : (props.network?.mcp_mode || (props.network?.mcp_url ? 'private' : 'off'))
+  const effectiveDashboardEnabled = dashboardEnabled
+    ?? (props.network?.dashboard_enabled ?? !!props.network?.dashboard_url)
+  const effectiveStudioEnabled = studioEnabled
+    ?? (props.network?.studio_enabled ?? false)
+  const effectiveMcpMode: 'public' | 'private' | 'off' = mcpMode
+    ?? (props.network?.mcp_mode || (props.network?.mcp_url ? 'private' : 'off'))
 
   const refresh = async () => {
     setBusy('refresh')
@@ -1117,7 +1164,9 @@ export function NetworkPanel(props: {
     try {
       const next = await localAI.network()
       props.onNetwork(next)
-      setInitialized(false)
+      setDashboardEnabled(null)
+      setStudioEnabled(null)
+      setMcpMode(null)
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err))
       props.onNetwork(null)
@@ -1137,10 +1186,15 @@ export function NetworkPanel(props: {
     setMessage('')
     try {
       const result = await localAI.configureTailscale({
-        dashboard_enabled: effectiveDashboardEnabled, mcp_mode: effectiveMcpMode, clear_legacy_443: clearLegacy,
+        dashboard_enabled: effectiveDashboardEnabled,
+        studio_enabled: effectiveStudioEnabled,
+        mcp_mode: effectiveMcpMode,
+        clear_legacy_443: clearLegacy,
       })
       props.onNetwork(result.status)
-      setInitialized(false)
+      setDashboardEnabled(null)
+      setStudioEnabled(null)
+      setMcpMode(null)
       setClearLegacy(false)
       setMessage(result.ok ? 'Tailscale routes updated and verified.' : 'One or more Tailscale commands failed.')
     } catch (err) {
@@ -1156,16 +1210,17 @@ export function NetworkPanel(props: {
     try {
       const result = await localAI.configureTailscale({
         dashboard_enabled: true,
+        studio_enabled: true,
         mcp_mode: 'private',
         clear_legacy_443: true,
       })
       props.onNetwork(result.status)
-      setDashboardEnabled(true)
-      setMcpMode('private')
-      setInitialized(false)
+      setDashboardEnabled(null)
+      setStudioEnabled(null)
+      setMcpMode(null)
       setClearLegacy(false)
       setMessage(result.ok
-        ? 'Secure defaults applied: private dashboard, tailnet-only MCP, legacy :443 removed.'
+        ? 'Secure defaults applied: private dashboard and studios, tailnet-only MCP, legacy :443 removed.'
         : 'One or more secure-default commands failed.')
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err))
@@ -1190,6 +1245,8 @@ export function NetworkPanel(props: {
     ['Dashboard local', 'http://127.0.0.1:3000/'],
     ['Unified API local', 'http://127.0.0.1:8090/v1/'],
     ['Dashboard private', props.network?.dashboard_url || 'Unavailable'],
+    ['ComfyUI private', props.network?.comfyui_url || 'Unavailable'],
+    ['WanGP private', props.network?.wangp_url || 'Unavailable'],
     ['MCP endpoint', props.network?.mcp_url || 'Unavailable'],
   ]
   const routeCards = [
@@ -1199,6 +1256,20 @@ export function NetworkPanel(props: {
       target: '127.0.0.1:3000',
       exposure: props.network?.dashboard_enabled ? 'TAILNET ONLY' : 'OFF',
       state: props.network?.dashboard_enabled ? 'ready' : 'stopped',
+    },
+    {
+      port: ':8444',
+      title: 'ComfyUI',
+      target: '127.0.0.1:8189',
+      exposure: props.network?.studio_routes?.comfyui ? 'TAILNET ONLY' : 'OFF',
+      state: props.network?.studio_routes?.comfyui ? 'ready' : 'stopped',
+    },
+    {
+      port: ':8445',
+      title: 'WanGP',
+      target: '127.0.0.1:7870',
+      exposure: props.network?.studio_routes?.wangp ? 'TAILNET ONLY' : 'OFF',
+      state: props.network?.studio_routes?.wangp ? 'ready' : 'stopped',
     },
     {
       port: ':10000',
@@ -1233,6 +1304,10 @@ export function NetworkPanel(props: {
           <strong>{props.network?.dashboard_enabled ? 'Tailnet :8443' : 'Disabled'}</strong>
           <small>{props.network?.tailscale_ips?.[0] || 'No Tailscale IP reported'}</small></div>
           <StateBadge state={props.network?.dashboard_enabled ? 'ready' : 'stopped'} /></div>
+        <div className="health-card"><Globe2 size={20} /><div><span>STUDIO ROUTES</span>
+          <strong>{props.network?.studio_enabled ? 'Tailnet :8444 / :8445' : 'Disabled'}</strong>
+          <small>ComfyUI and WanGP stay private to the tailnet.</small></div>
+          <StateBadge state={props.network?.studio_enabled ? 'ready' : 'stopped'} /></div>
         <div className="health-card"><Shield size={20} /><div><span>MCP EXPOSURE</span>
           <strong className={publicMcp ? 'danger-text' : ''}>{publicMcp ? 'Public Funnel' : props.network?.mcp_mode === 'private' ? 'Tailnet only' : 'Off'}</strong>
           <small>{publicMcp ? 'Internet reachable; MCP authentication still required.' : 'No public Funnel detected.'}</small></div>
@@ -1248,12 +1323,16 @@ export function NetworkPanel(props: {
           <div className="setup-card-title"><div><Globe2 size={19} /><div>
             <span className="eyebrow">TAILSCALE ROUTES</span><h3>Configure from the GUI</h3></div></div></div>
           <label className="switch-row"><input type="checkbox" checked={effectiveDashboardEnabled}
-            onChange={(e) => { setDashboardEnabled(e.target.checked); setInitialized(true) }} />
+            onChange={(e) => setDashboardEnabled(e.target.checked)} />
             <span><strong>Private dashboard on :8443</strong>
               <small>Accessible only to devices in your tailnet.</small></span></label>
+          <label className="switch-row"><input type="checkbox" checked={effectiveStudioEnabled}
+            onChange={(e) => setStudioEnabled(e.target.checked)} />
+            <span><strong>Private studio routes on :8444 and :8445</strong>
+              <small>Routes ComfyUI and WanGP through loopback-only dashboard proxies; never public Funnel.</small></span></label>
           <div className="form-grid single-control">
             <label>MCP exposure<select value={effectiveMcpMode}
-              onChange={(e) => { setMcpMode(e.target.value as 'public' | 'private' | 'off'); setInitialized(true) }}>
+              onChange={(e) => setMcpMode(e.target.value as 'public' | 'private' | 'off')}>
               <option value="public">Public Funnel :10000</option>
               <option value="private">Tailnet only :10000</option>
               <option value="off">Disabled</option>
@@ -1271,7 +1350,7 @@ export function NetworkPanel(props: {
               {busy === 'apply' ? <RefreshCw className="spin" size={14} /> : <Save size={14} />} Apply routes
             </button>
             <button className="secondary no-margin" disabled={!!busy} onClick={() => void applySecureDefaults()}
-              title="Private dashboard, tailnet-only MCP, and remove the legacy :443 route.">
+              title="Private dashboard and studios, tailnet-only MCP, and remove the legacy :443 route.">
               {busy === 'secure' ? <RefreshCw className="spin" size={14} /> : <Shield size={14} />} Secure defaults
             </button>
           </div>

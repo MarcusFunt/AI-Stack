@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import secrets
 import struct
 import time
@@ -127,6 +128,146 @@ async def host_agent(method: str, path: str, payload=None, timeout: float = 30):
         detail = response.text[-4000:]
         raise HTTPException(response.status_code, detail)
     return response.json()
+
+
+async def _direct_json(url: str, timeout: float = 5):
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url)
+    if response.status_code >= 400:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[-500:]}")
+    return response.json()
+
+
+def _component(name: str, label: str, state: str, detail: str, required: bool = True, **extra):
+    item = {
+        "name": name,
+        "label": label,
+        "state": state,
+        "detail": detail,
+        "required": required,
+    }
+    item.update(extra)
+    return item
+
+
+async def build_platform_health():
+    components = [
+        _component("gateway", "Gateway", "ready", f"v{app.version} · request router and API"),
+    ]
+
+    async def add_probe(name, label, awaitable, required=True, ok_states=("ok", "pass", "ready", "healthy")):
+        try:
+            payload = await awaitable
+            raw = str(payload.get("status", "ok")).lower() if isinstance(payload, dict) else "ok"
+            if raw in ok_states:
+                state = "ready"
+            elif raw in {"degraded", "warn", "warning"}:
+                state = "warn"
+            else:
+                state = "error"
+            detail = raw
+            if isinstance(payload, dict):
+                version = payload.get("version")
+                service = payload.get("service")
+                parts = [str(value) for value in (service, f"v{version}" if version else None) if value]
+                if parts:
+                    detail = " · ".join(parts)
+            components.append(_component(name, label, state, detail, required, payload=payload))
+            return payload
+        except Exception as exc:
+            components.append(_component(name, label, "error", str(exc)[-500:], required))
+            return None
+
+    supervisor_payload, telemetry_payload, mcp_payload, lab_payload, evaluator_payload, host_payload = await asyncio.gather(
+        add_probe("supervisor", "Supervisor", supervisor("GET", "/health", timeout=5)),
+        add_probe("telemetry", "Telemetry", _direct_json(TELEMETRY_URL + "/health")),
+        add_probe("mcp", "MCP bridge", _direct_json("http://mcp:8000/healthz")),
+        add_probe("agent-lab", "Agent Lab", _direct_json("http://agent-lab:8000/health")),
+        add_probe("agent-evaluator", "Agent evaluator", _direct_json("http://agent-evaluator:8000/health")),
+        add_probe("host-agent", "Windows host agent", host_agent("GET", "/health", timeout=5)),
+    )
+
+    try:
+        doctor = await supervisor("GET", "/doctor", timeout=8)
+        docker_check = next(
+            (item for item in doctor.get("checks", []) if item.get("id") == "docker"),
+            None,
+        )
+        if docker_check:
+            state = "ready" if docker_check.get("status") == "pass" else (
+                "warn" if docker_check.get("status") == "warn" else "error"
+            )
+            components.append(_component(
+                "docker-control", "Docker control", state,
+                str(docker_check.get("detail") or "restricted Docker bridge"),
+            ))
+        else:
+            components.append(_component(
+                "docker-control", "Docker control", "warn",
+                "Docker dependency was not reported by supervisor doctor",
+            ))
+    except Exception as exc:
+        components.append(_component("docker-control", "Docker control", "error", str(exc)[-500:]))
+
+    if isinstance(lab_payload, dict):
+        sandbox = str(lab_payload.get("sandbox", "unknown")).lower()
+        components.append(_component(
+            "agent-lab-sandbox", "Agent sandbox",
+            "ready" if sandbox == "ok" else "error",
+            "network-isolated harness runner" if sandbox == "ok" else sandbox,
+        ))
+
+    try:
+        network = await host_agent("GET", "/tailscale/status", timeout=8)
+        components.append(_component(
+            "tailscale", "Tailscale",
+            "ready" if network.get("online") else "error",
+            (
+                ("online · " + str(network.get("dns_name"))) if network.get("online")
+                else str(network.get("status_error") or "offline")
+            ),
+            True,
+            payload={
+                "dashboard_enabled": network.get("dashboard_enabled"),
+                "studio_enabled": network.get("studio_enabled"),
+                "mcp_mode": network.get("mcp_mode"),
+            },
+        ))
+    except Exception as exc:
+        components.append(_component("tailscale", "Tailscale", "error", str(exc)[-500:]))
+
+    try:
+        open_code = await host_agent("GET", "/opencode/status", timeout=8)
+        if not open_code.get("installed"):
+            state, detail = "stopped", "not installed"
+        elif open_code.get("server_running"):
+            state, detail = "ready", "server running" + (f" · {open_code.get('version')}" if open_code.get("version") else "")
+        else:
+            state, detail = "stopped", "installed · server stopped"
+        components.append(_component(
+            "opencode", "OpenCode", state, detail, required=False,
+            payload={
+                "installed": open_code.get("installed"),
+                "version": open_code.get("version"),
+                "server_running": open_code.get("server_running"),
+            },
+        ))
+    except Exception as exc:
+        components.append(_component("opencode", "OpenCode", "warn", str(exc)[-500:], required=False))
+
+    required_states = [item["state"] for item in components if item.get("required")]
+    optional_bad = any(item["state"] in {"warn", "error"} for item in components if not item.get("required"))
+    if any(state == "error" for state in required_states):
+        overall = "error"
+    elif any(state == "warn" for state in required_states) or optional_bad:
+        overall = "warn"
+    else:
+        overall = "ready"
+    return {
+        "status": overall,
+        "timestamp": time.time(),
+        "components": components,
+    }
 
 
 PHASE_FOR_SERVICE = {
@@ -1031,6 +1172,67 @@ async def control_doctor():
         "warn" if any(c["status"] == "warn" for c in checks) else "pass"
     )
     return {"status": overall, "checks": checks}
+
+
+@app.get("/control/platform-health")
+async def control_platform_health():
+    return await build_platform_health()
+
+
+@app.get("/control/opencode")
+async def control_opencode():
+    return await host_agent("GET", "/opencode/status", timeout=10)
+
+
+@app.post("/control/opencode/start")
+async def control_opencode_start():
+    return await host_agent("POST", "/opencode/start", payload={}, timeout=140)
+
+
+@app.post("/control/opencode/stop")
+async def control_opencode_stop():
+    return await host_agent("POST", "/opencode/stop", payload={}, timeout=30)
+
+
+@app.get("/control/maintenance")
+async def control_maintenance():
+    operations, snapshots, open_code = await asyncio.gather(
+        host_agent("GET", "/operations", timeout=10),
+        host_agent("GET", "/maintenance/snapshots", timeout=10),
+        host_agent("GET", "/opencode/status", timeout=10),
+    )
+    return {
+        "operations": operations.get("operations", []),
+        "snapshots": snapshots.get("snapshots", []),
+        "opencode": open_code,
+    }
+
+
+@app.post("/control/maintenance/start")
+async def control_maintenance_start(request: Request):
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "maintenance request must be an object")
+    action = str(payload.get("action", "")).strip().lower()
+    allowed = {"update", "rollback", "burn-in", "opencode-smoke"}
+    if action not in allowed:
+        raise HTTPException(400, "unsupported maintenance action")
+    if action in {"update", "rollback", "burn-in"}:
+        status = await supervisor("GET", "/status", timeout=10)
+        busy = {
+            name: count for name, count in status.get("active_jobs", {}).items()
+            if int(count or 0) > 0
+        }
+        if busy:
+            raise HTTPException(409, f"active AI jobs prevent maintenance: {busy}")
+    return await host_agent("POST", "/operations/start", payload=payload, timeout=20)
+
+
+@app.get("/control/maintenance/{operation_id}")
+async def control_maintenance_operation(operation_id: str):
+    if not re.fullmatch(r"op-[a-f0-9]{12}", operation_id):
+        raise HTTPException(400, "invalid operation id")
+    return await host_agent("GET", f"/operations/{operation_id}", timeout=10)
 
 
 @app.get("/control/settings")
