@@ -21,6 +21,36 @@ REQUESTS = RUNNER_ROOT / "requests"
 RESULTS = RUNNER_ROOT / "results"
 HEARTBEAT = EXCHANGE / "runner-heartbeat.json"
 JSON_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+_WORKSPACE_PATH = re.compile(
+    r"/tmp/agent-eval/[0-9a-f]{32}/(?P<case>[^/\s]+)/runs/[0-9a-f]{32}/workspace"
+)
+_UNITTEST_DURATION = re.compile(
+    r"\bRan (?P<count>\d+) tests? in [0-9]+(?:\.[0-9]+)?s\b"
+)
+
+
+def _stable_feedback(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_feedback(item)
+            for key, item in value.items()
+            if key != "duration_s"
+        }
+    if isinstance(value, list):
+        return [_stable_feedback(item) for item in value]
+    if isinstance(value, str):
+        value = _WORKSPACE_PATH.sub(
+            lambda match: f"/tmp/agent-eval/<case:{match.group('case')}>/workspace",
+            value,
+        )
+        return _UNITTEST_DURATION.sub(
+            lambda match: (
+                f"Ran {match.group('count')} "
+                f"{'test' if match.group('count') == '1' else 'tests'} in <duration>s"
+            ),
+            value,
+        )
+    return value
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -145,7 +175,11 @@ class QueueModelClient:
         prior_result,
         timeout_seconds=None,
     ):
-        feedback = json.dumps(prior_result, ensure_ascii=False) if prior_result else "none"
+        feedback = (
+            json.dumps(_stable_feedback(prior_result), ensure_ascii=False, sort_keys=True)
+            if prior_result
+            else "none"
+        )
         system = (
             "You are a coding agent in an isolated Git worktree. Return ONLY valid JSON. "
             "You may replace exact text in existing files shown in repository context, "
