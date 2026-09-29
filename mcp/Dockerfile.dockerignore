@@ -1,0 +1,9 @@
+**
+!mcp/
+!mcp/app.py
+!mcp/outbound.py
+!mcp/requirements.txt
+!core/
+!core/*.py
+!observability/
+!observability/*.py

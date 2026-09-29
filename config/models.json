@@ -5,6 +5,12 @@
       "base": "http://llm:8080",
       "health": "/health",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 240,
       "idle_timeout": 300,
       "backend_auth": "llama"
@@ -14,6 +20,12 @@
       "base": "http://reasoning:8080",
       "health": "/health",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 420,
       "idle_timeout": 300,
       "backend_auth": "llama"
@@ -23,6 +35,12 @@
       "base": "http://stt:8000",
       "health": "/health",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 180,
       "idle_timeout": 180
     },
@@ -31,6 +49,12 @@
       "base": "http://tts:8000",
       "health": "/health",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 240,
       "idle_timeout": 180
     },
@@ -39,6 +63,12 @@
       "base": "http://vlm:8000",
       "health": "/health",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 300,
       "idle_timeout": 300
     },
@@ -47,6 +77,12 @@
       "base": "http://comfyui:8188",
       "health": "/system_stats",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 240,
       "idle_timeout": 600
     },
@@ -55,6 +91,12 @@
       "base": "http://wangp:7860",
       "health": "/",
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 300,
       "idle_timeout": 600
     },
@@ -63,8 +105,48 @@
       "base": null,
       "health": null,
       "gpu": true,
+      "resources": {
+        "gpu": true,
+        "gpu_vram_mb": null,
+        "system_ram_mb": null,
+        "exclusive_gpu": true
+      },
       "start_timeout": 60,
       "idle_timeout": 0
+    }
+  },
+  "resource_capacity": {
+    "gpu_total_mb": null,
+    "gpu_reserved_headroom_mb": null
+  },
+  "workload_profiles": {
+    "voice": {
+      "priority": 100,
+      "prefer_resident": ["llm", "stt", "tts"]
+    },
+    "interactive": {
+      "priority": 80,
+      "prefer_resident": ["llm"]
+    },
+    "reasoning": {
+      "priority": 70,
+      "prefer_resident": ["reasoning"]
+    },
+    "vision": {
+      "priority": 60,
+      "prefer_resident": ["vlm"]
+    },
+    "image": {
+      "priority": 50,
+      "prefer_resident": ["comfyui"]
+    },
+    "video": {
+      "priority": 40,
+      "prefer_resident": ["wangp"]
+    },
+    "benchmark": {
+      "priority": 30,
+      "prefer_resident": []
     }
   },
   "models": [

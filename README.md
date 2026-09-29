@@ -25,6 +25,8 @@ Supervisor     -- internal Docker/GPU lifecycle + semantic state service
   +-- ComfyUI
   +-- WanGP
   +-- LeRobot (optional)
+
+Gateway <--> Voice -- internal realtime audio session service (CPU-only)
 ```
 
 Only one heavyweight GPU service owns the GPU at a time. The gateway, supervisor, telemetry sampler, dashboard, and MCP bridge stay resident.
@@ -52,6 +54,45 @@ Operational helpers:
 ```
 
 The MCP exposes only status, model discovery, API capability discovery, and `ask_local_ai`. It does not expose shell, arbitrary files, Docker, or remote-desktop functions.
+
+## Realtime voice
+
+Create an authenticated session with `POST /v1/realtime/sessions` using the gateway API key and an optional `{"language":"en"}` body. The response includes a short-lived, one-use `client_secret` and a gateway `ws_url`. Connect with both WebSocket subprotocols: `ai-stack.voice.v1` and `ai-stack.ticket.<client_secret.value>`. The ticket is sent in the WebSocket handshake rather than a URL or later audio message.
+
+The session accepts mono, little-endian PCM16 at 16 kHz, as binary WebSocket frames or base64 `input_audio_buffer.append` events. Server VAD ends a turn after 650 ms of silence; clients may also send `input_audio_buffer.commit`. Events include `conversation.item.input_audio_transcription.*`, `response.output_text.delta`, `response.audio.delta`, `response.cancelled`, and `conversation.item.truncated`. Each audio delta carries base64 PCM16 plus its sample rate and channel count. Send `response.cancel` to cancel a reply, or `session.close` to end a session.
+
+This initial voice API supports English. Whisper produces a final transcription before the service emits its segment-based transcription deltas; they are not live interim ASR. Speech recognition, chat, and speech synthesis each go through the gateway, which keeps the supervisor as the only Docker/GPU lifecycle owner. The existing GPU scheduler runs one heavyweight worker at a time, so voice requests can switch between STT, LLM, and TTS workers and may reload a model between stages. The `voice` workload profile expresses scheduling intent; it does not pin multiple models in memory. Multi-worker residency is deferred until GPU capacity is measured and verified.
+
+Compose voice settings (all optional) are:
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `VOICE_MAX_SESSIONS` | `8` | Maximum active voice sessions. |
+| `VOICE_SESSION_TOKEN_TTL_SECONDS` | `60` | Lifetime of the one-use WebSocket ticket. |
+| `VOICE_SESSION_MAX_SECONDS` | `3600` | Maximum duration of one WebSocket session. |
+| `VOICE_VAD_END_SILENCE_SECONDS` | `0.65` | Silence hangover before a turn is transcribed. |
+| `VOICE_VAD_SPEECH_THRESHOLD` | `420` | PCM16 RMS amplitude threshold for speech detection. |
+| `VOICE_MAX_TURN_SECONDS` | `90` | Maximum buffered audio duration per turn. |
+
+Voice turn evaluations contain timing, byte counts, interruption/truncation state, and provider identifiers. They do not include transcripts or audio. The evaluation router persists the deterministic screen and may forward it to Opik when Opik is enabled; reporting is fail-open for the voice session.
+
+For an external offline API check, see [external_eval/README.md](external_eval/README.md). It uses Inspect AI's standard OpenAI-compatible model adapter and built-in scorer against the gateway.
+
+## Responses API
+
+`POST /v1/responses` supports stateless text input, instructions, function tool declarations, buffered results, and server-sent-event streaming. Conversation state such as `previous_response_id`, image/audio input, and reasoning controls are not implemented; include the full message history in each request. A stream is marked failed if the backend closes or errors before a completion marker, so clients must handle `response.failed` instead of treating partial output as complete.
+
+## Outbound MCP tools
+
+The MCP bridge can connect to up to 16 explicitly configured external MCP servers. `MCP_SERVERS_JSON` contains each server's ID, URL, exact `allowed_tools` list, and optional `auth_env` name. `MCP_SERVER_TOKENS_JSON` maps those environment-variable names to credentials supplied by the host. Keep credentials in environment values; do not put secret values in server configuration. Discovered tools are registered with the Tool Broker and remain unavailable unless their exact names and permissions are admitted.
+
+## Evaluation router
+
+The evaluation router stores metadata-only invocation and voice-turn screens. Suspicious events enter a durable escalation queue; an authenticated worker claims one item and posts a bounded result to `/v1/escalations/{id}/complete`. `DeepEvalWorker` defaults to a 30-second evaluator deadline, and abandoned claims return to the queue after 120 seconds. The Inspect AI example in `external_eval/` is an offline API check, separate from this queue.
+
+## GPU resource scheduler
+
+`SUPERVISOR_SCHEDULER_MODE` defaults to `compatibility`, which retains exclusive GPU admission. `resource` mode permits co-residency only when workload groups match and every worker's VRAM requirement plus configured headroom fits `resource_capacity` in `config/models.json`. Unknown capacity or worker requirements fail closed. The checked-in model registry leaves these measurements unset, so keep the default compatibility mode until measured values are recorded.
 
 ## Security
 

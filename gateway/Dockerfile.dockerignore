@@ -1,0 +1,7 @@
+**
+!gateway/
+!gateway/**
+!core/
+!core/**
+!observability/
+!observability/**

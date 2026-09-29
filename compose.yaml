@@ -55,6 +55,7 @@ services:
       - ALL
     environment:
       CONFIG_PATH: /config/models.json
+      SUPERVISOR_SCHEDULER_MODE: ${SUPERVISOR_SCHEDULER_MODE:-compatibility}
       SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
       LLAMA_API_KEY: ${LLAMA_API_KEY}
       LEASE_STATE_PATH: /state/supervisor-leases.json
@@ -110,9 +111,10 @@ services:
 
   gateway:
     build:
-      context: ./gateway
+      context: .
       args:
         SOURCE_HASH: ${AI_STACK_GATEWAY_SOURCE_HASH:-unknown}
+      dockerfile: gateway/Dockerfile
     container_name: ai-stack-gateway
     restart: unless-stopped
     init: true
@@ -133,6 +135,9 @@ services:
       RUNTIME_SETTINGS_PATH: /state/runtime-settings.json
       HOST_AGENT_URL: http://host.docker.internal:8788
       HOST_AGENT_TOKEN: ${HOST_AGENT_TOKEN}
+      EVAL_ROUTER_URL: http://eval-router:8000
+      VOICE_URL: http://voice:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       supervisor:
@@ -144,6 +149,76 @@ services:
     volumes:
       - ./config:/config:ro
       - ./data/state:/state:ro
+    networks: [ai, voice]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  voice:
+    build:
+      context: .
+      dockerfile: voice/Dockerfile
+      args:
+        SOURCE_HASH: ${AI_STACK_VOICE_SOURCE_HASH:-unknown}
+    container_name: ai-stack-voice
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AI_API_KEY: ${AI_API_KEY}
+      GATEWAY_URL: http://gateway:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      VOICE_MAX_SESSIONS: ${VOICE_MAX_SESSIONS:-8}
+      VOICE_SESSION_TOKEN_TTL_SECONDS: ${VOICE_SESSION_TOKEN_TTL_SECONDS:-60}
+      VOICE_SESSION_MAX_SECONDS: ${VOICE_SESSION_MAX_SECONDS:-3600}
+      VOICE_VAD_END_SILENCE_SECONDS: ${VOICE_VAD_END_SILENCE_SECONDS:-0.65}
+      VOICE_VAD_SPEECH_THRESHOLD: ${VOICE_VAD_SPEECH_THRESHOLD:-420}
+      VOICE_MAX_TURN_SECONDS: ${VOICE_MAX_TURN_SECONDS:-90}
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks: [voice]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  eval-router:
+    build:
+      context: ./eval_router
+      args:
+        SOURCE_HASH: ${AI_STACK_EVAL_ROUTER_SOURCE_HASH:-unknown}
+    container_name: ai-stack-eval-router
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AI_API_KEY: ${AI_API_KEY}
+      EVAL_ROUTER_DB: /data/eval-router.sqlite3
+      EVAL_LATENCY_THRESHOLD_MS: ${EVAL_LATENCY_THRESHOLD_MS:-5000}
+      OPIK_ENABLED: ${OPIK_ENABLED:-0}
+      OPIK_URL: ${OPIK_URL:-}
+      OPIK_PROJECT: ${OPIK_PROJECT:-ai-stack}
+      OPIK_API_KEY: ${OPIK_API_KEY:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./data/evaluations:/data
     networks: [ai]
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
@@ -177,7 +252,8 @@ services:
 
   mcp:
     build:
-      context: ./mcp
+      context: .
+      dockerfile: mcp/Dockerfile
       args:
         SOURCE_HASH: ${AI_STACK_MCP_SOURCE_HASH:-unknown}
     container_name: ai-stack-mcp
@@ -193,6 +269,8 @@ services:
     environment:
       MCP_API_KEY: ${MCP_API_KEY}
       MCP_URL_TOKEN: ${MCP_URL_TOKEN}
+      MCP_SERVERS_JSON: ${MCP_SERVERS_JSON:-}
+      MCP_SERVER_TOKENS_JSON: ${MCP_SERVER_TOKENS_JSON:-}
       AI_API_KEY: ${AI_API_KEY}
       GATEWAY_URL: http://gateway:8000
     depends_on:
@@ -509,6 +587,9 @@ services:
 networks:
   ai:
     name: ai-stack-net
+  voice:
+    name: ai-stack-voice-net
+    internal: true
   docker-control:
     name: ai-stack-docker-control-net
     internal: true

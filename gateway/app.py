@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -13,9 +14,26 @@ from pathlib import Path
 
 import httpx
 import paho.mqtt.client as mqtt
+import websockets
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
+
+from core.invocation import InvocationSource
+from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
+from gateway.eval_client import attach_screening_task, report_invocation_screen
+from gateway.adapters.openai_audio import OpenAIAudioAdapter
+from gateway.adapters.openai_chat import OpenAIChatAdapter
+from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
+from observability.propagation import extract_trace_context, inject_trace_context
+from observability.openinference import invocation_attributes
+from observability.tracing import (
+    current_trace_context,
+    end_span_handle,
+    initialize_tracing,
+    start_span,
+    start_span_handle,
+)
 
 API_KEY = os.getenv("AI_API_KEY", "").strip()
 if not API_KEY:
@@ -33,13 +51,21 @@ TELEMETRY_URL = os.getenv("TELEMETRY_URL", "http://telemetry:8000").rstrip("/")
 RUNTIME_SETTINGS_PATH = Path(os.getenv("RUNTIME_SETTINGS_PATH", "/state/runtime-settings.json"))
 HOST_AGENT_URL = os.getenv("HOST_AGENT_URL", "http://host.docker.internal:8788").rstrip("/")
 HOST_AGENT_TOKEN = os.getenv("HOST_AGENT_TOKEN", "").strip()
+EVAL_ROUTER_URL = os.getenv("EVAL_ROUTER_URL", "http://eval-router:8000").rstrip("/")
+VOICE_URL = os.getenv("VOICE_URL", "http://voice:8000").rstrip("/")
 CONFIG = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 SERVICES = CONFIG["services"]
 MODELS = CONFIG["models"]
 ALIASES = {k.lower(): v for k, v in CONFIG.get("aliases", {}).items()}
 MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
+INVOCATION_ROUTER = InvocationRouter(MODELS, aliases=ALIASES)
+CHAT_ADAPTER = OpenAIChatAdapter()
+AUDIO_ADAPTER = OpenAIAudioAdapter()
+RESPONSES_ADAPTER = OpenAIResponsesAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
+_LOGGER = logging.getLogger(__name__)
+initialize_tracing("ai-stack-gateway")
 ACTIVE_JOBS = {}
 JOB_HISTORY = deque(maxlen=50)
 SELF_TEST_RESULTS = {}
@@ -75,24 +101,81 @@ HOP_BY_HOP_HEADERS = {
 
 @app.middleware("http")
 async def bearer_auth(request: Request, call_next):
-    request_id = request.headers.get("x-request-id", "").strip()[:128] or secrets.token_hex(12)
+    trace_context = extract_trace_context(request.headers)
+    request_id = trace_context.request_id
+    request.state.trace_context = trace_context
     started = time.perf_counter()
     public_path = request.url.path in {"/health", "/ready"}
 
-    if not public_path:
-        supplied = request.headers.get("authorization", "")
-        expected = f"Bearer {API_KEY}"
-        if not secrets.compare_digest(supplied, expected):
-            response = JSONResponse(
-                status_code=401,
-                content={"detail": "invalid API key", "request_id": request_id},
-            )
-        else:
-            response = await call_next(request)
+    async def dispatch():
+        if not public_path:
+            supplied = request.headers.get("authorization", "")
+            expected = f"Bearer {API_KEY}"
+            if not secrets.compare_digest(supplied, expected):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "invalid API key", "request_id": request_id},
+                )
+        return await call_next(request)
+
+    async def dispatch_and_screen():
+        try:
+            response = await dispatch()
+        except Exception:
+            invocation = getattr(request.state, "invocation", None)
+            if invocation is not None:
+                async def report_failure() -> None:
+                    try:
+                        await report_invocation_screen(
+                            invocation,
+                            getattr(request.state, "model_route", None),
+                            http_status=500,
+                            started_at=started,
+                            response_bytes=0,
+                        )
+                    except Exception:
+                        return None
+                asyncio.create_task(report_failure())
+            raise
+        attach_screening_task(
+            response,
+            getattr(request.state, "invocation", None),
+            getattr(request.state, "model_route", None),
+            started_at=started,
+        )
+        return response
+
+    traced_routes = {
+        "/v1/chat/completions": ("gateway.chat", "chat", "openai_chat"),
+        "/v1/responses": ("gateway.responses", "generate", "openai_responses"),
+        "/v1/audio/transcriptions": ("gateway.audio.transcription", "transcribe", "openai_audio"),
+        "/v1/audio/speech": ("gateway.audio.speech", "synthesize", "openai_audio"),
+        "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
+        "/v1/realtime/sessions": ("gateway.voice.session", "session.create", "websocket_voice"),
+    }
+    traced_route = traced_routes.get(request.url.path)
+    if traced_route:
+        span_name, operation, transport = traced_route
+        with start_span(
+            span_name,
+            parent=trace_context,
+            attributes={
+                "gen_ai.operation.name": operation,
+                "ai_stack.transport": transport,
+                "http.request.method": request.method,
+                "http.route": request.url.path,
+            },
+        ) as span:
+            effective_context = current_trace_context(trace_context, span)
+            request.state.trace_context = effective_context
+            response = await dispatch_and_screen()
     else:
-        response = await call_next(request)
+        response = await dispatch_and_screen()
+        effective_context = request.state.trace_context
 
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-Trace-ID"] = effective_context.trace_id
+    inject_trace_context(response.headers, effective_context)
     response.headers["X-Process-Time-Ms"] = f"{(time.perf_counter() - started) * 1000:.1f}"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -631,6 +714,29 @@ async def acquire_service(service: str):
         raise
     return lease_id
 
+
+def request_workload_profile(request: Request) -> str:
+    """Accept a known workload hint; supervisor still applies resource admission."""
+    requested = request.headers.get("x-ai-stack-profile", "interactive").strip()
+    profiles = CONFIG.get("workload_profiles", {})
+    return requested if requested in profiles else "interactive"
+
+
+async def acquire_service_for_request(service: str, request: Request):
+    if service not in SERVICES:
+        raise HTTPException(404, f"unknown service: {service}")
+    lease_id = secrets.token_urlsafe(18)
+    profile = request_workload_profile(request)
+    try:
+        await supervisor("POST", f"/acquire/{service}?lease_id={lease_id}&profile={profile}")
+    except Exception:
+        try:
+            await supervisor("POST", f"/release/{service}?lease_id={lease_id}", timeout=10)
+        except Exception:
+            pass
+        raise
+    return lease_id
+
 async def release_service(service: str, lease_id: str):
     path = f"/release/{service}?lease_id={lease_id}"
     try:
@@ -808,15 +914,51 @@ async def shutdown_background_tasks():
 def upstream_headers(request: Request, service: str):
     blocked = HOP_BY_HOP_HEADERS | {"host", "content-length", "authorization"}
     headers = {k: v for k, v in request.headers.items() if k.lower() not in blocked}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
     if SERVICES[service].get("backend_auth") == "llama":
         headers["Authorization"] = f"Bearer {LLAMA_API_KEY}"
     return headers
+
+
+def provider_span_attributes(request: Request, service: str, path: str) -> dict:
+    invocation = getattr(request.state, "invocation", None)
+    route = getattr(request.state, "model_route", None)
+    attributes = invocation_attributes(
+        invocation,
+        provider=route.provider_id if route is not None else service,
+        service=service,
+    ) if invocation is not None else {
+        "openinference.span.kind": "LLM",
+        "ai_stack.service": service,
+    }
+    if route is not None:
+        attributes["gen_ai.request.model"] = route.model_id
+    attributes["http.request.method"] = request.method
+    attributes["http.route"] = path
+    return attributes
 
 def response_headers(response: httpx.Response, buffered: bool = False):
     blocked = HOP_BY_HOP_HEADERS | {"content-length"}
     if buffered:
         blocked.add("content-encoding")
     return {k: v for k, v in response.headers.items() if k.lower() not in blocked}
+
+async def parse_form_body(request: Request, body: bytes):
+    """Parse already size-limited multipart data without mutating request internals."""
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    parser_request = Request(request.scope, receive)
+    return await parser_request.form()
+
 
 async def read_body_limited(request: Request, limit: int, label: str):
     content_length = request.headers.get("content-length")
@@ -862,17 +1004,24 @@ async def forward_buffered(
     job = create_job(service, path)
     lease_id = None
     try:
-        lease_id = await acquire_service(service)
+        lease_id = await acquire_service_for_request(service, request)
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "processing"))
         async with httpx.AsyncClient(timeout=None) as client:
             try:
-                upstream = await client.request(
-                    request.method,
-                    SERVICES[service]["base"] + path,
-                    params=request.query_params,
-                    content=payload,
-                    headers=upstream_headers(request, service),
-                )
+                with start_span(
+                    f"gateway.provider.{service}",
+                    parent=getattr(request.state, "trace_context", None),
+                    attributes=provider_span_attributes(request, service, path),
+                ) as span:
+                    upstream = await client.request(
+                        request.method,
+                        SERVICES[service]["base"] + path,
+                        params=request.query_params,
+                        content=payload,
+                        headers=upstream_headers(request, service),
+                    )
+                    span.set_attribute("http.response.status_code", upstream.status_code)
+                    span.set_attribute("http.response.body.size", len(upstream.content))
             except httpx.RequestError as exc:
                 raise HTTPException(502, f"{service} upstream request failed") from exc
 
@@ -916,6 +1065,9 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
     lease_id = None
     client = None
     upstream = None
+    provider_span = None
+    provider_trace = None
+    provider_span_started = None
     cleanup_lock = asyncio.Lock()
     released = False
     final_state = "complete"
@@ -934,20 +1086,37 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
                     await client.aclose()
                 if lease_id is not None:
                     await release_service(service, lease_id)
+                if provider_span is not None:
+                    provider_span.set_attribute("ai_stack.stream.status", final_state)
+                    if upstream is not None:
+                        provider_span.set_attribute("http.response.status_code", upstream.status_code)
+                    if final_error is not None:
+                        provider_span.set_attribute("ai_stack.stream.error_type", type(final_error).__name__)
+                    end_span_handle(provider_span, final_error)
                 if job["id"] in ACTIVE_JOBS:
                     finish_job(job, state=final_state, error=final_error)
                 released = True
 
     try:
-        lease_id = await acquire_service(service)
+        lease_id = await acquire_service_for_request(service, request)
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "streaming"))
+        parent_trace = getattr(request.state, "trace_context", None)
+        provider_span = start_span_handle(
+            f"gateway.provider.{service}.stream",
+            parent=parent_trace,
+            attributes=provider_span_attributes(request, service, path),
+        )
+        provider_trace = current_trace_context(parent_trace, provider_span)
+        provider_span_started = time.perf_counter()
         client = httpx.AsyncClient(timeout=None)
+        headers = upstream_headers(request, service)
+        inject_trace_context(headers, provider_trace)
         upstream_request = client.build_request(
             request.method,
             SERVICES[service]["base"] + path,
             params=request.query_params,
             content=body,
-            headers=upstream_headers(request, service),
+            headers=headers,
         )
         upstream = await client.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
@@ -965,6 +1134,7 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
         nonlocal final_state, final_error
         chunks = 0
         byte_count = 0
+        first_chunk_at = None
         try:
             try:
                 async for chunk in upstream.aiter_raw():
@@ -973,6 +1143,14 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
                         break
                     chunks += max(1, chunk.count(b"data:"))
                     byte_count += len(chunk)
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
+                        if provider_span_started is not None:
+                            provider_span.set_attribute(
+                                "gen_ai.server.time_to_first_token_ms",
+                                (first_chunk_at - provider_span_started) * 1000,
+                            )
+                    provider_span.set_attribute("http.response.body.size", byte_count)
                     update_job(
                         job,
                         progress_units=chunks,
@@ -982,7 +1160,7 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
             except httpx.RequestError as exc:
                 final_state = "failed"
                 final_error = exc
-                return
+                raise
         finally:
             try:
                 await cleanup()
@@ -1033,6 +1211,13 @@ async def metrics():
             machine_metrics = machine_response.text.rstrip()
     except Exception:
         machine_metrics = ""
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            voice_response = await client.get(VOICE_URL + "/metrics")
+            voice_response.raise_for_status()
+            voice_metrics = voice_response.text.rstrip()
+    except Exception:
+        voice_metrics = ""
     status = await supervisor("GET", "/status", timeout=5)
     active_jobs = sum(int(value) for value in status.get("active_jobs", {}).values())
     owner = status.get("gpu_owner") or "idle"
@@ -1044,6 +1229,7 @@ async def metrics():
         )
     lines = [
         machine_metrics,
+        voice_metrics,
         "# TYPE localai_active_jobs gauge",
         f"localai_active_jobs {active_jobs}",
         "# TYPE localai_gpu_owner_info gauge",
@@ -1064,9 +1250,11 @@ async def capabilities():
         "models": [model["id"] for model in MODELS],
         "endpoints": {
             "chat": "/v1/chat/completions",
+            "responses": "/v1/responses",
             "transcription": "/v1/audio/transcriptions",
             "speech": "/v1/audio/speech",
             "vision": "/v1/vision/analyze",
+            "realtime": "/v1/realtime/sessions",
             "models": "/v1/models",
             "status": "/v1/system/status",
         },
@@ -1412,6 +1600,132 @@ async def events(websocket: WebSocket):
         return
 
 
+@app.post("/v1/realtime/sessions")
+async def create_realtime_session(request: Request):
+    raw = await read_body_limited(request, 16 * 1024, "voice session configuration")
+    try:
+        payload = json.loads(raw or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "session configuration must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "session configuration must be a JSON object")
+    if payload.get("language", "en") != "en":
+        raise HTTPException(400, "realtime voice currently supports English only")
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            upstream = await client.post(VOICE_URL + "/sessions", headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "realtime voice service is unavailable") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(upstream.status_code, "realtime voice session could not be created")
+    try:
+        result = upstream.json()
+    except ValueError as exc:
+        raise HTTPException(502, "realtime voice service returned an invalid session") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+        raise HTTPException(502, "realtime voice service returned an invalid session")
+
+    scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
+    result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"
+    return result
+
+
+@app.post("/internal/voice-evaluations")
+async def report_voice_evaluation(request: Request):
+    raw = await read_body_limited(request, 16 * 1024, "voice evaluation event")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "voice evaluation event must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "voice evaluation event must be a JSON object")
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            upstream = await client.post(EVAL_ROUTER_URL + "/v1/voice-evaluations", headers=headers, json=payload)
+        if upstream.status_code >= 400:
+            _LOGGER.warning("voice evaluation router rejected an event", extra={"http_status": upstream.status_code})
+            return JSONResponse({"status": "dropped"}, status_code=202)
+        return JSONResponse({"status": "queued"}, status_code=202)
+    except Exception as exc:
+        _LOGGER.warning("voice evaluation forwarding failed", extra={"error_type": type(exc).__name__})
+        return JSONResponse({"status": "unavailable"}, status_code=202)
+
+
+@app.websocket("/v1/realtime")
+async def realtime_proxy(websocket: WebSocket):
+    session_id = websocket.query_params.get("session_id", "")
+    subprotocols = websocket.scope.get("subprotocols", [])
+    if not session_id or len(session_id) > 64 or "ai-stack.voice.v1" not in subprotocols:
+        await websocket.close(code=4401)
+        return
+    ticket = next((value for value in subprotocols if value.startswith("ai-stack.ticket.")), "")
+    if not ticket or len(ticket) > 144:
+        await websocket.close(code=4401)
+        return
+
+    upstream_url = VOICE_URL.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    upstream_url += f"/ws/{session_id}"
+    try:
+        async with websockets.connect(
+            upstream_url,
+            subprotocols=subprotocols,
+            max_size=8 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=20,
+            proxy=None,
+        ) as upstream:
+            await websocket.accept(subprotocol="ai-stack.voice.v1")
+
+            async def client_to_voice():
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    value = message.get("text") if message.get("text") is not None else message.get("bytes")
+                    if value is not None:
+                        await upstream.send(value)
+
+            async def voice_to_client():
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = {
+                asyncio.create_task(client_to_voice()),
+                asyncio.create_task(voice_to_client()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                try:
+                    task.result()
+                except (WebSocketDisconnect, websockets.ConnectionClosed, RuntimeError):
+                    pass
+            try:
+                await websocket.close(code=1000)
+            except RuntimeError:
+                pass
+    except (OSError, websockets.WebSocketException):
+        try:
+            await websocket.close(code=1013, reason="realtime voice service unavailable")
+        except RuntimeError:
+            pass
+
+
 @app.post("/control/start/{service}")
 async def control_start(service: str):
     return await supervisor("POST", f"/ensure/{service}")
@@ -1438,14 +1752,19 @@ async def chat(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "request body must be a JSON object")
 
-    requested = str(payload.get("model", "local-fast")).strip().lower()
-    canonical = ALIASES.get(requested, requested)
-    service = MODEL_SERVICE.get(canonical)
-    if service is None:
-        raise HTTPException(404, f"unknown model: {requested!r}")
-    if service not in {"llm", "reasoning"}:
-        raise HTTPException(400, f"model {requested!r} is not a chat model")
+    invocation = CHAT_ADAPTER.to_invocation(payload, request.state.trace_context)
+    request.state.invocation = invocation
+    requested = invocation.requested_model.lower()
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, f"unknown model: {requested!r}") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, f"model {requested!r} is not a chat model") from exc
 
+    request.state.model_route = route
+    canonical = route.model_id.lower()
+    service = route.provider_id
     payload["model"] = canonical
     if service == "llm":
         kwargs = payload.get("chat_template_kwargs")
@@ -1459,12 +1778,100 @@ async def chat(request: Request):
         return await forward_streaming(service, "/v1/chat/completions", request, body)
     return await forward_buffered(service, "/v1/chat/completions", request, body)
 
+@app.post("/v1/responses")
+async def responses(request: Request):
+    raw = await read_body_limited(request, CHAT_MAX_BODY_BYTES, "responses request")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    try:
+        chat_payload = RESPONSES_ADAPTER.to_chat_request(payload)
+    except ResponsesRequestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    invocation = CHAT_ADAPTER.to_invocation(
+        chat_payload,
+        request.state.trace_context,
+        source=InvocationSource.OPENAI_RESPONSES,
+    )
+    request.state.invocation = invocation
+    requested = invocation.requested_model.lower()
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, f"unknown model: {requested!r}") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, f"model {requested!r} is not a chat model") from exc
+
+    request.state.model_route = route
+    service = route.provider_id
+    chat_payload["model"] = route.model_id.lower()
+    # Responses metadata belongs to the response and canonical invocation, not the chat backend.
+    chat_payload.pop("metadata", None)
+    if service == "llm":
+        kwargs = chat_payload.get("chat_template_kwargs")
+        if kwargs is None:
+            chat_payload["chat_template_kwargs"] = {"enable_thinking": False}
+        elif isinstance(kwargs, dict):
+            kwargs.setdefault("enable_thinking", False)
+    body = json.dumps(chat_payload).encode("utf-8")
+    if chat_payload.get("stream"):
+        upstream = await forward_streaming(service, "/v1/chat/completions", request, body)
+        if upstream.status_code >= 400:
+            return upstream
+        headers = {
+            key: value for key, value in upstream.headers.items()
+            if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length", "content-type"}
+        }
+        response_id = f"resp_{secrets.token_hex(16)}"
+        return StreamingResponse(
+            map_chat_stream(
+                upstream.body_iterator,
+                adapter=RESPONSES_ADAPTER,
+                request_payload=payload,
+                response_id=response_id,
+            ),
+            status_code=upstream.status_code,
+            headers=headers,
+            media_type="text/event-stream",
+        )
+
+    upstream = await forward_buffered(service, "/v1/chat/completions", request, body)
+    if upstream.status_code >= 400:
+        return upstream
+    try:
+        chat_response = json.loads(upstream.body)
+        response_payload = RESPONSES_ADAPTER.from_chat_response(chat_response, payload)
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError, ResponsesRequestError) as exc:
+        raise HTTPException(502, "backend returned an invalid chat completion") from exc
+    headers = {
+        key: value for key, value in upstream.headers.items()
+        if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length", "content-type"}
+    }
+    return JSONResponse(response_payload, status_code=upstream.status_code, headers=headers)
+
+
 @app.api_route("/v1/audio/transcriptions", methods=["POST"])
 async def transcribe(request: Request):
+    raw = await read_body_limited(request, STT_MAX_UPLOAD_BYTES, "STT upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception:
+        form = {}
+    invocation = AUDIO_ADAPTER.to_transcription(form, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
+    if hasattr(form, "close"):
+        await form.close()
     return await forward_buffered(
-        "stt",
+        route.provider_id,
         "/v1/audio/transcriptions",
         request,
+        body=raw,
         max_body_bytes=STT_MAX_UPLOAD_BYTES,
         body_label="STT upload",
     )
@@ -1500,15 +1907,31 @@ async def speech(request: Request):
         if not 0.25 <= float(speed) <= 4.0:
             raise HTTPException(400, "speed must be between 0.25 and 4.0")
 
+    invocation = AUDIO_ADAPTER.to_speech(payload, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
     body = json.dumps(payload).encode("utf-8")
-    return await forward_buffered("tts", "/v1/audio/speech", request, body)
+    return await forward_buffered(route.provider_id, "/v1/audio/speech", request, body)
 
 @app.api_route("/v1/vision/analyze", methods=["POST"])
 async def vision(request: Request):
+    raw = await read_body_limited(request, VLM_MAX_UPLOAD_BYTES, "VLM upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception:
+        form = {}
+    invocation = AUDIO_ADAPTER.to_vision(form, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
+    if hasattr(form, "close"):
+        await form.close()
     return await forward_buffered(
-        "vlm",
+        route.provider_id,
         "/v1/vision/analyze",
         request,
+        body=raw,
         max_body_bytes=VLM_MAX_UPLOAD_BYTES,
         body_label="VLM upload",
     )

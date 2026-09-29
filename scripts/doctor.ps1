@@ -57,7 +57,7 @@ try {
   }
 } catch { Fail "docker-socket-isolation" $_ }
 
-foreach($svc in @("docker-control","telemetry","supervisor","gateway","dashboard","mcp","agent-lab","stt","vlm","comfyui","wangp")) {
+foreach($svc in @("docker-control","telemetry","supervisor","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm","comfyui","wangp")) {
   $container = "ai-stack-$svc"
   $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
   $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
@@ -81,7 +81,7 @@ try {
   }
 } catch { Fail "agent-lab-sandbox-isolation" $_ }
 
-foreach($svc in @("docker-control","supervisor","telemetry","gateway","dashboard","mcp","agent-lab","stt","vlm")) {
+foreach($svc in @("docker-control","supervisor","telemetry","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm")) {
   $currentHash = (& python (Join-Path $PSScriptRoot "source_hash.py") $svc).Trim()
   $imageJson = & docker image inspect ("ai-stack-" + $svc + ":latest") 2>$null
   $builtHash = $null
