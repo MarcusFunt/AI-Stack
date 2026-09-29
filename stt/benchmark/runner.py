@@ -61,9 +61,11 @@ def load_manifest(path: Path) -> list[dict]:
         )
         item["audio_path"] = str(audio)
         item["speaker_count"] = int(item.get("speaker_count", 3))
-        item["reference_text"] = str(
-            item.get("text") or " ".join(s["text"] for s in segments)
-        ).strip()
+        top_level_text = str(item.get("text") or "").strip()
+        item["reference_text"] = (
+            top_level_text
+            or " ".join(str(s.get("text", "")) for s in segments).strip()
+        )
         if not item["reference_text"]:
             raise ValueError(
                 f"{path}:{number}: recording requires reference text for ASR scoring"
