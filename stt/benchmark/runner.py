@@ -127,6 +127,7 @@ def speaker_attributed_stats(
                     " ".join(reference_by_speaker[speaker]),
                     " ".join(predicted_by_speaker.get(speaker, [])),
                     remove_fillers=True,
+                    canonicalize_numbers=True,
                 )
                 record_stats.append(stat)
                 all_stats.append(stat)
@@ -215,13 +216,22 @@ def main() -> int:
 
             for record, hypothesis in zip(records, hypotheses):
                 content = word_error_stats(
-                    record["reference_text"], hypothesis, remove_fillers=True
+                    record["reference_text"],
+                    hypothesis,
+                    remove_fillers=True,
+                    canonicalize_numbers=True,
                 )
                 verbatim = word_error_stats(
-                    record["reference_text"], hypothesis, remove_fillers=False
+                    record["reference_text"],
+                    hypothesis,
+                    remove_fillers=False,
+                    canonicalize_numbers=True,
                 )
                 cer = char_error_stats(
-                    record["reference_text"], hypothesis, remove_fillers=True
+                    record["reference_text"],
+                    hypothesis,
+                    remove_fillers=True,
+                    canonicalize_numbers=True,
                 )
                 content_stats.append(content)
                 verbatim_stats.append(verbatim)
