@@ -68,6 +68,13 @@ class InvocationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TraceContext(span_id="0" * 16)
 
+    def test_trace_context_child_preserves_w3c_trace_flags(self):
+        root = TraceContext(trace_flags="00")
+        child = root.child()
+        self.assertEqual(root.trace_flags, "00")
+        self.assertEqual(child.trace_flags, "00")
+
+
 
 if __name__ == "__main__":
     unittest.main()

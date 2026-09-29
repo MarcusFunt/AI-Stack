@@ -17,6 +17,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from observability.propagation import extract_trace_context, inject_trace_context
+from observability.tracing import current_trace_context, initialize_tracing, start_span
+
 API_KEY = os.getenv("AI_API_KEY", "").strip()
 if not API_KEY:
     raise RuntimeError("AI_API_KEY must be set")
@@ -40,6 +43,7 @@ ALIASES = {k.lower(): v for k, v in CONFIG.get("aliases", {}).items()}
 MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
+initialize_tracing("ai-stack-gateway")
 ACTIVE_JOBS = {}
 JOB_HISTORY = deque(maxlen=50)
 SELF_TEST_RESULTS = {}
@@ -75,24 +79,44 @@ HOP_BY_HOP_HEADERS = {
 
 @app.middleware("http")
 async def bearer_auth(request: Request, call_next):
-    request_id = request.headers.get("x-request-id", "").strip()[:128] or secrets.token_hex(12)
+    trace_context = extract_trace_context(request.headers)
+    request_id = trace_context.request_id
+    request.state.trace_context = trace_context
     started = time.perf_counter()
     public_path = request.url.path in {"/health", "/ready"}
 
-    if not public_path:
-        supplied = request.headers.get("authorization", "")
-        expected = f"Bearer {API_KEY}"
-        if not secrets.compare_digest(supplied, expected):
-            response = JSONResponse(
-                status_code=401,
-                content={"detail": "invalid API key", "request_id": request_id},
-            )
-        else:
-            response = await call_next(request)
+    async def dispatch():
+        if not public_path:
+            supplied = request.headers.get("authorization", "")
+            expected = f"Bearer {API_KEY}"
+            if not secrets.compare_digest(supplied, expected):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "invalid API key", "request_id": request_id},
+                )
+        return await call_next(request)
+
+    if request.url.path == "/v1/chat/completions":
+        with start_span(
+            "gateway.chat",
+            parent=trace_context,
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "ai_stack.transport": "openai_chat",
+                "http.request.method": request.method,
+                "http.route": "/v1/chat/completions",
+            },
+        ) as span:
+            effective_context = current_trace_context(trace_context, span)
+            request.state.trace_context = effective_context
+            response = await dispatch()
     else:
-        response = await call_next(request)
+        response = await dispatch()
+        effective_context = request.state.trace_context
 
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-Trace-ID"] = effective_context.trace_id
+    inject_trace_context(response.headers, effective_context)
     response.headers["X-Process-Time-Ms"] = f"{(time.perf_counter() - started) * 1000:.1f}"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -808,6 +832,9 @@ async def shutdown_background_tasks():
 def upstream_headers(request: Request, service: str):
     blocked = HOP_BY_HOP_HEADERS | {"host", "content-length", "authorization"}
     headers = {k: v for k, v in request.headers.items() if k.lower() not in blocked}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
     if SERVICES[service].get("backend_auth") == "llama":
         headers["Authorization"] = f"Bearer {LLAMA_API_KEY}"
     return headers
