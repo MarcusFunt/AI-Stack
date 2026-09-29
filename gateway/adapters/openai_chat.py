@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 from core.context import TraceContext
@@ -30,9 +31,18 @@ class OpenAIChatAdapter:
     def _number(value: Any) -> float | None:
         if isinstance(value, bool) or not isinstance(value, (float, int)):
             return None
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number) or not 0 <= number <= 2:
+            return None
+        return number
 
-    def to_invocation(self, payload: Mapping[str, Any], trace_context: TraceContext | None = None) -> Invocation:
+    def to_invocation(
+        self,
+        payload: Mapping[str, Any],
+        trace_context: TraceContext | None = None,
+        *,
+        source: InvocationSource = InvocationSource.OPENAI_CHAT,
+    ) -> Invocation:
         if not isinstance(payload, Mapping):
             raise TypeError("chat payload must be a mapping")
         requested = str(payload.get("model", "local-fast")).strip()
@@ -43,7 +53,7 @@ class OpenAIChatAdapter:
         if isinstance(raw_tools, list):
             for item in raw_tools:
                 function = item.get("function") if isinstance(item, Mapping) else None
-                if not isinstance(function, Mapping) or not isinstance(function.get("name"), str):
+                if not isinstance(function, Mapping) or not isinstance(function.get("name"), str) or not function["name"].strip():
                     continue
                 schema = function.get("parameters", {})
                 tools.append(ToolDefinition(
@@ -57,12 +67,13 @@ class OpenAIChatAdapter:
             trace_context=trace_context or TraceContext(),
             operation=InvocationOperation.GENERATE,
             modality={Modality.TEXT},
-            source=InvocationSource.OPENAI_CHAT,
+            source=source,
             principal=Principal(id="gateway-client", kind="api_key", scopes=frozenset({"chat"})),
             requested_model=requested,
             model_policy=ModelPolicy(capability="chat"),
             input=InvocationInput(messages=messages),
             tools=tools,
+            metadata=payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), Mapping) else {},
             options=InvocationOptions(
                 stream=bool(payload.get("stream", False)),
                 temperature=self._number(payload.get("temperature")),

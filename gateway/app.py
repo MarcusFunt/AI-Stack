@@ -17,9 +17,11 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from core.invocation import InvocationSource
 from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
 from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
+from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.tracing import current_trace_context, initialize_tracing, start_span
 
@@ -47,6 +49,7 @@ MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
 INVOCATION_ROUTER = InvocationRouter(MODELS, aliases=ALIASES)
 CHAT_ADAPTER = OpenAIChatAdapter()
 AUDIO_ADAPTER = OpenAIAudioAdapter()
+RESPONSES_ADAPTER = OpenAIResponsesAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
 initialize_tracing("ai-stack-gateway")
@@ -104,6 +107,7 @@ async def bearer_auth(request: Request, call_next):
 
     traced_routes = {
         "/v1/chat/completions": ("gateway.chat", "chat", "openai_chat"),
+        "/v1/responses": ("gateway.responses", "generate", "openai_responses"),
         "/v1/audio/transcriptions": ("gateway.audio.transcription", "transcribe", "openai_audio"),
         "/v1/audio/speech": ("gateway.audio.speech", "synthesize", "openai_audio"),
         "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
@@ -1120,6 +1124,7 @@ async def capabilities():
         "models": [model["id"] for model in MODELS],
         "endpoints": {
             "chat": "/v1/chat/completions",
+            "responses": "/v1/responses",
             "transcription": "/v1/audio/transcriptions",
             "speech": "/v1/audio/speech",
             "vision": "/v1/vision/analyze",
@@ -1519,6 +1524,82 @@ async def chat(request: Request):
     if bool(payload.get("stream")):
         return await forward_streaming(service, "/v1/chat/completions", request, body)
     return await forward_buffered(service, "/v1/chat/completions", request, body)
+
+@app.post("/v1/responses")
+async def responses(request: Request):
+    raw = await read_body_limited(request, CHAT_MAX_BODY_BYTES, "responses request")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    try:
+        chat_payload = RESPONSES_ADAPTER.to_chat_request(payload)
+    except ResponsesRequestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    invocation = CHAT_ADAPTER.to_invocation(
+        chat_payload,
+        request.state.trace_context,
+        source=InvocationSource.OPENAI_RESPONSES,
+    )
+    request.state.invocation = invocation
+    requested = invocation.requested_model.lower()
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, f"unknown model: {requested!r}") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, f"model {requested!r} is not a chat model") from exc
+
+    request.state.model_route = route
+    service = route.provider_id
+    chat_payload["model"] = route.model_id.lower()
+    # Responses metadata belongs to the response and canonical invocation, not the chat backend.
+    chat_payload.pop("metadata", None)
+    if service == "llm":
+        kwargs = chat_payload.get("chat_template_kwargs")
+        if kwargs is None:
+            chat_payload["chat_template_kwargs"] = {"enable_thinking": False}
+        elif isinstance(kwargs, dict):
+            kwargs.setdefault("enable_thinking", False)
+    body = json.dumps(chat_payload).encode("utf-8")
+    if chat_payload.get("stream"):
+        upstream = await forward_streaming(service, "/v1/chat/completions", request, body)
+        if upstream.status_code >= 400:
+            return upstream
+        headers = {
+            key: value for key, value in upstream.headers.items()
+            if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length", "content-type"}
+        }
+        response_id = f"resp_{secrets.token_hex(16)}"
+        return StreamingResponse(
+            map_chat_stream(
+                upstream.body_iterator,
+                adapter=RESPONSES_ADAPTER,
+                request_payload=payload,
+                response_id=response_id,
+            ),
+            status_code=upstream.status_code,
+            headers=headers,
+            media_type="text/event-stream",
+        )
+
+    upstream = await forward_buffered(service, "/v1/chat/completions", request, body)
+    if upstream.status_code >= 400:
+        return upstream
+    try:
+        chat_response = json.loads(upstream.body)
+        response_payload = RESPONSES_ADAPTER.from_chat_response(chat_response, payload)
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError, ResponsesRequestError) as exc:
+        raise HTTPException(502, "backend returned an invalid chat completion") from exc
+    headers = {
+        key: value for key, value in upstream.headers.items()
+        if key.lower() not in HOP_BY_HOP_HEADERS | {"content-length", "content-type"}
+    }
+    return JSONResponse(response_payload, status_code=upstream.status_code, headers=headers)
+
 
 @app.api_route("/v1/audio/transcriptions", methods=["POST"])
 async def transcribe(request: Request):
