@@ -21,7 +21,7 @@ class NemotronDiarizer:
             token=token,
         )
 
-    def diarize(self, audio_path: str, *, speaker_count: int = 3) -> list[dict]:
+    def diarize(self, audio_path: str) -> list[dict]:
         import torch
         from transformers.audio_utils import load_audio
 
@@ -36,8 +36,6 @@ class NemotronDiarizer:
         segments = []
         for item in raw:
             speaker = int(item["Speaker"])
-            if speaker >= speaker_count:
-                continue
             start, end = float(item["Start"]), float(item["End"])
             if end > start:
                 segments.append({"start": start, "end": end, "speaker": str(speaker)})
