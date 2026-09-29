@@ -14,22 +14,25 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BenchRoot = Join-Path $Root "data\stt-benchmark"
 if(-not (Test-Path $BenchRoot)) { New-Item -ItemType Directory -Path $BenchRoot | Out-Null }
+function Assert-UnderBenchmarkRoot([string]$Path, [string]$Label) {
+  $rootPrefix = $BenchRoot.TrimEnd("\") + "\"
+  if(-not $Path.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "$Label must live under $BenchRoot."
+  }
+}
+
 if(-not $Manifest) { $Manifest = Join-Path $BenchRoot "manifest.jsonl" }
 if(-not (Test-Path $Manifest)) {
   throw "Benchmark manifest not found: $Manifest. See stt\benchmark\README.md."
 }
 $Manifest = (Resolve-Path $Manifest).Path
-if(-not $Manifest.StartsWith($BenchRoot, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "Manifest must live under $BenchRoot so the STT container can access its audio."
-}
+Assert-UnderBenchmarkRoot $Manifest "Manifest"
 if(-not $Output) {
   $Output = Join-Path $BenchRoot ("results\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 }
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 $Output = (Resolve-Path $Output).Path
-if(-not $Output.StartsWith($BenchRoot, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "Output must live under $BenchRoot."
-}
+Assert-UnderBenchmarkRoot $Output "Output"
 
 function To-ContainerPath([string]$Path) {
   $relative = $Path.Substring($BenchRoot.Length).TrimStart("\")
@@ -44,12 +47,18 @@ function Invoke-Supervisor([string]$Method, [string]$Path, [int]$Timeout = 600) 
 Set-Location $Root
 & (Join-Path $PSScriptRoot "ai.ps1") start gateway | Out-Null
 if($LASTEXITCODE -ne 0) { throw "failed to start AI-Stack control plane" }
+& docker inspect ai-stack-stt 2>$null | Out-Null
+if($LASTEXITCODE -ne 0) {
+  throw "ai-stack-stt has not been created. Run .\scripts\ai.ps1 create first."
+}
 
 $leaseId = "stt-benchmark-" + [Guid]::NewGuid().ToString("N")
 $acquired = $false
 try {
   Invoke-Supervisor "POST" ("/acquire/stt?lease_id=" + $leaseId) | Out-Null
   $acquired = $true
+  & docker exec ai-stack-stt python -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/internal/benchmark/unload',method='POST'),timeout=30).read()"
+  if($LASTEXITCODE -ne 0) { throw "failed to unload the resident faster-whisper model" }
   $args = @(
     "exec","ai-stack-stt","python","-m","benchmark.runner",
     "--manifest",(To-ContainerPath $Manifest),
