@@ -60,6 +60,7 @@ class OpenAIChatAdapter:
                     name=function["name"],
                     description=function.get("description", "") if isinstance(function.get("description", ""), str) else "",
                     input_schema=schema if isinstance(schema, Mapping) else {},
+                    provider="client",
                 ))
         response_format = payload.get("response_format")
         response_format_name = response_format.get("type") if isinstance(response_format, Mapping) else None

@@ -23,6 +23,7 @@ class OpenAIChatAdapterTests(unittest.TestCase):
         self.assertEqual(invocation.input.messages[0]["content"], "hi")
         self.assertEqual(invocation.principal.id, "gateway-client")
         self.assertEqual(invocation.tools[0].name, "lookup")
+        self.assertEqual(invocation.tools[0].provider, "client")
         self.assertTrue(invocation.options.stream)
         self.assertEqual(invocation.options.max_output_tokens, 32)
 

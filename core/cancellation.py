@@ -55,6 +55,17 @@ class CancellationToken:
                 return
         callback(reason)
 
+    def remove_callback(self, callback: Callable[[str | None], None]) -> bool:
+        """Remove a pending callback; return False once cancellation already fired."""
+        with self._lock:
+            if self._event.is_set():
+                return False
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                return False
+            return True
+
     async def wait(self) -> str | None:
         await asyncio.to_thread(self._event.wait)
         return self.reason
