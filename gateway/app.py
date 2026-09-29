@@ -17,6 +17,8 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
+from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
+from gateway.adapters.openai_chat import OpenAIChatAdapter
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.tracing import current_trace_context, initialize_tracing, start_span
 
@@ -41,6 +43,8 @@ SERVICES = CONFIG["services"]
 MODELS = CONFIG["models"]
 ALIASES = {k.lower(): v for k, v in CONFIG.get("aliases", {}).items()}
 MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
+INVOCATION_ROUTER = InvocationRouter(MODELS, aliases=ALIASES)
+CHAT_ADAPTER = OpenAIChatAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
 initialize_tracing("ai-stack-gateway")
@@ -1465,14 +1469,19 @@ async def chat(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "request body must be a JSON object")
 
-    requested = str(payload.get("model", "local-fast")).strip().lower()
-    canonical = ALIASES.get(requested, requested)
-    service = MODEL_SERVICE.get(canonical)
-    if service is None:
-        raise HTTPException(404, f"unknown model: {requested!r}")
-    if service not in {"llm", "reasoning"}:
-        raise HTTPException(400, f"model {requested!r} is not a chat model")
+    invocation = CHAT_ADAPTER.to_invocation(payload, request.state.trace_context)
+    request.state.invocation = invocation
+    requested = invocation.requested_model.lower()
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, f"unknown model: {requested!r}") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, f"model {requested!r} is not a chat model") from exc
 
+    request.state.model_route = route
+    canonical = route.model_id.lower()
+    service = route.provider_id
     payload["model"] = canonical
     if service == "llm":
         kwargs = payload.get("chat_template_kwargs")
