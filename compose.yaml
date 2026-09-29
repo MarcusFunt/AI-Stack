@@ -177,7 +177,8 @@ services:
 
   mcp:
     build:
-      context: ./mcp
+      context: .
+      dockerfile: mcp/Dockerfile
       args:
         SOURCE_HASH: ${AI_STACK_MCP_SOURCE_HASH:-unknown}
     container_name: ai-stack-mcp
@@ -193,6 +194,8 @@ services:
     environment:
       MCP_API_KEY: ${MCP_API_KEY}
       MCP_URL_TOKEN: ${MCP_URL_TOKEN}
+      MCP_SERVERS_JSON: ${MCP_SERVERS_JSON:-}
+      MCP_SERVER_TOKENS_JSON: ${MCP_SERVER_TOKENS_JSON:-}
       AI_API_KEY: ${AI_API_KEY}
       GATEWAY_URL: http://gateway:8000
     depends_on:

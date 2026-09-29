@@ -1,19 +1,34 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import secrets
 from typing import Literal
+from uuid import uuid4
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from core.cancellation import CancellationToken
+from core.context import TraceContext
+from core.invocation import Principal
+from core.tool_broker import ToolBroker, ToolCall, ToolNotFoundError
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from observability.propagation import extract_trace_context
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
+from outbound import (
+    MCPConfigError,
+    MCPRemoteToolProvider,
+    load_mcp_auth_environment,
+    load_mcp_server_configs,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 MCP_API_KEY = os.getenv("MCP_API_KEY", "").strip()
 MCP_URL_TOKEN = os.getenv("MCP_URL_TOKEN", "").strip()
@@ -117,6 +132,92 @@ async def ask_local_ai(
         return result["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Local AI returned an unexpected chat response") from exc
+
+
+@mcp.tool(name="ai.system.status", description="Get AI-Stack gateway, GPU scheduler, and service status.")
+async def ai_system_status() -> dict:
+    return await local_ai_status()
+
+
+@mcp.tool(name="ai.models.list", description="List AI-Stack models and their advertised capabilities.")
+async def ai_models_list() -> dict:
+    return await local_ai_models()
+
+
+@mcp.tool(
+    name="ai.generate",
+    description="Generate a response with the local fast model through the unified AI-Stack gateway.",
+)
+async def ai_generate(prompt: str, system_prompt: str = "", max_tokens: int = 1200) -> str:
+    return await ask_local_ai(prompt, "fast", system_prompt, max_tokens)
+
+
+@mcp.tool(
+    name="ai.reason",
+    description="Reason through a difficult task with the local reasoning model through the unified gateway.",
+)
+async def ai_reason(prompt: str, system_prompt: str = "", max_tokens: int = 1200) -> str:
+    return await ask_local_ai(prompt, "reasoning", system_prompt, max_tokens)
+
+
+tool_broker = ToolBroker()
+remote_tool_provider: MCPRemoteToolProvider | None = None
+outbound_config_error = False
+
+
+@mcp.tool(description="List external MCP servers and the exact tools admitted through the Tool Broker.")
+async def mcp_list_tools() -> dict:
+    definitions = tool_broker.list_tools()
+    return {
+        "servers": remote_tool_provider.server_status() if remote_tool_provider is not None else {},
+        "configuration_state": "invalid" if outbound_config_error else "ready",
+        "tools": [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "input_schema": definition.input_schema,
+            }
+            for definition in definitions
+        ],
+    }
+
+
+def _request_trace_context(ctx: Context) -> TraceContext:
+    request = getattr(getattr(ctx, "request_context", None), "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        return extract_trace_context(headers)
+    return TraceContext(request_id=str(ctx.request_id))
+
+
+@mcp.tool(description="Call an exact tool listed by mcp_list_tools through the permission-checked Tool Broker.")
+async def mcp_call_tool(tool_name: str, arguments: dict, ctx: Context) -> dict:
+    definitions = tool_broker.list_tools()
+    scopes = frozenset(scope for definition in definitions for scope in definition.all_permissions)
+    call = ToolCall(
+        id=f"mcp-{uuid4().hex}",
+        invocation_id=str(uuid4()),
+        tool_name=tool_name,
+        arguments=arguments,
+        trace_context=_request_trace_context(ctx),
+    )
+    try:
+        result = await tool_broker.execute(
+            call,
+            principal=Principal(id="authenticated-mcp-client", kind="service", scopes=scopes),
+            cancellation=CancellationToken(),
+        )
+    except ToolNotFoundError:
+        return {"success": False, "error": "tool not found"}
+    except PermissionError:
+        return {"success": False, "error": "tool is not authorized"}
+    except ValueError:
+        return {"success": False, "error": "tool arguments are invalid"}
+    if not result.success:
+        return {"success": False, "error": result.error, "call_id": result.call_id}
+    return {"success": True, "content": result.content, "call_id": result.call_id}
+
+
 async def health(_: Request):
     return JSONResponse({"status": "ok", "service": "local-ai-mcp"})
 
@@ -146,6 +247,30 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 mcp_http_app = mcp.streamable_http_app()
 @contextlib.asynccontextmanager
 async def lifespan(_: Starlette):
+    global tool_broker, remote_tool_provider, outbound_config_error
+    tool_broker = ToolBroker()
+    outbound_config_error = False
+    try:
+        configs = load_mcp_server_configs(os.getenv("MCP_SERVERS_JSON", ""))
+        auth_environment = load_mcp_auth_environment(os.getenv("MCP_SERVER_TOKENS_JSON", ""))
+    except MCPConfigError as exc:
+        configs = ()
+        auth_environment = {}
+        outbound_config_error = True
+        _LOGGER.warning("outbound MCP configuration is invalid", extra={"error_type": type(exc).__name__})
+    provider_environment = dict(os.environ)
+    provider_environment.update(auth_environment)
+    remote_tool_provider = MCPRemoteToolProvider(configs, environ=provider_environment)
+    for config in configs:
+        tool_broker.register_provider(config.provider_id, remote_tool_provider)
+    for definition in await remote_tool_provider.discover():
+        try:
+            tool_broker.register_tool(definition)
+        except (TypeError, ValueError) as exc:
+            _LOGGER.warning(
+                "outbound MCP tool registration failed",
+                extra={"tool_name": definition.name, "error_type": type(exc).__name__},
+            )
     async with mcp.session_manager.run():
         yield
 
