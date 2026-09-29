@@ -7,6 +7,7 @@ param(
   [ValidateRange(1,16)][int]$BatchSize = 2,
   [ValidateRange(1,10)][int]$BeamSize = 5,
   [ValidateRange(0,2)][double]$CollarSeconds = 0.25,
+  [string[]]$Revision = @(),
   [switch]$NoSpeakerAttributed
 )
 
@@ -55,7 +56,7 @@ if($LASTEXITCODE -ne 0) {
 $leaseId = "stt-benchmark-" + [Guid]::NewGuid().ToString("N")
 $acquired = $false
 try {
-  Invoke-Supervisor "POST" ("/acquire/stt?lease_id=" + $leaseId) | Out-Null
+  Invoke-Supervisor "POST" ("/acquire/stt?lease_id=" + $leaseId + "&profile=benchmark&exclusive=true") | Out-Null
   $acquired = $true
   & docker exec ai-stack-stt python -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/internal/benchmark/unload',method='POST'),timeout=30).read()"
   if($LASTEXITCODE -ne 0) { throw "failed to unload the resident faster-whisper model" }
@@ -68,6 +69,21 @@ try {
     "--collar",$CollarSeconds,
     "--models"
   ) + $Models
+  foreach($item in $Revision) {
+    if($item -notmatch '^[A-Za-z0-9_-]+=[^=]+  & docker @args
+  if($LASTEXITCODE -ne 0) { throw "STT benchmark failed with exit code $LASTEXITCODE" }
+} finally {
+  if($acquired) {
+    try { Invoke-Supervisor "POST" ("/release/stt?lease_id=" + $leaseId) 60 | Out-Null }
+    catch { Write-Warning ("Failed to release STT benchmark lease: " + $_) }
+  }
+}
+Write-Output ("Benchmark results: " + $Output)
+) {
+      throw "Invalid -Revision '$item'. Expected alias=revision."
+    }
+    $args += @("--revision", $item)
+  }
   if($NoSpeakerAttributed) { $args += "--no-speaker-attributed" }
   & docker @args
   if($LASTEXITCODE -ne 0) { throw "STT benchmark failed with exit code $LASTEXITCODE" }
