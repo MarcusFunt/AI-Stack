@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 import gc
-import os
+from .revisions import hf_token, resolve_model_revision
 
 
 class NemotronDiarizer:
     model_id = "nvidia/Nemotron-3-Diarization"
 
-    def __init__(self):
+    def __init__(self, revision: str | None = None):
         import torch
         from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-        token = os.getenv("HF_TOKEN") or None
+        self.revision = resolve_model_revision(self.model_id, revision)
         dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "auto"
-        self.processor = AutoProcessor.from_pretrained(self.model_id, token=token)
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_id, revision=self.revision, token=hf_token()
+        )
         self.model = AutoModelForAudioFrameClassification.from_pretrained(
             self.model_id,
+            revision=self.revision,
             device_map="auto",
             torch_dtype=dtype,
-            token=token,
+            token=hf_token(),
         )
 
     def diarize(self, audio_path: str) -> list[dict]:
