@@ -133,6 +133,7 @@ services:
       RUNTIME_SETTINGS_PATH: /state/runtime-settings.json
       HOST_AGENT_URL: http://host.docker.internal:8788
       HOST_AGENT_TOKEN: ${HOST_AGENT_TOKEN}
+      EVAL_ROUTER_URL: http://eval-router:8000
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       supervisor:
@@ -144,6 +145,39 @@ services:
     volumes:
       - ./config:/config:ro
       - ./data/state:/state:ro
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
+  eval-router:
+    build:
+      context: ./eval_router
+      args:
+        SOURCE_HASH: ${AI_STACK_EVAL_ROUTER_SOURCE_HASH:-unknown}
+    container_name: ai-stack-eval-router
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      AI_API_KEY: ${AI_API_KEY}
+      EVAL_ROUTER_DB: /data/eval-router.sqlite3
+      EVAL_LATENCY_THRESHOLD_MS: ${EVAL_LATENCY_THRESHOLD_MS:-5000}
+      OPIK_ENABLED: ${OPIK_ENABLED:-0}
+      OPIK_URL: ${OPIK_URL:-}
+      OPIK_PROJECT: ${OPIK_PROJECT:-ai-stack}
+      OPIK_API_KEY: ${OPIK_API_KEY:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./data/evaluations:/data
     networks: [ai]
     healthcheck:
       test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]

@@ -19,6 +19,7 @@ from starlette.requests import ClientDisconnect
 
 from core.invocation import InvocationSource
 from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
+from gateway.eval_client import attach_screening_task, report_invocation_screen
 from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
 from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
@@ -105,6 +106,33 @@ async def bearer_auth(request: Request, call_next):
                 )
         return await call_next(request)
 
+    async def dispatch_and_screen():
+        try:
+            response = await dispatch()
+        except Exception:
+            invocation = getattr(request.state, "invocation", None)
+            if invocation is not None:
+                async def report_failure() -> None:
+                    try:
+                        await report_invocation_screen(
+                            invocation,
+                            getattr(request.state, "model_route", None),
+                            http_status=500,
+                            started_at=started,
+                            response_bytes=0,
+                        )
+                    except Exception:
+                        return None
+                asyncio.create_task(report_failure())
+            raise
+        attach_screening_task(
+            response,
+            getattr(request.state, "invocation", None),
+            getattr(request.state, "model_route", None),
+            started_at=started,
+        )
+        return response
+
     traced_routes = {
         "/v1/chat/completions": ("gateway.chat", "chat", "openai_chat"),
         "/v1/responses": ("gateway.responses", "generate", "openai_responses"),
@@ -127,9 +155,9 @@ async def bearer_auth(request: Request, call_next):
         ) as span:
             effective_context = current_trace_context(trace_context, span)
             request.state.trace_context = effective_context
-            response = await dispatch()
+            response = await dispatch_and_screen()
     else:
-        response = await dispatch()
+        response = await dispatch_and_screen()
         effective_context = request.state.trace_context
 
     response.headers["X-Request-ID"] = request_id

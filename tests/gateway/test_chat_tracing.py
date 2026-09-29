@@ -93,6 +93,40 @@ class GatewayChatTracingTests(unittest.TestCase):
         )
         self.assertEqual(unauthorized.status_code, 401)
 
+    def test_completed_invocation_is_screened_after_response_and_failures_stay_fail_open(self):
+        from gateway import eval_client
+
+        observed = []
+        original_forward = self.gateway.forward_buffered
+        original_report = eval_client.report_invocation_screen
+
+        async def fake_forward(service, path, request, body=None, **kwargs):
+            return Response(content=b'{"choices":[{"message":{"content":"ok"}}]}', media_type="application/json")
+
+        async def failing_report(invocation, model_route, **kwargs):
+            observed.append((invocation, model_route, kwargs))
+            raise RuntimeError("evaluation service offline")
+
+        self.gateway.forward_buffered = fake_forward
+        eval_client.report_invocation_screen = failing_report
+        try:
+            response = self.client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"model": "fast", "messages": [{"role": "user", "content": "private prompt"}]},
+            )
+        finally:
+            self.gateway.forward_buffered = original_forward
+            eval_client.report_invocation_screen = original_report
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(observed), 1)
+        invocation, route, details = observed[0]
+        self.assertEqual(invocation.source.value, "openai_chat")
+        self.assertEqual(route.model_id, "local-fast")
+        self.assertEqual(details["http_status"], 200)
+        self.assertGreater(details["response_bytes"], 0)
+
 
     def test_streaming_chat_uses_routed_provider_and_keeps_legacy_response(self):
         observed = {}

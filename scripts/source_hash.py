@@ -8,6 +8,7 @@ CONTEXTS = {
     "supervisor": ROOT / "supervisor",
     "telemetry": ROOT / "telemetry",
     "gateway": ROOT / "gateway",
+    "eval-router": ROOT / "eval_router",
     "dashboard": ROOT / "dashboard",
     "mcp": ROOT / "mcp",
     "agent-lab": ROOT / "agent_lab",
