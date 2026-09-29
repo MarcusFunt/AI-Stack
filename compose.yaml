@@ -55,6 +55,7 @@ services:
       - ALL
     environment:
       CONFIG_PATH: /config/models.json
+      SUPERVISOR_SCHEDULER_MODE: ${SUPERVISOR_SCHEDULER_MODE:-compatibility}
       SUPERVISOR_TOKEN: ${SUPERVISOR_TOKEN}
       LLAMA_API_KEY: ${LLAMA_API_KEY}
       LEASE_STATE_PATH: /state/supervisor-leases.json
