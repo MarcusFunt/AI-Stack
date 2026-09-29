@@ -90,6 +90,31 @@ class ExclusiveLeaseTests(unittest.TestCase):
             )
         )
 
+    def test_only_oldest_exclusive_waiter_can_proceed(self):
+        self.service.pending_requests["first"] = {
+            "service": "stt",
+            "profile": "benchmark",
+            "exclusive": True,
+            "queued_at": 0.0,
+        }
+        self.service.pending_requests["second"] = {
+            "service": "stt",
+            "profile": "benchmark",
+            "exclusive": True,
+            "queued_at": 1.0,
+        }
+
+        self.assertFalse(
+            self.service.has_blocking_active_jobs(
+                "stt", "benchmark", exclusive=True, pending_id="first"
+            )
+        )
+        self.assertTrue(
+            self.service.has_blocking_active_jobs(
+                "stt", "benchmark", exclusive=True, pending_id="second"
+            )
+        )
+
     def test_pending_exclusive_request_blocks_new_regular_same_service_work(self):
         self.service.pending_requests["benchmark"] = {
             "service": "stt",
