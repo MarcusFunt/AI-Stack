@@ -40,6 +40,23 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(record["speaker_count"], 3)
             self.assertTrue(Path(record["audio_path"]).is_absolute())
 
+    def test_manifest_rejects_duplicate_recording_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.wav").touch()
+            (root / "b.wav").touch()
+            manifest = root / "manifest.jsonl"
+            rows = [
+                {"id": "duplicate", "audio": "a.wav", "text": "a"},
+                {"id": "duplicate", "audio": "b.wav", "text": "b"},
+            ]
+            manifest.write_text(
+                "\n".join(json.dumps(row) for row in rows),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate recording id"):
+                load_manifest(manifest)
+
     def test_manifest_rejects_segment_without_speaker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
