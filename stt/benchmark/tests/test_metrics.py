@@ -8,6 +8,14 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(normalize_text("Hej, VERDEN!"), "hej verden")
         self.assertEqual(normalize_text("Øh, hej.", remove_fillers=True), "hej")
 
+    def test_danish_number_formatting_does_not_count_as_an_error(self):
+        stats = word_error_stats(
+            "vi har fireogtyve målinger",
+            "vi har 24 målinger",
+            canonicalize_numbers=True,
+        )
+        self.assertEqual(stats.rate, 0.0)
+
     def test_word_error_rate(self):
         stats = word_error_stats("en to tre", "en fire tre")
         self.assertEqual(stats.errors, 1)
