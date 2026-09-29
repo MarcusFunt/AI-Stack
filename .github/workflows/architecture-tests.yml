@@ -81,6 +81,8 @@ jobs:
         run: python -m unittest discover -s tests/supervisor -v
 
       - name: Evaluation router tests
+        env:
+          EVAL_ROUTER_DB: /tmp/ai-stack-eval-router-ci.sqlite3
         run: python -m unittest discover -s tests/eval_router -v
 
       - name: MCP tests
