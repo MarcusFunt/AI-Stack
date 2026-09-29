@@ -22,6 +22,18 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(stats.reference_units, 3)
         self.assertAlmostEqual(stats.rate, 1 / 3)
 
+    def test_diarization_penalizes_surplus_predicted_speaker(self):
+        reference = [{"start": 0.0, "end": 1.0, "speaker": "A"}]
+        hypothesis = [
+            {"start": 0.0, "end": 1.0, "speaker": "0"},
+            {"start": 0.0, "end": 1.0, "speaker": "3"},
+        ]
+        result = diarization_error(
+            reference, hypothesis, duration_s=1.0, collar_s=0.0
+        )
+        self.assertAlmostEqual(result["false_alarm"], 1.0, places=6)
+        self.assertAlmostEqual(result["der"], 1.0, places=6)
+
     def test_diarization_finds_permuted_speaker_mapping(self):
         reference = [
             {"start": 0.0, "end": 1.0, "speaker": "Marcus"},
