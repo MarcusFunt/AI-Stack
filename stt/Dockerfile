@@ -1,12 +1,16 @@
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ffmpeg git libsndfile1 && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /venv
 ENV PATH=/venv/bin:$PATH
 RUN pip install --no-cache-dir --upgrade pip
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-benchmark.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0 \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements-benchmark.txt
 COPY app.py .
+COPY benchmark ./benchmark
 ARG SOURCE_HASH=unknown
 LABEL io.ai-stack.source-hash=$SOURCE_HASH
 EXPOSE 8000

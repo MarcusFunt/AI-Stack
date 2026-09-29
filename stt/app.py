@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 import threading
@@ -33,6 +34,16 @@ def get_model():
 @app.get("/health")
 def health():
     return {"status": "ready", "model": MODEL_NAME, "loaded": model is not None}
+
+@app.post("/internal/benchmark/unload")
+def unload_for_benchmark():
+    global model
+    with lock:
+        previous = model
+        model = None
+    del previous
+    gc.collect()
+    return {"status": "unloaded"}
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
     file: UploadFile = File(...),
