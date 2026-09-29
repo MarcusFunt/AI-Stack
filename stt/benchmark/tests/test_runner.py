@@ -57,6 +57,25 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate recording id"):
                 load_manifest(manifest)
 
+    def test_manifest_rejects_recording_without_reference_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sample.wav").touch()
+            manifest = root / "manifest.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "audio": "sample.wav",
+                        "segments": [
+                            {"start": 0.0, "end": 1.0, "speaker": "A"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "reference text"):
+                load_manifest(manifest)
+
     def test_manifest_rejects_segment_without_speaker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
