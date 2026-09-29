@@ -23,7 +23,11 @@ Run-Step "Compose validation" {
 }
 
 Run-Step "Python syntax" {
-  python -m compileall -q agent_lab agent_eval scripts
+  python -m compileall -q agent_lab agent_eval scripts stt
+}
+
+Run-Step "STT benchmark unit tests" {
+  python -m unittest discover -s stt/benchmark/tests -v
 }
 
 Run-Step "Agent Lab unit tests" {
