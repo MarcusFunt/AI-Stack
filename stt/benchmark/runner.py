@@ -28,12 +28,16 @@ def package_versions() -> dict[str, str]:
 
 def load_manifest(path: Path) -> list[dict]:
     rows = []
+    seen_ids = set()
     root = path.parent.resolve()
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         item = json.loads(line)
         item.setdefault("id", f"recording-{number:03d}")
+        if item["id"] in seen_ids:
+            raise ValueError(f"{path}:{number}: duplicate recording id: {item['id']}")
+        seen_ids.add(item["id"])
         audio = Path(item["audio"])
         if not audio.is_absolute():
             audio = root / audio
@@ -51,6 +55,9 @@ def load_manifest(path: Path) -> list[dict]:
                 raise ValueError(f"{path}:{number}: every segment needs a speaker")
             segment.setdefault("text", "")
         item["segments"] = segments
+        item["has_speaker_transcripts"] = bool(segments) and all(
+            str(segment.get("text", "")).strip() for segment in segments
+        )
         item["audio_path"] = str(audio)
         item["speaker_count"] = int(item.get("speaker_count", 3))
         item["reference_text"] = str(
@@ -111,7 +118,7 @@ def speaker_attributed_stats(
     with tempfile.TemporaryDirectory(prefix="ai-stack-stt-turns-") as tmp:
         tmpdir = Path(tmp)
         for record in records:
-            if not record["segments"]:
+            if not record["has_speaker_transcripts"]:
                 continue
             turns = render_turns(record, diarization_by_id[record["id"]], tmpdir)
             if not turns:
@@ -147,6 +154,8 @@ def speaker_attributed_stats(
             aggregate = aggregate_error_stats(record_stats)
             per_recording[record["id"]] = aggregate.rate
 
+    if not all_stats:
+        return {"speaker_attributed_wer": None, "per_recording": per_recording}
     total = aggregate_error_stats(all_stats)
     return {"speaker_attributed_wer": total.rate, "per_recording": per_recording}
 
@@ -176,6 +185,9 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     records = load_manifest(args.manifest)
     durations = {record["id"]: audio_duration(record["audio_path"]) for record in records}
+    empty_audio = [record_id for record_id, duration in durations.items() if duration <= 0]
+    if empty_audio:
+        raise ValueError(f"recordings have no audio duration: {', '.join(empty_audio)}")
     total_audio_s = sum(durations.values())
 
     diarizer = NemotronDiarizer()
