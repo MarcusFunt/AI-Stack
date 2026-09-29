@@ -10,13 +10,63 @@ from typing import Iterable
 FILLERS = {"øh", "øhm", "uh", "uhm", "eh", "hmm", "mm"}
 
 
-def normalize_text(text: str, *, remove_fillers: bool = False) -> str:
-    text = unicodedata.normalize("NFKC", text).lower()
+def _strip_punctuation(text: str) -> str:
     chars = []
-    for ch in text:
+    for index, ch in enumerate(text):
         category = unicodedata.category(ch)
-        chars.append(" " if category.startswith(("P", "S")) else ch)
-    words = re.sub(r"\s+", " ", "".join(chars)).strip().split()
+        previous = text[index - 1] if index else ""
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if ch in {"'", "’"} and previous.isalnum() and following.isalnum():
+            chars.append("'")
+        elif category.startswith(("P", "S")):
+            chars.append(" ")
+        else:
+            chars.append(ch)
+    return re.sub(r"\s+", " ", "".join(chars)).strip()
+
+
+def _canonicalize_danish_numbers(text: str) -> str:
+    try:
+        from num2words import num2words
+        from text_to_num import alpha2digit
+    except ImportError as exc:
+        raise RuntimeError(
+            "Danish number normalization requires num2words and text2num"
+        ) from exc
+
+    protected = (
+        text.replace(" en ", " zzzenarticlezzz ")
+        .replace(" et ", " zzzetarticlezzz ")
+    )
+    protected = re.sub(r"^en\b", "zzzenarticlezzz", protected)
+    protected = re.sub(r"^et\b", "zzzetarticlezzz", protected)
+    protected = re.sub(r"\ben$", "zzzenarticlezzz", protected)
+    protected = re.sub(r"\bet$", "zzzetarticlezzz", protected)
+    converted = alpha2digit(protected, "da")
+    converted = converted.replace("zzzenarticlezzz", "en").replace(
+        "zzzetarticlezzz", "et"
+    )
+
+    def expand(match: re.Match[str]) -> str:
+        return str(num2words(int(match.group(0)), lang="da"))
+
+    return re.sub(r"(?<!\w)\d+(?!\w)", expand, converted)
+
+
+def normalize_text(
+    text: str,
+    *,
+    remove_fillers: bool = False,
+    canonicalize_numbers: bool = False,
+) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"(?<=\d)[.,](?=\d)", "", text)
+    text = text.lower()
+    text = _strip_punctuation(text)
+    if canonicalize_numbers:
+        text = _canonicalize_danish_numbers(text)
+        text = _strip_punctuation(text)
+    words = text.split()
     if remove_fillers:
         words = [word for word in words if word not in FILLERS]
     return " ".join(words)
@@ -50,15 +100,47 @@ def edit_distance(reference: list[str], hypothesis: list[str]) -> int:
     return previous[-1]
 
 
-def word_error_stats(reference: str, hypothesis: str, *, remove_fillers: bool = False) -> ErrorStats:
-    ref = normalize_text(reference, remove_fillers=remove_fillers).split()
-    hyp = normalize_text(hypothesis, remove_fillers=remove_fillers).split()
+def word_error_stats(
+    reference: str,
+    hypothesis: str,
+    *,
+    remove_fillers: bool = False,
+    canonicalize_numbers: bool = False,
+) -> ErrorStats:
+    ref = normalize_text(
+        reference,
+        remove_fillers=remove_fillers,
+        canonicalize_numbers=canonicalize_numbers,
+    ).split()
+    hyp = normalize_text(
+        hypothesis,
+        remove_fillers=remove_fillers,
+        canonicalize_numbers=canonicalize_numbers,
+    ).split()
     return ErrorStats(edit_distance(ref, hyp), len(ref))
 
 
-def char_error_stats(reference: str, hypothesis: str, *, remove_fillers: bool = False) -> ErrorStats:
-    ref = list(normalize_text(reference, remove_fillers=remove_fillers).replace(" ", ""))
-    hyp = list(normalize_text(hypothesis, remove_fillers=remove_fillers).replace(" ", ""))
+def char_error_stats(
+    reference: str,
+    hypothesis: str,
+    *,
+    remove_fillers: bool = False,
+    canonicalize_numbers: bool = False,
+) -> ErrorStats:
+    ref = list(
+        normalize_text(
+            reference,
+            remove_fillers=remove_fillers,
+            canonicalize_numbers=canonicalize_numbers,
+        ).replace(" ", "")
+    )
+    hyp = list(
+        normalize_text(
+            hypothesis,
+            remove_fillers=remove_fillers,
+            canonicalize_numbers=canonicalize_numbers,
+        ).replace(" ", "")
+    )
     return ErrorStats(edit_distance(ref, hyp), len(ref))
 
 
