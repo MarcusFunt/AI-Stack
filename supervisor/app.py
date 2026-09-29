@@ -280,21 +280,23 @@ def resource_allocations():
     return allocations
 
 
-def _pending_exclusive_request(service, *, exclude_id=None):
-    return any(
-        request_id != exclude_id
-        and request.get("service") == service
-        and bool(request.get("exclusive"))
-        for request_id, request in pending_requests.items()
-    )
+def _first_pending_exclusive_request(service):
+    for request_id, request in pending_requests.items():
+        if request.get("service") == service and bool(request.get("exclusive")):
+            return request_id
+    return None
 
 
 def has_blocking_active_jobs(service, profile, *, exclusive=False, pending_id=None):
     if active_exclusive_leases.get(service):
         return True
-    if exclusive and active_jobs.get(service, 0):
-        return True
-    if not exclusive and _pending_exclusive_request(service, exclude_id=pending_id):
+    first_exclusive = _first_pending_exclusive_request(service)
+    if exclusive:
+        if active_jobs.get(service, 0):
+            return True
+        if first_exclusive is not None and first_exclusive != pending_id:
+            return True
+    elif first_exclusive is not None:
         return True
     for active_service, count in active_jobs.items():
         if not count or active_service == service:
