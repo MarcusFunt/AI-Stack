@@ -8,7 +8,7 @@ from pathlib import Path
 
 MODEL_SPECS = {
     "edda": {"repo": "danish-foundation-models/edda-v0.1", "license": "Apache-2.0"},
-    "saga2": {"repo": "capacit-ai/saga-2-m", "license": "CC-BY-NC-4.0", "gated": True},
+    "saga2": {"repo": "capacit-ai/saga-2-m", "license": "Apache-2.0", "gated": True},
     "hviske": {"repo": "syvai/hviske-v6", "license": "CC-BY-NC-4.0"},
 }
 
