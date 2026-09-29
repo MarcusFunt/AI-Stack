@@ -4,6 +4,7 @@
 
 The gateway owns authentication, logical model routing and response proxying.
 The supervisor owns Docker lifecycle and GPU exclusivity. It is reachable only on the internal `ai-stack-net` network.
+The CPU-only voice service handles realtime session state, VAD, and audio-to-text-to-audio orchestration. It can reach the gateway over a separate private network; the gateway proxies authenticated voice sessions to clients. Voice calls every model through the gateway and has no Docker socket or direct backend access.
 
 This separation deliberately keeps `/var/run/docker.sock` out of the network-facing gateway container.
 
@@ -35,9 +36,11 @@ For a request targeting a GPU service:
 
 This avoids repeated reloads during bursts while guaranteeing that two large runtimes do not compete for 12 GB VRAM.
 
+Realtime voice retains conversation state across a session but follows the same exclusive GPU lifecycle for each STT, LLM, and TTS stage. The gateway forwards the `voice` workload profile as scheduling intent; the supervisor still enforces single-worker admission. It does not imply a pinned multi-model lease or guarantee that a model stays loaded between stages. Verify compatible GPU memory and scheduler support before enabling co-resident voice workers.
+
 ## Build isolation
 
-Gateway, supervisor, STT and VLM each build from their own narrow directory.
+Gateway, supervisor, STT and VLM each build from their own narrow directory. Voice uses a Dockerfile-specific ignore file that narrows its repository context to the service package and excludes model files, runtime data, and unrelated checkout contents.
 ComfyUI builds from its repository with a dedicated `.dockerignore`.
 WanGP only sends its Dockerfile, requirements and entrypoint into the build context.
 
@@ -56,6 +59,10 @@ Other modalities retain dedicated endpoints:
 - `/v1/vision/analyze`
 - `/v1/comfy/*`
 - `/v1/wangp/*`
+
+Realtime voice is exposed through `POST /v1/realtime/sessions` and the authenticated `/v1/realtime` WebSocket bridge. Session tickets are short-lived, one-use WebSocket subprotocols. The current audio contract is mono PCM16 at 16 kHz input and PCM16 output. Server VAD uses a 650 ms silence hangover by default. English is the only supported language. The Whisper adapter returns a completed transcription before segment deltas are emitted, so these are not streaming interim recognition results.
+
+Voice turn health events are sent to the internal evaluation router and include timings, byte counts, interruption/truncation flags, and provider identifiers. Transcript and audio contents are omitted. Evaluation forwarding is fail-open and Opik reporting is optional.
 
 ## Failure behavior
 
