@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import httpx
 import paho.mqtt.client as mqtt
+import websockets
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
@@ -42,6 +44,8 @@ TELEMETRY_URL = os.getenv("TELEMETRY_URL", "http://telemetry:8000").rstrip("/")
 RUNTIME_SETTINGS_PATH = Path(os.getenv("RUNTIME_SETTINGS_PATH", "/state/runtime-settings.json"))
 HOST_AGENT_URL = os.getenv("HOST_AGENT_URL", "http://host.docker.internal:8788").rstrip("/")
 HOST_AGENT_TOKEN = os.getenv("HOST_AGENT_TOKEN", "").strip()
+EVAL_ROUTER_URL = os.getenv("EVAL_ROUTER_URL", "http://eval-router:8000").rstrip("/")
+VOICE_URL = os.getenv("VOICE_URL", "http://voice:8000").rstrip("/")
 CONFIG = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 SERVICES = CONFIG["services"]
 MODELS = CONFIG["models"]
@@ -53,6 +57,7 @@ AUDIO_ADAPTER = OpenAIAudioAdapter()
 RESPONSES_ADAPTER = OpenAIResponsesAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
+_LOGGER = logging.getLogger(__name__)
 initialize_tracing("ai-stack-gateway")
 ACTIVE_JOBS = {}
 JOB_HISTORY = deque(maxlen=50)
@@ -139,6 +144,7 @@ async def bearer_auth(request: Request, call_next):
         "/v1/audio/transcriptions": ("gateway.audio.transcription", "transcribe", "openai_audio"),
         "/v1/audio/speech": ("gateway.audio.speech", "synthesize", "openai_audio"),
         "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
+        "/v1/realtime/sessions": ("gateway.voice.session", "session.create", "websocket_voice"),
     }
     traced_route = traced_routes.get(request.url.path)
     if traced_route:
@@ -701,6 +707,29 @@ async def acquire_service(service: str):
         raise
     return lease_id
 
+
+def request_workload_profile(request: Request) -> str:
+    """Accept a known workload hint; supervisor still applies resource admission."""
+    requested = request.headers.get("x-ai-stack-profile", "interactive").strip()
+    profiles = CONFIG.get("workload_profiles", {})
+    return requested if requested in profiles else "interactive"
+
+
+async def acquire_service_for_request(service: str, request: Request):
+    if service not in SERVICES:
+        raise HTTPException(404, f"unknown service: {service}")
+    lease_id = secrets.token_urlsafe(18)
+    profile = request_workload_profile(request)
+    try:
+        await supervisor("POST", f"/acquire/{service}?lease_id={lease_id}&profile={profile}")
+    except Exception:
+        try:
+            await supervisor("POST", f"/release/{service}?lease_id={lease_id}", timeout=10)
+        except Exception:
+            pass
+        raise
+    return lease_id
+
 async def release_service(service: str, lease_id: str):
     path = f"/release/{service}?lease_id={lease_id}"
     try:
@@ -950,7 +979,7 @@ async def forward_buffered(
     job = create_job(service, path)
     lease_id = None
     try:
-        lease_id = await acquire_service(service)
+        lease_id = await acquire_service_for_request(service, request)
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "processing"))
         async with httpx.AsyncClient(timeout=None) as client:
             try:
@@ -1027,7 +1056,7 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
                 released = True
 
     try:
-        lease_id = await acquire_service(service)
+        lease_id = await acquire_service_for_request(service, request)
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "streaming"))
         client = httpx.AsyncClient(timeout=None)
         upstream_request = client.build_request(
@@ -1121,6 +1150,13 @@ async def metrics():
             machine_metrics = machine_response.text.rstrip()
     except Exception:
         machine_metrics = ""
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            voice_response = await client.get(VOICE_URL + "/metrics")
+            voice_response.raise_for_status()
+            voice_metrics = voice_response.text.rstrip()
+    except Exception:
+        voice_metrics = ""
     status = await supervisor("GET", "/status", timeout=5)
     active_jobs = sum(int(value) for value in status.get("active_jobs", {}).values())
     owner = status.get("gpu_owner") or "idle"
@@ -1132,6 +1168,7 @@ async def metrics():
         )
     lines = [
         machine_metrics,
+        voice_metrics,
         "# TYPE localai_active_jobs gauge",
         f"localai_active_jobs {active_jobs}",
         "# TYPE localai_gpu_owner_info gauge",
@@ -1156,6 +1193,7 @@ async def capabilities():
             "transcription": "/v1/audio/transcriptions",
             "speech": "/v1/audio/speech",
             "vision": "/v1/vision/analyze",
+            "realtime": "/v1/realtime/sessions",
             "models": "/v1/models",
             "status": "/v1/system/status",
         },
@@ -1499,6 +1537,132 @@ async def events(websocket: WebSocket):
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, RuntimeError):
         return
+
+
+@app.post("/v1/realtime/sessions")
+async def create_realtime_session(request: Request):
+    raw = await read_body_limited(request, 16 * 1024, "voice session configuration")
+    try:
+        payload = json.loads(raw or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "session configuration must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "session configuration must be a JSON object")
+    if payload.get("language", "en") != "en":
+        raise HTTPException(400, "realtime voice currently supports English only")
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            upstream = await client.post(VOICE_URL + "/sessions", headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "realtime voice service is unavailable") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(upstream.status_code, "realtime voice session could not be created")
+    try:
+        result = upstream.json()
+    except ValueError as exc:
+        raise HTTPException(502, "realtime voice service returned an invalid session") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+        raise HTTPException(502, "realtime voice service returned an invalid session")
+
+    scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
+    result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"
+    return result
+
+
+@app.post("/internal/voice-evaluations")
+async def report_voice_evaluation(request: Request):
+    raw = await read_body_limited(request, 16 * 1024, "voice evaluation event")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "voice evaluation event must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "voice evaluation event must be a JSON object")
+
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            upstream = await client.post(EVAL_ROUTER_URL + "/v1/voice-evaluations", headers=headers, json=payload)
+        if upstream.status_code >= 400:
+            _LOGGER.warning("voice evaluation router rejected an event", extra={"http_status": upstream.status_code})
+            return JSONResponse({"status": "dropped"}, status_code=202)
+        return JSONResponse({"status": "queued"}, status_code=202)
+    except Exception as exc:
+        _LOGGER.warning("voice evaluation forwarding failed", extra={"error_type": type(exc).__name__})
+        return JSONResponse({"status": "unavailable"}, status_code=202)
+
+
+@app.websocket("/v1/realtime")
+async def realtime_proxy(websocket: WebSocket):
+    session_id = websocket.query_params.get("session_id", "")
+    subprotocols = websocket.scope.get("subprotocols", [])
+    if not session_id or len(session_id) > 64 or "ai-stack.voice.v1" not in subprotocols:
+        await websocket.close(code=4401)
+        return
+    ticket = next((value for value in subprotocols if value.startswith("ai-stack.ticket.")), "")
+    if not ticket or len(ticket) > 144:
+        await websocket.close(code=4401)
+        return
+
+    upstream_url = VOICE_URL.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+    upstream_url += f"/ws/{session_id}"
+    try:
+        async with websockets.connect(
+            upstream_url,
+            subprotocols=subprotocols,
+            max_size=8 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=20,
+            proxy=None,
+        ) as upstream:
+            await websocket.accept(subprotocol="ai-stack.voice.v1")
+
+            async def client_to_voice():
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    value = message.get("text") if message.get("text") is not None else message.get("bytes")
+                    if value is not None:
+                        await upstream.send(value)
+
+            async def voice_to_client():
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = {
+                asyncio.create_task(client_to_voice()),
+                asyncio.create_task(voice_to_client()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                try:
+                    task.result()
+                except (WebSocketDisconnect, websockets.ConnectionClosed, RuntimeError):
+                    pass
+            try:
+                await websocket.close(code=1000)
+            except RuntimeError:
+                pass
+    except (OSError, websockets.WebSocketException):
+        try:
+            await websocket.close(code=1013, reason="realtime voice service unavailable")
+        except RuntimeError:
+            pass
 
 
 @app.post("/control/start/{service}")

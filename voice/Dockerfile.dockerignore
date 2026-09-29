@@ -1,0 +1,6 @@
+**
+!voice/
+!voice/**
+voice/__pycache__/
+voice/**/__pycache__/
+voice/**/*.py[cod]
