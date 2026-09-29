@@ -76,17 +76,26 @@ class EddaAdapter(ASRAdapter):
         self.beam_size = beam_size
 
     def transcribe(self, paths: list[str], batch_size: int) -> list[str]:
-        result = self.pipe(
-            paths,
-            batch_size=max(1, batch_size),
-            chunk_length_s=28,
-            stride_length_s=3,
-            return_timestamps=False,
-            generate_kwargs={"language": "da", "task": "transcribe", "num_beams": self.beam_size},
-        )
-        if isinstance(result, dict):
-            result = [result]
-        return [str(item["text"]).strip() for item in result]
+        import librosa
+
+        outputs = []
+        generate_kwargs = {
+            "language": "da",
+            "task": "transcribe",
+            "num_beams": self.beam_size,
+        }
+        for path in paths:
+            duration_s = float(librosa.get_duration(path=path))
+            kwargs = {
+                "batch_size": max(1, batch_size),
+                "return_timestamps": duration_s > 29.0,
+                "generate_kwargs": generate_kwargs,
+            }
+            if duration_s > 29.0:
+                kwargs.update({"chunk_length_s": 28, "stride_length_s": 3})
+            result = self.pipe(path, **kwargs)
+            outputs.append(str(result["text"]).strip())
+        return outputs
 
 
 def _snapshot(repo_id: str) -> Path:
