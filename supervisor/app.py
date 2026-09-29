@@ -100,6 +100,7 @@ def sync_active_jobs(service=None):
         active_jobs.pop(service, None)
         active_leases.pop(service, None)
         active_lease_profiles.pop(service, None)
+        active_exclusive_leases.pop(service, None)
 
 
 def load_lease_profiles():
@@ -127,10 +128,33 @@ def load_lease_profiles():
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
         return {}
 
+def load_exclusive_leases():
+    try:
+        payload = json.loads(LEASE_STATE_PATH.read_text(encoding="utf-8"))
+        raw = payload.get("exclusive_leases", {}) if isinstance(payload, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        result = {}
+        for service, lease_ids in raw.items():
+            if service not in SERVICES or not isinstance(lease_ids, list):
+                continue
+            active_ids = active_leases.get(service, set())
+            accepted = {
+                str(lease_id)
+                for lease_id in lease_ids
+                if str(lease_id) in active_ids
+            }
+            if accepted:
+                result[service] = accepted
+        return result
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return {}
+
+
 def persist_active_jobs():
     LEASE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 3,
+        "version": 4,
         "leases": {
             name: sorted(lease_ids)
             for name, lease_ids in active_leases.items()
@@ -149,6 +173,15 @@ def persist_active_jobs():
             for name, lease_ids in active_leases.items()
             if lease_ids
         },
+        "exclusive_leases": {
+            name: sorted(
+                lease_id
+                for lease_id in active_exclusive_leases.get(name, set())
+                if lease_id in lease_ids
+            )
+            for name, lease_ids in active_leases.items()
+            if active_exclusive_leases.get(name)
+        },
     }
     tmp = LEASE_STATE_PATH.with_name(LEASE_STATE_PATH.name + ".tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -157,6 +190,7 @@ def persist_active_jobs():
 active_leases = defaultdict(set, load_lease_state())
 active_jobs = defaultdict(int)
 active_lease_profiles = defaultdict(dict, load_lease_profiles())
+active_exclusive_leases = defaultdict(set, load_exclusive_leases())
 sync_active_jobs()
 lease_epoch = 0
 idle_tasks = {}
@@ -246,7 +280,22 @@ def resource_allocations():
     return allocations
 
 
-def has_blocking_active_jobs(service, profile):
+def _pending_exclusive_request(service, *, exclude_id=None):
+    return any(
+        request_id != exclude_id
+        and request.get("service") == service
+        and bool(request.get("exclusive"))
+        for request_id, request in pending_requests.items()
+    )
+
+
+def has_blocking_active_jobs(service, profile, *, exclusive=False, pending_id=None):
+    if active_exclusive_leases.get(service):
+        return True
+    if exclusive and active_jobs.get(service, 0):
+        return True
+    if not exclusive and _pending_exclusive_request(service, exclude_id=pending_id):
+        return True
     for active_service, count in active_jobs.items():
         if not count or active_service == service:
             continue
@@ -513,39 +562,64 @@ async def prepare_service(service: str, profile: str = "interactive"):
     finally:
         pending_requests.pop(pending_id, None)
 
-async def acquire_service(service: str, lease_id: str, profile: str = "interactive"):
+async def acquire_service(
+    service: str,
+    lease_id: str,
+    profile: str = "interactive",
+    *,
+    exclusive: bool = False,
+):
     if service not in SERVICES:
         raise HTTPException(404, f"unknown service: {service}")
     check_profile(profile)
     started_epoch = lease_epoch
-    if service not in GPU_SERVICES:
-        async with lease_condition:
-            if started_epoch != lease_epoch:
-                raise HTTPException(409, "lease reset during acquire")
-            active_leases[service].add(lease_id)
-            active_lease_profiles[service][lease_id] = profile
-            sync_active_jobs(service)
-            persist_active_jobs()
-            lease_condition.notify_all()
-            return active_jobs[service]
-
-    cancel_idle_stop(service)
     pending_id = secrets.token_urlsafe(12)
+    pending_requests[pending_id] = {
+        "service": service,
+        "profile": profile,
+        "exclusive": exclusive,
+        "queued_at": time.time(),
+    }
     try:
+        if service not in GPU_SERVICES:
+            async with lease_condition:
+                while has_blocking_active_jobs(
+                    service,
+                    profile,
+                    exclusive=exclusive,
+                    pending_id=pending_id,
+                ):
+                    await lease_condition.wait()
+                if started_epoch != lease_epoch:
+                    raise HTTPException(409, "lease reset during acquire")
+                active_leases[service].add(lease_id)
+                active_lease_profiles[service][lease_id] = profile
+                if exclusive:
+                    active_exclusive_leases[service].add(lease_id)
+                sync_active_jobs(service)
+                persist_active_jobs()
+                lease_condition.notify_all()
+                return active_jobs[service]
+
+        cancel_idle_stop(service)
         while True:
             async with lease_condition:
-                while has_blocking_active_jobs(service, profile):
-                    pending_requests[pending_id] = {
-                        "service": service,
-                        "profile": profile,
-                        "queued_at": time.time(),
-                    }
+                while has_blocking_active_jobs(
+                    service,
+                    profile,
+                    exclusive=exclusive,
+                    pending_id=pending_id,
+                ):
                     await lease_condition.wait()
-                pending_requests.pop(pending_id, None)
 
             async with transition_lock:
                 async with lease_condition:
-                    other_jobs = has_blocking_active_jobs(service, profile)
+                    other_jobs = has_blocking_active_jobs(
+                        service,
+                        profile,
+                        exclusive=exclusive,
+                        pending_id=pending_id,
+                    )
                 if other_jobs:
                     continue
 
@@ -560,6 +634,8 @@ async def acquire_service(service: str, lease_id: str, profile: str = "interacti
                         raise HTTPException(409, "lease reset during acquire")
                     active_leases[service].add(lease_id)
                     active_lease_profiles[service][lease_id] = profile
+                    if exclusive:
+                        active_exclusive_leases[service].add(lease_id)
                     sync_active_jobs(service)
                     persist_active_jobs()
                     lease_condition.notify_all()
@@ -573,6 +649,7 @@ async def release_service(service: str, lease_id: str):
     async with lease_condition:
         active_leases[service].discard(lease_id)
         active_lease_profiles.get(service, {}).pop(lease_id, None)
+        active_exclusive_leases.get(service, set()).discard(lease_id)
         sync_active_jobs(service)
         remaining = active_jobs.get(service, 0)
         persist_active_jobs()
@@ -692,9 +769,16 @@ def status():
         "services": states,
         "service_states": semantic,
         "service_metrics": service_metrics,
-        "resource_state": RESOURCE_SCHEDULER.state(
-            resource_allocations(), running, pending_requests=list(pending_requests.values())
-        ),
+        "resource_state": {
+            **RESOURCE_SCHEDULER.state(
+                resource_allocations(), running, pending_requests=list(pending_requests.values())
+            ),
+            "exclusive_leases": {
+                name: sorted(lease_ids)
+                for name, lease_ids in active_exclusive_leases.items()
+                if lease_ids
+            },
+        },
     }
 
 @app.post("/acquire/{service}")
@@ -702,13 +786,15 @@ async def acquire(
     service: str,
     lease_id: str = Query(..., min_length=8, max_length=128),
     profile: str = Query(default="interactive", min_length=1, max_length=32),
+    exclusive: bool = Query(default=False),
 ):
-    count = await acquire_service(service, lease_id, profile)
+    count = await acquire_service(service, lease_id, profile, exclusive=exclusive)
     return {
         "service": service,
         "status": "ready",
         "lease_id": lease_id,
         "profile": profile,
+        "exclusive": exclusive,
         "active_jobs": count,
     }
 
@@ -734,6 +820,7 @@ async def reset_leases():
         active_leases.clear()
         active_jobs.clear()
         active_lease_profiles.clear()
+        active_exclusive_leases.clear()
         persist_active_jobs()
         lease_condition.notify_all()
     for service in await asyncio.to_thread(current_gpu_services):
