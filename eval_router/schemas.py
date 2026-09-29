@@ -43,6 +43,54 @@ class InvocationEvaluationEvent(BaseModel):
         return normalized
 
 
+class VoiceTurnEvaluationEvent(BaseModel):
+    """Privacy-safe completion metadata for the realtime voice path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(default_factory=lambda: str(uuid4()))
+    session_id: str
+    turn_id: str
+    trace_id: str
+    event_type: Literal[
+        "voice.turn.completed",
+        "voice.turn.interrupted",
+        "voice.turn.failed",
+        "voice.turn.empty",
+    ]
+    duration_ms: float = Field(ge=0, allow_inf_nan=False)
+    time_to_first_transcript_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    time_to_first_token_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    time_to_first_audio_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    audio_input_bytes: int = Field(ge=0)
+    audio_output_bytes: int = Field(ge=0)
+    interrupted: bool = False
+    truncation_recorded: bool = False
+    audio_integrity_ok: bool = True
+    stt_provider: str = Field(min_length=1, max_length=80)
+    llm_provider: str = Field(min_length=1, max_length=80)
+    tts_provider: str = Field(min_length=1, max_length=80)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("event_id", "session_id", "turn_id")
+    @classmethod
+    def valid_uuid(cls, value: str) -> str:
+        try:
+            return str(UUID(value))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("event, session, and turn ids must be UUIDs") from exc
+
+    @field_validator("trace_id")
+    @classmethod
+    def valid_trace_id(cls, value: str) -> str:
+        if len(value) != 32 or any(character not in "0123456789abcdefABCDEF" for character in value):
+            raise ValueError("trace_id must be a 32-character hexadecimal identifier")
+        normalized = value.lower()
+        if normalized == "0" * 32:
+            raise ValueError("trace_id must not be all zeroes")
+        return normalized
+
+
 class EvaluationScreenResult(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     invocation_id: str

@@ -16,9 +16,11 @@ from .schemas import (
     EscalationClaimRequest,
     InvocationEvaluationEvent,
     ScreeningSubmission,
+    VoiceTurnEvaluationEvent,
 )
 from .screening import evaluate_invocation
 from .store import EvaluationStore
+from .voice_eval import evaluate_voice_turn
 
 
 def create_app(
@@ -68,6 +70,13 @@ def create_app(
     @app.post("/v1/screenings", response_model=ScreeningSubmission, status_code=201)
     async def screen(event: InvocationEvaluationEvent) -> ScreeningSubmission:
         result, reasons = evaluate_invocation(event, latency_threshold_ms=threshold)
+        result, escalation = active_store.save_screening(event.event_id, result, reasons)
+        await active_opik.submit(result)
+        return ScreeningSubmission(screening=result, escalation=escalation)
+
+    @app.post("/v1/voice-evaluations", response_model=ScreeningSubmission, status_code=201)
+    async def screen_voice_turn(event: VoiceTurnEvaluationEvent) -> ScreeningSubmission:
+        result, reasons = evaluate_voice_turn(event, latency_threshold_ms=threshold)
         result, escalation = active_store.save_screening(event.event_id, result, reasons)
         await active_opik.submit(result)
         return ScreeningSubmission(screening=result, escalation=escalation)

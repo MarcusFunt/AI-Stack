@@ -48,7 +48,11 @@ class OpikAdapter:
     def _submit_sync(self, result: EvaluationScreenResult) -> None:
         client = self._client()
         client.trace(
-            name="ai-stack.invocation.screen",
+            name=(
+                "ai-stack.voice.screen"
+                if result.evaluator == "voice-deterministic"
+                else "ai-stack.invocation.screen"
+            ),
             project_name=self.project_name,
             metadata={
                 "ai_stack.screening_id": result.id,
