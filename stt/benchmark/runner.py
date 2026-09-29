@@ -104,6 +104,10 @@ def speaker_attributed_stats(
             if not turns:
                 continue
             texts = adapter.transcribe([turn["path"] for turn in turns], batch_size)
+            if len(texts) != len(turns):
+                raise RuntimeError(
+                    f"adapter returned {len(texts)} transcripts for {len(turns)} diarized turns"
+                )
             predicted_by_speaker: dict[str, list[str]] = defaultdict(list)
             mapping = mappings.get(record["id"], {})
             for turn, text in zip(turns, texts):
@@ -199,6 +203,10 @@ def main() -> int:
             hypotheses = adapter.transcribe(
                 [record["audio_path"] for record in records], args.batch_size
             )
+            if len(hypotheses) != len(records):
+                raise RuntimeError(
+                    f"{alias} returned {len(hypotheses)} transcripts for {len(records)} recordings"
+                )
             elapsed = time.perf_counter() - started
             content_stats = []
             verbatim_stats = []
