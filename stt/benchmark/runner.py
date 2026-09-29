@@ -6,11 +6,24 @@ import json
 import tempfile
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .diarization import NemotronDiarizer
 from .metrics import aggregate_error_stats, char_error_stats, diarization_error, word_error_stats
 from .models import MODEL_SPECS, load_adapter
+
+
+def package_versions() -> dict[str, str]:
+    names = ["torch", "transformers", "librosa", "num2words", "text2num"]
+    versions = {}
+    for name in names:
+        try:
+            versions[name] = version(name)
+        except PackageNotFoundError:
+            versions[name] = "not-installed"
+    return versions
 
 
 def load_manifest(path: Path) -> list[dict]:
@@ -188,11 +201,31 @@ def main() -> int:
         diarizer.unload()
 
     results = {
+        "schema_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "manifest": str(args.manifest),
         "total_audio_s": total_audio_s,
+        "config": {
+            "models": list(args.models),
+            "batch_size": args.batch_size,
+            "beam_size": args.beam_size,
+            "collar_s": args.collar,
+            "speaker_attributed": not args.no_speaker_attributed,
+            "normalization": "danish-content-v1",
+        },
+        "runtime_versions": package_versions(),
+        "recordings": [
+            {
+                "id": record["id"],
+                "duration_s": durations[record["id"]],
+                "speaker_count": record["speaker_count"],
+            }
+            for record in records
+        ],
         "diarization": {
             "model": NemotronDiarizer.model_id,
             "per_recording": der_by_id,
+            "predicted_segments": diarization_by_id,
         },
         "models": {},
     }
@@ -272,8 +305,18 @@ def main() -> int:
             adapter.unload()
 
     der_values = [item["der"] for item in der_by_id.values()]
-    results["diarization"]["mean_der"] = (
+    results["diarization"]["macro_der"] = (
         sum(der_values) / len(der_values) if der_values else None
+    )
+    der_reference_time = sum(
+        item["reference_speaker_time"] for item in der_by_id.values()
+    )
+    der_error_time = sum(
+        item["miss"] + item["false_alarm"] + item["confusion"]
+        for item in der_by_id.values()
+    )
+    results["diarization"]["global_der"] = (
+        der_error_time / der_reference_time if der_reference_time else None
     )
     ranking = sorted(
         results["models"],
@@ -319,7 +362,7 @@ def main() -> int:
         "",
         f"Audio: {total_audio_s / 60:.1f} min across {len(records)} recording(s)",
         (
-            f"Nemotron mean DER: {results['diarization']['mean_der']:.3%}"
+            f"Nemotron global DER: {results['diarization']['global_der']:.3%}"
             if der_values
             else "Nemotron DER: no reference segments supplied"
         ),
