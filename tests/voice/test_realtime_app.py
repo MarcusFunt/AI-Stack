@@ -19,8 +19,10 @@ class FakeProviders:
         self.chat_histories = []
         self.closed = False
         self.evaluation_events = []
+        self.traceparents = []
 
-    async def transcribe(self, wav_audio: bytes) -> dict:
+    async def transcribe(self, wav_audio: bytes, *, traceparent: str | None = None) -> dict:
+        self.traceparents.append(("stt", traceparent))
         self.transcription_count += 1
         with wave.open(BytesIO(wav_audio), "rb") as audio:
             assert audio.getframerate() == 16_000
@@ -29,7 +31,8 @@ class FakeProviders:
         text = f"Question {self.transcription_count}."
         return {"text": text, "segments": [{"text": text}]}
 
-    async def chat_deltas(self, history):
+    async def chat_deltas(self, history, *, traceparent: str | None = None):
+        self.traceparents.append(("llm", traceparent))
         self.chat_histories.append([dict(message) for message in history])
         if len(self.chat_histories) == 1:
             yield "First sentence. "
@@ -38,7 +41,8 @@ class FakeProviders:
         else:
             yield "Next answer."
 
-    async def synthesize(self, text: str):
+    async def synthesize(self, text: str, *, traceparent: str | None = None):
+        self.traceparents.append(("tts", traceparent))
         return b"\x00\x00" * 2_400, 24_000, 1
 
     async def close(self):
@@ -176,6 +180,30 @@ class RealtimeVoiceAppTests(unittest.TestCase):
         self.assertTrue(provider.evaluation_events[0]["truncation_recorded"])
         self.assertNotIn("transcript", provider.evaluation_events[0])
         self.assertNotIn("audio", provider.evaluation_events[0])
+
+    def test_voice_stage_spans_preserve_and_forward_the_inbound_trace_id(self):
+        parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        session = self.client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer voice-test-key", "traceparent": parent},
+            json={"language": "en"},
+        ).json()
+        with self.client.websocket_connect(
+            f"/ws/{session['id']}",
+            subprotocols=["ai-stack.voice.v1", f"ai-stack.ticket.{session['client_secret']['value']}"],
+        ) as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            self._send_turn(websocket)
+            for _ in range(20):
+                if websocket.receive_json()["type"] == "response.done":
+                    break
+
+        traceparents = dict(self.providers[0].traceparents)
+        self.assertTrue({"stt", "llm", "tts"} <= traceparents.keys())
+        for traceparent in traceparents.values():
+            self.assertTrue(traceparent.startswith("00-4bf92f3577b34da6a3ce929d0e0e4736-"))
+            self.assertNotEqual(traceparent.split("-")[2], "00f067aa0ba902b7")
 
 
 if __name__ == "__main__":

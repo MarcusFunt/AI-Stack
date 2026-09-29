@@ -26,7 +26,14 @@ from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
 from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
 from observability.propagation import extract_trace_context, inject_trace_context
-from observability.tracing import current_trace_context, initialize_tracing, start_span
+from observability.openinference import invocation_attributes
+from observability.tracing import (
+    current_trace_context,
+    end_span_handle,
+    initialize_tracing,
+    start_span,
+    start_span_handle,
+)
 
 API_KEY = os.getenv("AI_API_KEY", "").strip()
 if not API_KEY:
@@ -914,6 +921,24 @@ def upstream_headers(request: Request, service: str):
         headers["Authorization"] = f"Bearer {LLAMA_API_KEY}"
     return headers
 
+
+def provider_span_attributes(request: Request, service: str, path: str) -> dict:
+    invocation = getattr(request.state, "invocation", None)
+    route = getattr(request.state, "model_route", None)
+    attributes = invocation_attributes(
+        invocation,
+        provider=route.provider_id if route is not None else service,
+        service=service,
+    ) if invocation is not None else {
+        "openinference.span.kind": "LLM",
+        "ai_stack.service": service,
+    }
+    if route is not None:
+        attributes["gen_ai.request.model"] = route.model_id
+    attributes["http.request.method"] = request.method
+    attributes["http.route"] = path
+    return attributes
+
 def response_headers(response: httpx.Response, buffered: bool = False):
     blocked = HOP_BY_HOP_HEADERS | {"content-length"}
     if buffered:
@@ -983,13 +1008,20 @@ async def forward_buffered(
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "processing"))
         async with httpx.AsyncClient(timeout=None) as client:
             try:
-                upstream = await client.request(
-                    request.method,
-                    SERVICES[service]["base"] + path,
-                    params=request.query_params,
-                    content=payload,
-                    headers=upstream_headers(request, service),
-                )
+                with start_span(
+                    f"gateway.provider.{service}",
+                    parent=getattr(request.state, "trace_context", None),
+                    attributes=provider_span_attributes(request, service, path),
+                ) as span:
+                    upstream = await client.request(
+                        request.method,
+                        SERVICES[service]["base"] + path,
+                        params=request.query_params,
+                        content=payload,
+                        headers=upstream_headers(request, service),
+                    )
+                    span.set_attribute("http.response.status_code", upstream.status_code)
+                    span.set_attribute("http.response.body.size", len(upstream.content))
             except httpx.RequestError as exc:
                 raise HTTPException(502, f"{service} upstream request failed") from exc
 
@@ -1033,6 +1065,9 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
     lease_id = None
     client = None
     upstream = None
+    provider_span = None
+    provider_trace = None
+    provider_span_started = None
     cleanup_lock = asyncio.Lock()
     released = False
     final_state = "complete"
@@ -1051,6 +1086,13 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
                     await client.aclose()
                 if lease_id is not None:
                     await release_service(service, lease_id)
+                if provider_span is not None:
+                    provider_span.set_attribute("ai_stack.stream.status", final_state)
+                    if upstream is not None:
+                        provider_span.set_attribute("http.response.status_code", upstream.status_code)
+                    if final_error is not None:
+                        provider_span.set_attribute("ai_stack.stream.error_type", type(final_error).__name__)
+                    end_span_handle(provider_span, final_error)
                 if job["id"] in ACTIVE_JOBS:
                     finish_job(job, state=final_state, error=final_error)
                 released = True
@@ -1058,13 +1100,23 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
     try:
         lease_id = await acquire_service_for_request(service, request)
         update_job(job, state="running", phase=PHASE_FOR_SERVICE.get(service, "streaming"))
+        parent_trace = getattr(request.state, "trace_context", None)
+        provider_span = start_span_handle(
+            f"gateway.provider.{service}.stream",
+            parent=parent_trace,
+            attributes=provider_span_attributes(request, service, path),
+        )
+        provider_trace = current_trace_context(parent_trace, provider_span)
+        provider_span_started = time.perf_counter()
         client = httpx.AsyncClient(timeout=None)
+        headers = upstream_headers(request, service)
+        inject_trace_context(headers, provider_trace)
         upstream_request = client.build_request(
             request.method,
             SERVICES[service]["base"] + path,
             params=request.query_params,
             content=body,
-            headers=upstream_headers(request, service),
+            headers=headers,
         )
         upstream = await client.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
@@ -1082,6 +1134,7 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
         nonlocal final_state, final_error
         chunks = 0
         byte_count = 0
+        first_chunk_at = None
         try:
             try:
                 async for chunk in upstream.aiter_raw():
@@ -1090,6 +1143,14 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
                         break
                     chunks += max(1, chunk.count(b"data:"))
                     byte_count += len(chunk)
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
+                        if provider_span_started is not None:
+                            provider_span.set_attribute(
+                                "gen_ai.server.time_to_first_token_ms",
+                                (first_chunk_at - provider_span_started) * 1000,
+                            )
+                    provider_span.set_attribute("http.response.body.size", byte_count)
                     update_job(
                         job,
                         progress_units=chunks,
@@ -1099,7 +1160,7 @@ async def forward_streaming(service: str, path: str, request: Request, body: byt
             except httpx.RequestError as exc:
                 final_state = "failed"
                 final_error = exc
-                return
+                raise
         finally:
             try:
                 await cleanup()

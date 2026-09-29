@@ -111,9 +111,10 @@ services:
 
   gateway:
     build:
-      context: ./gateway
+      context: .
       args:
         SOURCE_HASH: ${AI_STACK_GATEWAY_SOURCE_HASH:-unknown}
+      dockerfile: gateway/Dockerfile
     container_name: ai-stack-gateway
     restart: unless-stopped
     init: true
@@ -136,6 +137,7 @@ services:
       HOST_AGENT_TOKEN: ${HOST_AGENT_TOKEN}
       EVAL_ROUTER_URL: http://eval-router:8000
       VOICE_URL: http://voice:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       supervisor:
@@ -173,6 +175,7 @@ services:
     environment:
       AI_API_KEY: ${AI_API_KEY}
       GATEWAY_URL: http://gateway:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       VOICE_MAX_SESSIONS: ${VOICE_MAX_SESSIONS:-8}
       VOICE_SESSION_TOKEN_TTL_SECONDS: ${VOICE_SESSION_TOKEN_TTL_SECONDS:-60}
       VOICE_SESSION_MAX_SECONDS: ${VOICE_SESSION_MAX_SECONDS:-3600}

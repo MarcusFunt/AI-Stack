@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -53,6 +53,7 @@ class EvaluationStore:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_escalations_queue ON escalations(status, created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_screenings_invocation ON screenings(invocation_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_escalations_claims ON escalations(status, updated_at)")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -181,10 +182,21 @@ class EvaluationStore:
             ).fetchall()
         return [self._escalation(row) for row in rows]
 
-    def claim_next_escalation(self, worker_id: str) -> EscalationRecord | None:
-        now = datetime.now(timezone.utc).isoformat()
+    def claim_next_escalation(
+        self, worker_id: str, *, claim_ttl_seconds: float = 120.0
+    ) -> EscalationRecord | None:
+        if not 1 <= claim_ttl_seconds <= 86_400:
+            raise ValueError("claim_ttl_seconds must be between 1 and 86400")
+        current = datetime.now(timezone.utc)
+        now = current.isoformat()
+        expired_before = (current - timedelta(seconds=claim_ttl_seconds)).isoformat()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """UPDATE escalations SET status='queued',claimed_by=NULL,updated_at=?
+                   WHERE status='claimed' AND updated_at < ?""",
+                (now, expired_before),
+            )
             row = connection.execute(
                 "SELECT * FROM escalations WHERE status='queued' ORDER BY created_at LIMIT 1"
             ).fetchone()
@@ -196,6 +208,19 @@ class EvaluationStore:
             )
             claimed = connection.execute("SELECT * FROM escalations WHERE id=?", (row["id"],)).fetchone()
         return self._escalation(claimed)
+
+    def release_escalation(self, escalation_id: str, worker_id: str) -> EscalationRecord:
+        """Return work to the queue when a worker is cancelled before completion."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE escalations SET status='queued',claimed_by=NULL,updated_at=?
+                   WHERE id=? AND status='claimed' AND claimed_by=?""",
+                (now, escalation_id, worker_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("escalation is not claimed by this worker")
+        return self.get_escalation(escalation_id)
 
     def complete_escalation(
         self,

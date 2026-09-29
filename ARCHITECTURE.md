@@ -6,6 +6,10 @@ The gateway owns authentication, logical model routing and response proxying.
 The supervisor owns Docker lifecycle and GPU exclusivity. It is reachable only on the internal `ai-stack-net` network.
 The CPU-only voice service handles realtime session state, VAD, and audio-to-text-to-audio orchestration. It can reach the gateway over a separate private network; the gateway proxies authenticated voice sessions to clients. Voice calls every model through the gateway and has no Docker socket or direct backend access.
 
+The gateway translates public chat, Responses, audio, vision, and realtime-session requests into canonical invocations. Provider spans carry low-cardinality invocation, model, provider, and service attributes; streaming provider spans stay open through stream cleanup and record first-token timing. The voice service creates a turn span and STT, LLM, and TTS child spans, forwarding each child trace context back through the gateway. Set `OTEL_EXPORTER_OTLP_ENDPOINT` on the gateway and voice service to export spans to an OTLP/HTTP collector.
+
+Inbound MCP model tools extract W3C trace context from the MCP request and forward it to the gateway. Outbound MCP tools are discovered from host-supplied `MCP_SERVERS_JSON`, filtered by exact allowlists, and called only through the permission-checked Tool Broker. `MCP_SERVER_TOKENS_JSON` maps environment-variable names to host-supplied credentials.
+
 This separation deliberately keeps `/var/run/docker.sock` out of the network-facing gateway container.
 
 ## Agent Lab trust boundary
@@ -40,7 +44,7 @@ Realtime voice retains conversation state across a session but follows the same 
 
 ## Build isolation
 
-Gateway, supervisor, STT and VLM each build from their own narrow directory. Voice uses a Dockerfile-specific ignore file that narrows its repository context to the service package and excludes model files, runtime data, and unrelated checkout contents.
+Supervisor, STT and VLM build from their own narrow directories. Gateway, voice and MCP use repository-root contexts so their images can include shared `core` and `observability` packages; Dockerfile-specific ignore files allow only the required service and shared-package trees. Model files, runtime data, and environment files remain outside every build context.
 ComfyUI builds from its repository with a dedicated `.dockerignore`.
 WanGP only sends its Dockerfile, requirements and entrypoint into the build context.
 
@@ -53,6 +57,7 @@ Chat model IDs are logical aliases:
 - `local-reasoning`
 
 The gateway supports buffered OpenAI-compatible chat responses and streaming pass-through.
+`/v1/responses` supports stateless text input, instructions, function tool declarations, and buffered or streaming output. It rejects stateful conversation IDs, non-text inputs, and unsupported reasoning controls. If a stream ends without a completion marker, the gateway emits `response.failed` and does not report partial output as successful.
 Other modalities retain dedicated endpoints:
 - `/v1/audio/transcriptions`
 - `/v1/audio/speech`
@@ -63,6 +68,8 @@ Other modalities retain dedicated endpoints:
 Realtime voice is exposed through `POST /v1/realtime/sessions` and the authenticated `/v1/realtime` WebSocket bridge. Session tickets are short-lived, one-use WebSocket subprotocols. The current audio contract is mono PCM16 at 16 kHz input and PCM16 output. Server VAD uses a 650 ms silence hangover by default. English is the only supported language. The Whisper adapter returns a completed transcription before segment deltas are emitted, so these are not streaming interim recognition results.
 
 Voice turn health events are sent to the internal evaluation router and include timings, byte counts, interruption/truncation flags, and provider identifiers. Transcript and audio contents are omitted. Evaluation forwarding is fail-open and Opik reporting is optional.
+
+Invocation and voice-turn screens are persisted with optional Opik reporting. Suspicious events can be claimed from the durable escalation queue; evaluator callbacks have a 30-second default deadline and claims recover after 120 seconds without an update. The resource scheduler defaults to exclusive `compatibility` mode. Its opt-in `resource` mode admits a worker only when measured worker memory, configured GPU capacity, reserved headroom, and workload compatibility all support the request; unset measurements fail closed.
 
 ## Failure behavior
 

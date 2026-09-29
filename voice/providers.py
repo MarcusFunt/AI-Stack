@@ -29,10 +29,16 @@ class GatewayVoiceProviders:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def transcribe(self, wav_audio: bytes) -> dict:
+    def _headers_for(self, traceparent: str | None) -> dict[str, str]:
+        headers = dict(self.headers)
+        if traceparent:
+            headers["traceparent"] = traceparent
+        return headers
+
+    async def transcribe(self, wav_audio: bytes, *, traceparent: str | None = None) -> dict:
         response = await self.client.post(
             self.gateway_url + "/v1/audio/transcriptions",
-            headers=self.headers,
+            headers=self._headers_for(traceparent),
             files={"file": ("voice-turn.wav", wav_audio, "audio/wav")},
             data={"model": "local-stt", "language": "en", "response_format": "json"},
         )
@@ -42,7 +48,9 @@ class GatewayVoiceProviders:
             raise ValueError("gateway returned an invalid transcription response")
         return payload
 
-    async def chat_deltas(self, history: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def chat_deltas(
+        self, history: list[dict[str, str]], *, traceparent: str | None = None
+    ) -> AsyncIterator[str]:
         payload = {
             "model": "local-fast",
             "messages": history,
@@ -54,7 +62,7 @@ class GatewayVoiceProviders:
         async with self.client.stream(
             "POST",
             self.gateway_url + "/v1/chat/completions",
-            headers=self.headers,
+            headers=self._headers_for(traceparent),
             json=payload,
         ) as response:
             response.raise_for_status()
@@ -75,10 +83,12 @@ class GatewayVoiceProviders:
                 if isinstance(delta, str) and delta:
                     yield delta
 
-    async def synthesize(self, text: str) -> tuple[bytes, int, int]:
+    async def synthesize(
+        self, text: str, *, traceparent: str | None = None
+    ) -> tuple[bytes, int, int]:
         response = await self.client.post(
             self.gateway_url + "/v1/audio/speech",
-            headers=self.headers,
+            headers=self._headers_for(traceparent),
             json={"model": "local-tts", "input": text, "response_format": "wav"},
         )
         response.raise_for_status()

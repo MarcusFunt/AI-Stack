@@ -14,7 +14,7 @@ from core.invocation import Principal
 from core.tool_broker import ToolBroker, ToolCall, ToolNotFoundError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from observability.propagation import extract_trace_context
+from observability.propagation import extract_trace_context, inject_trace_context
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -68,8 +68,10 @@ mcp = FastMCP(
 )
 
 
-async def gateway_request(method: str, path: str, *, json_body=None):
+async def gateway_request(method: str, path: str, *, json_body=None, trace_context: TraceContext | None = None):
     headers = {"Authorization": f"Bearer {AI_API_KEY}"}
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
     async with httpx.AsyncClient(timeout=None) as client:
         response = await client.request(
             method,
@@ -82,18 +84,18 @@ async def gateway_request(method: str, path: str, *, json_body=None):
         raise RuntimeError(f"Local AI gateway returned HTTP {response.status_code}: {detail}")
     return response.json()
 @mcp.tool(description="Get Local AI gateway, GPU scheduler, and service status.")
-async def local_ai_status() -> dict:
-    return await gateway_request("GET", "/v1/system/status")
+async def local_ai_status(ctx: Context) -> dict:
+    return await gateway_request("GET", "/v1/system/status", trace_context=_request_trace_context(ctx))
 
 
 @mcp.tool(description="List the Local AI models and their advertised capabilities.")
-async def local_ai_models() -> dict:
-    return await gateway_request("GET", "/v1/models")
+async def local_ai_models(ctx: Context) -> dict:
+    return await gateway_request("GET", "/v1/models", trace_context=_request_trace_context(ctx))
 
 
 @mcp.tool(description="Describe the stable Local AI API capabilities and endpoint map.")
-async def local_ai_capabilities() -> dict:
-    return await gateway_request("GET", "/v1/capabilities")
+async def local_ai_capabilities(ctx: Context) -> dict:
+    return await gateway_request("GET", "/v1/capabilities", trace_context=_request_trace_context(ctx))
 
 
 @mcp.tool(
@@ -107,6 +109,8 @@ async def ask_local_ai(
     mode: Literal["fast", "reasoning"] = "fast",
     system_prompt: str = "",
     max_tokens: int = 1200,
+    *,
+    ctx: Context,
 ) -> str:
     if not prompt.strip():
         raise ValueError("prompt must not be empty")
@@ -127,6 +131,7 @@ async def ask_local_ai(
             "max_tokens": max_tokens,
             "stream": False,
         },
+        trace_context=_request_trace_context(ctx),
     )
     try:
         return result["choices"][0]["message"]["content"]
@@ -135,29 +140,29 @@ async def ask_local_ai(
 
 
 @mcp.tool(name="ai.system.status", description="Get AI-Stack gateway, GPU scheduler, and service status.")
-async def ai_system_status() -> dict:
-    return await local_ai_status()
+async def ai_system_status(ctx: Context) -> dict:
+    return await local_ai_status(ctx)
 
 
 @mcp.tool(name="ai.models.list", description="List AI-Stack models and their advertised capabilities.")
-async def ai_models_list() -> dict:
-    return await local_ai_models()
+async def ai_models_list(ctx: Context) -> dict:
+    return await local_ai_models(ctx)
 
 
 @mcp.tool(
     name="ai.generate",
     description="Generate a response with the local fast model through the unified AI-Stack gateway.",
 )
-async def ai_generate(prompt: str, system_prompt: str = "", max_tokens: int = 1200) -> str:
-    return await ask_local_ai(prompt, "fast", system_prompt, max_tokens)
+async def ai_generate(prompt: str, system_prompt: str = "", max_tokens: int = 1200, *, ctx: Context) -> str:
+    return await ask_local_ai(prompt, "fast", system_prompt, max_tokens, ctx=ctx)
 
 
 @mcp.tool(
     name="ai.reason",
     description="Reason through a difficult task with the local reasoning model through the unified gateway.",
 )
-async def ai_reason(prompt: str, system_prompt: str = "", max_tokens: int = 1200) -> str:
-    return await ask_local_ai(prompt, "reasoning", system_prompt, max_tokens)
+async def ai_reason(prompt: str, system_prompt: str = "", max_tokens: int = 1200, *, ctx: Context) -> str:
+    return await ask_local_ai(prompt, "reasoning", system_prompt, max_tokens, ctx=ctx)
 
 
 tool_broker = ToolBroker()

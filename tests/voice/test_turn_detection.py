@@ -38,6 +38,18 @@ class VoiceTurnDetectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             detector.feed(b"\x00")
 
+    def test_overflow_discards_turn_and_detector_accepts_a_later_turn(self):
+        detector = VoiceTurnDetector(sample_rate=1_000, speech_threshold=100, max_turn_seconds=0.04)
+        detector.feed(pcm(500, 20))
+
+        with self.assertRaises(OverflowError):
+            detector.feed(pcm(500, 30))
+
+        self.assertFalse(detector.active)
+        self.assertEqual(detector.feed(pcm(0, 20)), [])
+        self.assertEqual(detector.feed(pcm(500, 20))[0].kind, "speech_started")
+        self.assertEqual(detector.commit()[0].audio, pcm(500, 20))
+
 
 if __name__ == "__main__":
     unittest.main()

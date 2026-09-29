@@ -17,6 +17,14 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
 
+from observability.propagation import extract_trace_context, inject_trace_context
+from observability.tracing import (
+    current_trace_context,
+    end_span_handle,
+    initialize_tracing,
+    start_span,
+    start_span_handle,
+)
 from voice.metrics import METRICS, VoiceMetrics
 from voice.providers import GatewayVoiceProviders
 from voice.session import SentenceChunker, VoiceSessionRegistry, visible_assistant_text
@@ -31,6 +39,7 @@ VAD_SILENCE_SECONDS = float(os.getenv("VOICE_VAD_END_SILENCE_SECONDS", "0.65"))
 VAD_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_SPEECH_THRESHOLD", "420"))
 MAX_TURN_SECONDS = float(os.getenv("VOICE_MAX_TURN_SECONDS", "90"))
 MAX_SESSION_SECONDS = float(os.getenv("VOICE_SESSION_MAX_SECONDS", "3600"))
+initialize_tracing("ai-stack-voice")
 
 
 def _principal(api_key: str) -> str:
@@ -49,6 +58,12 @@ def _pcm_wav(audio: bytes, sample_rate: int = VOICE_SAMPLE_RATE) -> bytes:
 
 def _event(event_type: str, **data: Any) -> dict[str, Any]:
     return {"type": event_type, **data}
+
+
+def _traceparent(context) -> str:
+    headers: dict[str, str] = {}
+    inject_trace_context(headers, context)
+    return headers["traceparent"]
 
 
 def _audio_message(message: dict[str, Any]) -> bytes:
@@ -180,6 +195,11 @@ def create_app(
                 return parts[1].lower()
             return uuid4().hex
 
+        session_trace_context = extract_trace_context(
+            {"traceparent": session.traceparent or "", "x-session-id": session.id},
+            session_id=session.id,
+        )
+
         def enqueue_evaluation(
             turn: dict[str, Any],
             event_type: str,
@@ -254,9 +274,37 @@ def create_app(
                 "first_token_at": None,
                 "first_audio_at": None,
             }
+            turn_span = start_span_handle(
+                "voice.turn",
+                parent=session_trace_context,
+                attributes={
+                    "openinference.span.kind": "CHAIN",
+                    "gen_ai.operation.name": "voice_turn",
+                    "ai_stack.session_id": session.id,
+                    "ai_stack.turn_id": turn_stats["id"],
+                    "ai_stack.audio.input_bytes": len(audio),
+                },
+            )
+            turn_trace = current_trace_context(session_trace_context, turn_span)
+            turn_error = None
             try:
                 session.state = "TRANSCRIBING"
-                transcript = await provider.transcribe(_pcm_wav(audio))
+                with start_span(
+                    "voice.stt.transcribe",
+                    parent=turn_trace,
+                    attributes={
+                        "openinference.span.kind": "LLM",
+                        "gen_ai.operation.name": "transcribe",
+                        "gen_ai.provider.name": "gateway",
+                        "ai_stack.session_id": session.id,
+                        "ai_stack.turn_id": turn_stats["id"],
+                    },
+                ) as stt_span:
+                    stt_trace = current_trace_context(turn_trace, stt_span)
+                    transcript = await provider.transcribe(
+                        _pcm_wav(audio), traceparent=_traceparent(stt_trace)
+                    )
+                    stt_span.set_attribute("ai_stack.audio.input_bytes", len(audio))
                 turn_stats["first_transcript_at"] = time.perf_counter()
                 full_text = transcript["text"].strip()
                 transcript_id = str(uuid4())
@@ -304,7 +352,22 @@ def create_app(
                 chunker = SentenceChunker()
 
                 async def speak(chunk: str) -> None:
-                    pcm, sample_rate, channels = await provider.synthesize(chunk)
+                    with start_span(
+                        "voice.tts.synthesize",
+                        parent=turn_trace,
+                        attributes={
+                            "openinference.span.kind": "LLM",
+                            "gen_ai.operation.name": "synthesize",
+                            "gen_ai.provider.name": "gateway",
+                            "ai_stack.session_id": session.id,
+                            "ai_stack.turn_id": turn_stats["id"],
+                        },
+                    ) as tts_span:
+                        tts_trace = current_trace_context(turn_trace, tts_span)
+                        pcm, sample_rate, channels = await provider.synthesize(
+                            chunk, traceparent=_traceparent(tts_trace)
+                        )
+                        tts_span.set_attribute("ai_stack.audio.output_bytes", len(pcm))
                     if not pcm:
                         return
                     await send(
@@ -328,14 +391,33 @@ def create_app(
                         delay = first_audio_at - started_at
                         active_metrics.observe_first_audio(delay)
 
-                async for delta in provider.chat_deltas(session.history):
-                    if turn_stats["first_token_at"] is None:
-                        turn_stats["first_token_at"] = time.perf_counter()
-                    response_state["generated_text"] += delta
-                    await send("response.output_text.delta", response_id=response_id, delta=delta)
-                    for chunk in chunker.feed(delta):
-                        session.state = "SPEAKING"
-                        await speak(chunk)
+                with start_span(
+                    "voice.llm.generate",
+                    parent=turn_trace,
+                    attributes={
+                        "openinference.span.kind": "LLM",
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.provider.name": "gateway",
+                        "gen_ai.request.model": "local-fast",
+                        "ai_stack.session_id": session.id,
+                        "ai_stack.turn_id": turn_stats["id"],
+                    },
+                ) as llm_span:
+                    llm_trace = current_trace_context(turn_trace, llm_span)
+                    async for delta in provider.chat_deltas(
+                        session.history, traceparent=_traceparent(llm_trace)
+                    ):
+                        if turn_stats["first_token_at"] is None:
+                            turn_stats["first_token_at"] = time.perf_counter()
+                            llm_span.set_attribute(
+                                "gen_ai.server.time_to_first_token_ms",
+                                (turn_stats["first_token_at"] - started_at) * 1000,
+                            )
+                        response_state["generated_text"] += delta
+                        await send("response.output_text.delta", response_id=response_id, delta=delta)
+                        for chunk in chunker.feed(delta):
+                            session.state = "SPEAKING"
+                            await speak(chunk)
                 for chunk in chunker.feed("", final=True):
                     session.state = "SPEAKING"
                     await speak(chunk)
@@ -355,7 +437,8 @@ def create_app(
                 )
                 active_metrics.turns += 1
                 enqueue_evaluation(turn_stats, "voice.turn.completed", audio_integrity_ok=bool(turn_stats["audio_output_bytes"]))
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
+                turn_error = exc
                 current = response_state
                 if current is not None:
                     response_state["interrupted"] = True
@@ -393,6 +476,7 @@ def create_app(
                 )
                 raise
             except Exception as exc:
+                turn_error = exc
                 await send("error", code="voice_turn_failed", message=str(exc)[:256])
                 enqueue_evaluation(
                     turn_stats,
@@ -401,6 +485,17 @@ def create_app(
                     truncation_recorded=True,
                 )
             finally:
+                turn_span.set_attribute("ai_stack.turn.status", "error" if turn_error else "completed")
+                for key, stats_key in (
+                    ("ai_stack.turn.time_to_first_transcript_ms", "first_transcript_at"),
+                    ("ai_stack.turn.time_to_first_token_ms", "first_token_at"),
+                    ("ai_stack.turn.time_to_first_audio_ms", "first_audio_at"),
+                ):
+                    at = turn_stats.get(stats_key)
+                    if at is not None:
+                        turn_span.set_attribute(key, (at - started_at) * 1000)
+                turn_span.set_attribute("ai_stack.audio.output_bytes", turn_stats["audio_output_bytes"])
+                end_span_handle(turn_span, turn_error)
                 session.state = "LISTENING"
                 if response_task is asyncio.current_task():
                     response_state = None
@@ -453,7 +548,9 @@ def create_app(
                     try:
                         for event in detector.feed(audio):
                             await handle_turn_event(event)
-                    except (ValueError, OverflowError) as exc:
+                    except OverflowError as exc:
+                        await send("input_audio_buffer.limit_exceeded", message=str(exc))
+                    except ValueError as exc:
                         await send("error", code="invalid_audio", message=str(exc))
                     continue
 
@@ -488,7 +585,9 @@ def create_app(
                         session.audio_input_bytes += len(audio)
                         for event in detector.feed(audio):
                             await handle_turn_event(event)
-                    except (ValueError, OverflowError) as exc:
+                    except OverflowError as exc:
+                        await send("input_audio_buffer.limit_exceeded", message=str(exc))
+                    except ValueError as exc:
                         await send("error", code="invalid_audio", message=str(exc))
                 elif event_type == "input_audio_buffer.commit":
                     for event in detector.commit():

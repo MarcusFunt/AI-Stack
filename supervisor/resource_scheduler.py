@@ -200,17 +200,19 @@ class ResourceScheduler:
                 if current is None or allocation.priority > current.priority:
                     by_service[allocation.service] = allocation
         current_gpu = list(by_service.values())
-        if not requested["gpu"] or not current_gpu:
+        if not requested["gpu"]:
+            return AdmissionDecision(True, "no_gpu_conflict")
+        if not current_gpu and self.mode == "compatibility":
             return AdmissionDecision(True, "no_gpu_conflict")
         if self.mode == "compatibility":
             return AdmissionDecision(False, "exclusive_gpu_conflict")
-        if requested["exclusive_gpu"] or any(item.exclusive_gpu for item in current_gpu):
+        if current_gpu and (requested["exclusive_gpu"] or any(item.exclusive_gpu for item in current_gpu)):
             return AdmissionDecision(False, "exclusive_gpu_conflict")
         requested_groups = set(requested["compatibility_groups"])
-        if not requested_groups or any(
+        if current_gpu and (not requested_groups or any(
             not requested_groups.intersection(self._requirements(item.service)["compatibility_groups"])
             for item in current_gpu
-        ):
+        )):
             return AdmissionDecision(False, "incompatible_workload_groups")
 
         capacity = self.config.get("resource_capacity", {})

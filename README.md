@@ -78,6 +78,22 @@ Voice turn evaluations contain timing, byte counts, interruption/truncation stat
 
 For an external offline API check, see [external_eval/README.md](external_eval/README.md). It uses Inspect AI's standard OpenAI-compatible model adapter and built-in scorer against the gateway.
 
+## Responses API
+
+`POST /v1/responses` supports stateless text input, instructions, function tool declarations, buffered results, and server-sent-event streaming. Conversation state such as `previous_response_id`, image/audio input, and reasoning controls are not implemented; include the full message history in each request. A stream is marked failed if the backend closes or errors before a completion marker, so clients must handle `response.failed` instead of treating partial output as complete.
+
+## Outbound MCP tools
+
+The MCP bridge can connect to up to 16 explicitly configured external MCP servers. `MCP_SERVERS_JSON` contains each server's ID, URL, exact `allowed_tools` list, and optional `auth_env` name. `MCP_SERVER_TOKENS_JSON` maps those environment-variable names to credentials supplied by the host. Keep credentials in environment values; do not put secret values in server configuration. Discovered tools are registered with the Tool Broker and remain unavailable unless their exact names and permissions are admitted.
+
+## Evaluation router
+
+The evaluation router stores metadata-only invocation and voice-turn screens. Suspicious events enter a durable escalation queue; an authenticated worker claims one item and posts a bounded result to `/v1/escalations/{id}/complete`. `DeepEvalWorker` defaults to a 30-second evaluator deadline, and abandoned claims return to the queue after 120 seconds. The Inspect AI example in `external_eval/` is an offline API check, separate from this queue.
+
+## GPU resource scheduler
+
+`SUPERVISOR_SCHEDULER_MODE` defaults to `compatibility`, which retains exclusive GPU admission. `resource` mode permits co-residency only when workload groups match and every worker's VRAM requirement plus configured headroom fits `resource_capacity` in `config/models.json`. Unknown capacity or worker requirements fail closed. The checked-in model registry leaves these measurements unset, so keep the default compatibility mode until measured values are recorded.
+
 ## Security
 
 - Gateway binds to `127.0.0.1:8090` and requires `AI_API_KEY`.

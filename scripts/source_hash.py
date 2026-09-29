@@ -18,15 +18,24 @@ CONTEXTS = {
     "stt": ROOT / "stt",
     "vlm": ROOT / "vlm",
 }
+SOURCE_INPUTS = {
+    service: (context,) for service, context in CONTEXTS.items()
+}
+SOURCE_INPUTS["gateway"] = (ROOT / "gateway", ROOT / "core", ROOT / "observability")
+SOURCE_INPUTS["voice"] = (ROOT / "voice", ROOT / "core", ROOT / "observability")
+SOURCE_INPUTS["mcp"] = (ROOT / "mcp", ROOT / "core", ROOT / "observability")
 EXCLUDED_DIRS = {".git", "node_modules", "dist", "__pycache__"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log"}
 
 def source_hash(service):
-    root = CONTEXTS[service]
+    roots = SOURCE_INPUTS[service]
     digest = hashlib.sha256()
-    files = sorted(p for p in root.rglob("*") if p.is_file())
+    files = sorted(
+        (path for root in roots for path in root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(ROOT).as_posix(),
+    )
     for path in files:
-        rel = path.relative_to(root)
+        rel = path.relative_to(ROOT)
         if any(part in EXCLUDED_DIRS for part in rel.parts):
             continue
         if path.suffix.lower() in EXCLUDED_SUFFIXES:

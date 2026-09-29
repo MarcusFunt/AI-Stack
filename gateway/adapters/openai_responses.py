@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from datetime import datetime, timezone
@@ -284,6 +285,7 @@ async def map_chat_stream(
     usage = None
     finish_reason = None
     terminal = False
+    stream_error = None
     try:
         async for chunk in source:
             buffer.extend(chunk)
@@ -378,6 +380,10 @@ async def map_chat_stream(
                             })
             if terminal:
                 break
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        stream_error = exc
     finally:
         closer = getattr(source, "aclose", None)
         if closer is not None:
@@ -393,6 +399,7 @@ async def map_chat_stream(
                 chunk_data = json.loads(b"\n".join(data_lines))
                 choices = chunk_data.get("choices", [])
                 if choices and isinstance(choices[0], Mapping):
+                    finish_reason = choices[0].get("finish_reason") or finish_reason
                     delta = choices[0].get("delta", {})
                     text = delta.get("content") if isinstance(delta, Mapping) else None
                     if isinstance(text, str) and text:
@@ -403,10 +410,13 @@ async def map_chat_stream(
 
     text = "".join(text_parts)
     yield _event("response.output_text.done", {"item_id": message_id, "output_index": 0, "content_index": 0, "text": text})
+    has_finish_marker = finish_reason in {"stop", "length", "tool_calls", "content_filter"}
+    stream_complete = terminal or has_finish_marker
+    stream_incomplete = not stream_complete or stream_error is not None
     final_message_item = {
         "id": message_id,
         "type": "message",
-        "status": "completed",
+        "status": "incomplete" if stream_incomplete else "completed",
         "role": "assistant",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
@@ -446,7 +456,7 @@ async def map_chat_stream(
             "item": {
                 "id": call["item_id"],
                 "type": "function_call",
-                "status": "completed",
+                "status": "incomplete" if stream_incomplete else "completed",
                 "call_id": call_id,
                 "name": call["name"],
                 "arguments": call["arguments"],
@@ -464,10 +474,22 @@ async def map_chat_stream(
     final_response["created_at"] = created
     if final_response["output"] and final_response["output"][0].get("type") == "message":
         final_response["output"][0]["id"] = message_id
+        if stream_incomplete:
+            final_response["output"][0]["status"] = "incomplete"
     output_position = 1 if final_response["output"] and final_response["output"][0].get("type") == "message" else 0
     for _, call in sorted(tool_calls.items()):
         if output_position < len(final_response["output"]):
             final_response["output"][output_position]["id"] = call["item_id"]
         output_position += 1
-    terminal_event = "response.incomplete" if final_response["status"] == "incomplete" else "response.completed"
-    yield _event(terminal_event, {"response": final_response})
+    if stream_incomplete:
+        final_response["status"] = "failed"
+        final_response["error"] = {
+            "type": "server_error",
+            "code": "upstream_stream_error" if stream_error is not None else "incomplete_stream",
+            "message": "The upstream generation stream ended before it completed.",
+        }
+        final_response["incomplete_details"] = None
+        yield _event("response.failed", {"response": final_response, "error": final_response["error"]})
+    else:
+        terminal_event = "response.incomplete" if final_response["status"] == "incomplete" else "response.completed"
+        yield _event(terminal_event, {"response": final_response})

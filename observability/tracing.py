@@ -18,6 +18,9 @@ class _NoopSpan:
     def get_span_context(self):
         return None
 
+    def end(self) -> None:
+        return None
+
 
 _NOOP_SPAN = _NoopSpan()
 
@@ -75,6 +78,43 @@ def _tracer_or_default(tracer=None):
         return trace.get_tracer("ai-stack")
     except Exception:
         return None
+
+
+def start_span_handle(
+    name: str,
+    *,
+    parent: TraceContext | None = None,
+    attributes: Mapping[str, Any] | None = None,
+    tracer=None,
+):
+    """Start a span whose lifetime can be ended by a later streaming callback."""
+    active_tracer = _tracer_or_default(tracer)
+    if active_tracer is None:
+        return _NOOP_SPAN
+    kwargs: dict[str, Any] = {"attributes": dict(attributes or {})}
+    parent_context = _parent_context(parent)
+    if parent_context is not None:
+        kwargs["context"] = parent_context
+    try:
+        return active_tracer.start_span(name, **kwargs)
+    except Exception:
+        return _NOOP_SPAN
+
+
+def end_span_handle(span, error: BaseException | None = None) -> None:
+    """End a span handle, recording an error when streaming failed."""
+    if error is not None:
+        try:
+            from opentelemetry.trace import Status, StatusCode
+
+            span.record_exception(error)
+            span.set_status(Status(StatusCode.ERROR, type(error).__name__))
+        except Exception:
+            pass
+    try:
+        span.end()
+    except Exception:
+        pass
 
 
 @contextmanager

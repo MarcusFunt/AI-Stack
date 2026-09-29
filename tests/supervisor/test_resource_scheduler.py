@@ -101,6 +101,14 @@ class ResourceSchedulerTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "gpu_capacity_exceeded")
 
+    def test_resource_mode_checks_single_worker_against_capacity_and_headroom(self):
+        scheduler = ResourceScheduler(config_with(total_vram=4000, headroom=1000), mode="resource")
+
+        decision = scheduler.admit("llm", [])
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "gpu_capacity_exceeded")
+
     def test_exclusive_service_cannot_join_compatible_group(self):
         scheduler = ResourceScheduler(config_with(), mode="resource")
         active = [scheduler.allocation("llm-lease", "llm")]

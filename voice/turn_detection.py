@@ -43,9 +43,11 @@ class VoiceTurnDetector:
         if len(pcm16) % 2:
             raise ValueError("PCM16 audio frames must contain whole samples")
         if len(pcm16) > self.max_turn_bytes:
+            self.discard()
             raise OverflowError("voice audio frame exceeds configured turn limit")
         frame_seconds = len(pcm16) / (self.sample_rate * 2)
         if self._active and self._buffered_bytes + len(pcm16) > self.max_turn_bytes:
+            self.discard()
             raise OverflowError("voice turn exceeds configured audio limit")
 
         samples = struct.unpack(f"<{len(pcm16) // 2}h", pcm16)
@@ -76,8 +78,12 @@ class VoiceTurnDetector:
         if not self._active:
             return []
         audio = b"".join(self._chunks)
+        self.discard()
+        return [TurnEvent("speech_stopped", audio)]
+
+    def discard(self) -> None:
+        """Drop an active turn and reset VAD so a later turn can be accepted."""
         self._active = False
         self._silence_seconds = 0.0
         self._chunks.clear()
         self._buffered_bytes = 0
-        return [TurnEvent("speech_stopped", audio)]

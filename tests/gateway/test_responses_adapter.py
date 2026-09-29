@@ -104,6 +104,37 @@ class OpenAIResponsesAdapterTests(unittest.TestCase):
         self.assertIn('"delta":"split"', output)
         self.assertIn("event: response.completed", output)
 
+    def test_stream_without_completion_marker_is_reported_as_failed(self):
+        async def chunks():
+            yield b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+
+        async def collect():
+            return [chunk async for chunk in map_chat_stream(
+                chunks(), adapter=self.adapter, request_payload={"model": "local-fast"}, response_id="resp_truncated"
+            )]
+
+        output = b"".join(asyncio.run(collect())).decode()
+
+        self.assertIn("event: response.failed", output)
+        self.assertNotIn("event: response.completed", output)
+        self.assertIn('"code":"incomplete_stream"', output)
+
+    def test_upstream_stream_error_is_not_reported_as_success(self):
+        async def chunks():
+            yield b'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+            raise RuntimeError("socket dropped")
+
+        async def collect():
+            return [chunk async for chunk in map_chat_stream(
+                chunks(), adapter=self.adapter, request_payload={"model": "local-fast"}, response_id="resp_error"
+            )]
+
+        output = b"".join(asyncio.run(collect())).decode()
+
+        self.assertIn("event: response.failed", output)
+        self.assertNotIn("event: response.completed", output)
+        self.assertIn('"code":"upstream_stream_error"', output)
+
     def test_translates_chat_sse_into_responses_text_events(self):
         async def chunks():
             yield b'data: {"choices":[{"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}\n\n'

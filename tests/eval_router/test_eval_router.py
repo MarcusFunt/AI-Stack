@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,61 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(seen, [escalation.id])
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.result["score"], 0.8)
+
+    def test_hung_evaluator_is_timed_out_and_claim_is_not_left_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvaluationStore(Path(tmp) / "eval.sqlite3")
+            request = event(http_status=500, event_type="invocation.failed")
+            result, reasons = evaluate_invocation(request, latency_threshold_ms=1000)
+            _, escalation = store.save_screening(request.event_id, result, reasons)
+
+            async def evaluator(_record):
+                await asyncio.sleep(0.1)
+                return {"evaluator": "test", "score": 1.0, "status": "pass"}
+
+            worker = DeepEvalWorker(store, evaluator, timeout_seconds=0.01)
+            self.assertTrue(asyncio.run(worker.run_once("worker-timeout")))
+            completed = store.get_escalation(escalation.id)
+            self.assertEqual(completed.status, "error")
+            self.assertEqual(completed.result["error_code"], "timeout")
+
+    def test_synchronous_evaluator_runs_off_the_event_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvaluationStore(Path(tmp) / "eval.sqlite3")
+            request = event(http_status=500, event_type="invocation.failed")
+            result, reasons = evaluate_invocation(request, latency_threshold_ms=1000)
+            _, escalation = store.save_screening(request.event_id, result, reasons)
+            callback_thread = []
+
+            def evaluator(_record):
+                callback_thread.append(threading.get_ident())
+                return {"evaluator": "sync-test", "score": 1.0, "status": "pass"}
+
+            worker = DeepEvalWorker(store, evaluator)
+            main_thread = threading.get_ident()
+            self.assertTrue(asyncio.run(worker.run_once("worker-sync")))
+
+            self.assertNotEqual(callback_thread[0], main_thread)
+            self.assertEqual(store.get_escalation(escalation.id).status, "completed")
+
+    def test_expired_claim_is_returned_to_the_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvaluationStore(Path(tmp) / "eval.sqlite3")
+            request = event(http_status=500, event_type="invocation.failed")
+            result, reasons = evaluate_invocation(request, latency_threshold_ms=1000)
+            _, escalation = store.save_screening(request.event_id, result, reasons)
+            store.claim_next_escalation("worker-gone")
+            with store._connection() as connection:
+                connection.execute(
+                    "UPDATE escalations SET updated_at=? WHERE id=?",
+                    ("2000-01-01T00:00:00+00:00", escalation.id),
+                )
+
+            claimed = store.claim_next_escalation("worker-recovery", claim_ttl_seconds=1)
+
+            self.assertEqual(claimed.id, escalation.id)
+            self.assertEqual(claimed.status, "claimed")
+            self.assertEqual(claimed.claimed_by, "worker-recovery")
 
 
 class OpikAdapterTests(unittest.IsolatedAsyncioTestCase):
