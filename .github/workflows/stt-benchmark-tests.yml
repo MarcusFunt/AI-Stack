@@ -1,0 +1,29 @@
+name: STT benchmark tests
+
+on:
+  pull_request:
+    paths:
+      - "stt/benchmark/**"
+      - "scripts/benchmark-stt.ps1"
+      - "stt/Dockerfile"
+      - "stt/requirements-benchmark.txt"
+      - "compose.yaml"
+      - ".github/workflows/stt-benchmark-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "stt/benchmark/**"
+      - "scripts/benchmark-stt.ps1"
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile benchmark code
+        run: python -m compileall -q stt/benchmark
+      - name: Run benchmark core tests
+        run: python -m unittest discover -s stt/benchmark/tests -v
