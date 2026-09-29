@@ -13,6 +13,7 @@ from pathlib import Path
 from .diarization import NemotronDiarizer
 from .metrics import aggregate_error_stats, char_error_stats, diarization_error, word_error_stats
 from .models import MODEL_SPECS, load_adapter
+from .revisions import parse_revision_overrides
 
 
 def package_versions() -> dict[str, str]:
@@ -60,9 +61,15 @@ def load_manifest(path: Path) -> list[dict]:
         )
         item["audio_path"] = str(audio)
         item["speaker_count"] = int(item.get("speaker_count", 3))
-        item["reference_text"] = str(
-            item.get("text") or " ".join(s["text"] for s in segments)
-        ).strip()
+        top_level_text = str(item.get("text") or "").strip()
+        item["reference_text"] = (
+            top_level_text
+            or " ".join(str(s.get("text", "")) for s in segments).strip()
+        )
+        if not item["reference_text"]:
+            raise ValueError(
+                f"{path}:{number}: recording requires reference text for ASR scoring"
+            )
         rows.append(item)
     if not rows:
         raise ValueError("manifest contains no recordings")
@@ -175,8 +182,29 @@ def main() -> int:
         help="Edda beam size; other adapters use their native decoder.",
     )
     parser.add_argument("--collar", type=float, default=0.25)
+    parser.add_argument(
+        "--revision",
+        action="append",
+        default=[],
+        metavar="ALIAS=REVISION",
+        help=(
+            "Pin a Hub model ref. Repeat for edda, saga2, hviske, or nemotron. "
+            "Resolved commit SHAs are always written to results.json."
+        ),
+    )
     parser.add_argument("--no-speaker-attributed", action="store_true")
     args = parser.parse_args()
+
+    try:
+        requested_revisions = parse_revision_overrides(args.revision)
+    except ValueError as exc:
+        parser.error(str(exc))
+    allowed_revision_aliases = set(MODEL_SPECS) | {"nemotron"}
+    unknown_revision_aliases = sorted(set(requested_revisions) - allowed_revision_aliases)
+    if unknown_revision_aliases:
+        parser.error(
+            "unknown revision aliases: " + ", ".join(unknown_revision_aliases)
+        )
 
     unknown = sorted(set(args.models) - set(MODEL_SPECS))
     if unknown:
@@ -190,15 +218,13 @@ def main() -> int:
         raise ValueError(f"recordings have no audio duration: {', '.join(empty_audio)}")
     total_audio_s = sum(durations.values())
 
-    diarizer = NemotronDiarizer()
+    diarizer = NemotronDiarizer(revision=requested_revisions.get("nemotron"))
     diarization_by_id = {}
     der_by_id = {}
     mappings = {}
     try:
         for record in records:
-            predicted = diarizer.diarize(
-                record["audio_path"], speaker_count=record["speaker_count"]
-            )
+            predicted = diarizer.diarize(record["audio_path"])
             diarization_by_id[record["id"]] = predicted
             if record["segments"]:
                 score = diarization_error(
@@ -224,6 +250,7 @@ def main() -> int:
             "collar_s": args.collar,
             "speaker_attributed": not args.no_speaker_attributed,
             "normalization": "danish-content-v1",
+            "requested_revisions": requested_revisions,
         },
         "runtime_versions": package_versions(),
         "recordings": [
@@ -236,6 +263,7 @@ def main() -> int:
         ],
         "diarization": {
             "model": NemotronDiarizer.model_id,
+            "revision": diarizer.revision,
             "per_recording": der_by_id,
             "predicted_segments": diarization_by_id,
         },
@@ -243,7 +271,11 @@ def main() -> int:
     }
 
     for alias in args.models:
-        adapter = load_adapter(alias, beam_size=args.beam_size)
+        adapter = load_adapter(
+            alias,
+            beam_size=args.beam_size,
+            revision=requested_revisions.get(alias),
+        )
         started = time.perf_counter()
         try:
             hypotheses = adapter.transcribe(
@@ -294,6 +326,7 @@ def main() -> int:
             model_result = {
                 "repo": MODEL_SPECS[alias]["repo"],
                 "license": MODEL_SPECS[alias]["license"],
+                "revision": adapter.revision,
                 "content_wer": content_total.rate,
                 "verbatim_wer": verbatim_total.rate,
                 "cer": cer_total.rate,

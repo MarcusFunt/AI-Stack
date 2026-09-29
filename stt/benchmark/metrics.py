@@ -181,10 +181,14 @@ def _der_counts(
         mapped = {mapping.get(speaker) for speaker in hyp}
         mapped.discard(None)
         correct = len(ref & mapped)
+        hypothesis_speakers = len(hyp)
         reference_speaker_frames += len(ref)
-        miss += max(0, len(ref) - len(mapped))
-        false_alarm += max(0, len(mapped) - len(ref))
-        confusion += max(0, min(len(ref), len(mapped)) - correct)
+        # Surplus hypothesis speakers still consume speaker-time even when the
+        # optimal permutation maps them to None. Dropping them here would make
+        # over-segmentation look artificially good.
+        miss += max(0, len(ref) - hypothesis_speakers)
+        false_alarm += max(0, hypothesis_speakers - len(ref))
+        confusion += max(0, min(len(ref), hypothesis_speakers) - correct)
     return miss, false_alarm, confusion, reference_speaker_frames
 
 

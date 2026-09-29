@@ -63,6 +63,20 @@ class TracingTests(unittest.TestCase):
         self.assertEqual(context.parent_span_id, parent.span_id)
         self.assertNotEqual(context.span_id, parent.span_id)
 
+    def test_parent_nonrecording_span_falls_back_to_child_context(self):
+        parent = TraceContext(
+            trace_id="4bf92f3577b34da6a3ce929d0e0e4736",
+            span_id="00f067aa0ba902b7",
+        )
+        span = FakeSpan()
+        span.context.span_id = int(parent.span_id, 16)
+
+        context = current_trace_context(parent, span)
+
+        self.assertEqual(context.trace_id, parent.trace_id)
+        self.assertEqual(context.parent_span_id, parent.span_id)
+        self.assertNotEqual(context.span_id, parent.span_id)
+
     def test_span_context_uses_actual_span_ids_when_available(self):
         parent = TraceContext(request_id="request-1")
         context = current_trace_context(parent, FakeSpan())

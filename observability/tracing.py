@@ -165,6 +165,15 @@ def current_trace_context(parent: TraceContext | None, span) -> TraceContext:
         span_context = span.get_span_context()
         if span_context is None or not span_context.is_valid:
             return parent.child()
+        # With only the OpenTelemetry API installed/configured, a no-op tracer
+        # may hand back the parent NonRecordingSpan rather than a distinct child.
+        # Treat that as "no span was created" so downstream propagation still
+        # gets a valid child span id within the same trace.
+        if (
+            parent.span_id is not None
+            and int(span_context.span_id) == int(parent.span_id, 16)
+        ):
+            return parent.child()
         trace_flags = getattr(span_context, "trace_flags", None)
         if trace_flags is None:
             flags = parent.trace_flags

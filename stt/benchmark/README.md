@@ -13,9 +13,9 @@ It runs inside the existing `stt` GPU worker so the supervisor lease remains the
 
 Put private recordings under `data/stt-benchmark/`; that directory is already ignored by git. Start from `stt/benchmark/manifest.example.jsonl`.
 
-Each JSONL row describes one recording. `audio` is relative to the manifest. For the full benchmark, provide timestamped `segments` with `start`, `end`, `speaker`, and verbatim `text`. The three real speaker names may be arbitrary; predicted Nemotron speaker IDs are permutation-matched during scoring.
+Each JSONL row describes one recording. `audio` is relative to the manifest and every recording must have reference text, either in top-level `text` or by concatenating non-empty segment texts. For the full benchmark, provide timestamped `segments` with `start`, `end`, `speaker`, and verbatim `text`. The three real speaker names may be arbitrary; predicted Nemotron speaker IDs are permutation-matched during scoring.
 
-If only `text` is supplied, ASR WER/CER still works, but DER and speaker-attributed WER are unavailable.
+If only top-level `text` is supplied, ASR WER/CER still works, but DER and speaker-attributed WER are unavailable. Extra speakers predicted by Nemotron are preserved and penalized by DER rather than silently dropped.
 
 ## Metrics
 
@@ -26,7 +26,7 @@ If only `text` is supplied, ASR WER/CER still works, but DER and speaker-attribu
 - **Speaker-attributed WER**: Nemotron turns are cut from the recording, transcribed, mapped to the reference speakers, and scored per speaker. This is deliberately separate from normal WER because short turn segmentation can hurt ASR quality.
 - **RTF**: processing seconds / audio seconds. Accuracy is the default ranking criterion.
 
-Results are written as `results.json`, `summary.csv`, and `summary.md`.
+Results are written as `results.json`, `summary.csv`, and `summary.md`. Before loading each Hugging Face model, the benchmark resolves its requested ref to an immutable Hub commit SHA and stores that SHA in `results.json`. This makes the exact model weights and custom repository code auditable and replayable.
 
 ## Local setup
 
@@ -44,7 +44,7 @@ Then create `data\stt-benchmark\manifest.jsonl` and run:
 .\scripts\benchmark-stt.ps1
 ```
 
-The wrapper acquires a supervisor lease for `stt`, runs the benchmark in the existing worker, and releases the lease in `finally`. It does not directly stop another active GPU job.
+The wrapper acquires an **exclusive** supervisor lease for `stt` with the `benchmark` workload profile, runs the benchmark in the existing worker, and releases the lease in `finally`. If ordinary STT work is active, the benchmark waits for it to finish. Once the exclusive request is queued, new ordinary STT leases do not jump ahead; while the benchmark owns the lease, no live transcription can enter the worker. It does not directly stop an active request.
 
 Useful options:
 
@@ -52,6 +52,14 @@ Useful options:
 .\scripts\benchmark-stt.ps1 -Models edda,hviske -BatchSize 1
 .\scripts\benchmark-stt.ps1 -NoSpeakerAttributed
 .\scripts\benchmark-stt.ps1 -CollarSeconds 0
+
+# Re-run with exact Hub revisions recorded by an earlier results.json:
+.\scripts\benchmark-stt.ps1 -Revision @(
+  "edda=<40-char-sha>",
+  "saga2=<40-char-sha>",
+  "hviske=<40-char-sha>",
+  "nemotron=<40-char-sha>"
+)
 ```
 
 For an RTX 3060 12 GB, start with batch size 2; retry with 1 if a custom model runs out of VRAM.
