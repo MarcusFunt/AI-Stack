@@ -420,9 +420,11 @@ services:
       STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-float16}
       STT_DOWNLOAD_ROOT: /models
       HF_HOME: ${HF_HOME:-/cache/huggingface}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ./models/stt:/models
       - ./data/cache:/cache
+      - ./data/stt-benchmark:/benchmark
 
   tts:
     <<: *gpu-base
