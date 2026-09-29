@@ -34,6 +34,7 @@ class InvocationSource(str, Enum):
     OPENAI_CHAT = "openai_chat"
     OPENAI_RESPONSES = "openai_responses"
     OPENAI_AUDIO = "openai_audio"
+    OPENAI_VISION = "openai_vision"
     OPENAI_REALTIME = "openai_realtime"
     MCP = "mcp"
     MQTT = "mqtt"

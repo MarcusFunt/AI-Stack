@@ -120,6 +120,57 @@ class GatewayChatTracingTests(unittest.TestCase):
         self.assertEqual(observed["path"], "/v1/chat/completions")
         self.assertTrue(observed["invocation"].options.stream)
 
+    def test_audio_and_vision_routes_attach_canonical_invocations(self):
+        observed = []
+        original = self.gateway.forward_buffered
+
+        async def fake_forward(service, path, request, body=None, **kwargs):
+            observed.append({
+                "service": service,
+                "path": path,
+                "invocation": getattr(request.state, "invocation", None),
+                "body": body,
+            })
+            return Response(content=b"ok", media_type="application/octet-stream")
+
+        self.gateway.forward_buffered = fake_forward
+        headers = {"Authorization": "Bearer test-only-gateway-key"}
+        try:
+            transcription = self.client.post(
+                "/v1/audio/transcriptions",
+                headers=headers,
+                files={"file": ("sample.wav", b"audio bytes", "audio/wav")},
+                data={"language": "en", "response_format": "text"},
+            )
+            speech = self.client.post(
+                "/v1/audio/speech",
+                headers=headers,
+                json={"model": "local-tts", "input": "hello", "voice": "alloy", "response_format": "wav"},
+            )
+            vision = self.client.post(
+                "/v1/vision/analyze",
+                headers=headers,
+                files={"image": ("image.png", b"png bytes", "image/png")},
+                data={"prompt": "describe", "max_new_tokens": "12"},
+            )
+        finally:
+            self.gateway.forward_buffered = original
+
+        self.assertEqual([transcription.status_code, speech.status_code, vision.status_code], [200, 200, 200])
+        self.assertEqual([(item["service"], item["path"]) for item in observed], [
+            ("stt", "/v1/audio/transcriptions"),
+            ("tts", "/v1/audio/speech"),
+            ("vlm", "/v1/vision/analyze"),
+        ])
+        self.assertEqual(observed[0]["invocation"].input.data["upload"]["mime_type"], "audio/wav")
+        self.assertEqual(observed[1]["invocation"].input.text, "hello")
+        self.assertEqual(observed[2]["invocation"].input.data["image"]["mime_type"], "image/png")
+        self.assertIn(b"audio bytes", observed[0]["body"])
+        self.assertIn(b"png bytes", observed[2]["body"])
+        self.assertIn("traceparent", transcription.headers)
+        self.assertIn("traceparent", speech.headers)
+        self.assertIn("traceparent", vision.headers)
+
     def test_backend_failure_keeps_existing_http_error_semantics(self):
         original = self.gateway.forward_buffered
 

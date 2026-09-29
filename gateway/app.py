@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 from starlette.requests import ClientDisconnect
 
 from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
+from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.tracing import current_trace_context, initialize_tracing, start_span
@@ -45,6 +46,7 @@ ALIASES = {k.lower(): v for k, v in CONFIG.get("aliases", {}).items()}
 MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
 INVOCATION_ROUTER = InvocationRouter(MODELS, aliases=ALIASES)
 CHAT_ADAPTER = OpenAIChatAdapter()
+AUDIO_ADAPTER = OpenAIAudioAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
 initialize_tracing("ai-stack-gateway")
@@ -100,15 +102,23 @@ async def bearer_auth(request: Request, call_next):
                 )
         return await call_next(request)
 
-    if request.url.path == "/v1/chat/completions":
+    traced_routes = {
+        "/v1/chat/completions": ("gateway.chat", "chat", "openai_chat"),
+        "/v1/audio/transcriptions": ("gateway.audio.transcription", "transcribe", "openai_audio"),
+        "/v1/audio/speech": ("gateway.audio.speech", "synthesize", "openai_audio"),
+        "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
+    }
+    traced_route = traced_routes.get(request.url.path)
+    if traced_route:
+        span_name, operation, transport = traced_route
         with start_span(
-            "gateway.chat",
+            span_name,
             parent=trace_context,
             attributes={
-                "gen_ai.operation.name": "chat",
-                "ai_stack.transport": "openai_chat",
+                "gen_ai.operation.name": operation,
+                "ai_stack.transport": transport,
                 "http.request.method": request.method,
-                "http.route": "/v1/chat/completions",
+                "http.route": request.url.path,
             },
         ) as span:
             effective_context = current_trace_context(trace_context, span)
@@ -849,6 +859,21 @@ def response_headers(response: httpx.Response, buffered: bool = False):
         blocked.add("content-encoding")
     return {k: v for k, v in response.headers.items() if k.lower() not in blocked}
 
+async def parse_form_body(request: Request, body: bytes):
+    """Parse already size-limited multipart data without mutating request internals."""
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    parser_request = Request(request.scope, receive)
+    return await parser_request.form()
+
+
 async def read_body_limited(request: Request, limit: int, label: str):
     content_length = request.headers.get("content-length")
     if content_length:
@@ -1497,10 +1522,22 @@ async def chat(request: Request):
 
 @app.api_route("/v1/audio/transcriptions", methods=["POST"])
 async def transcribe(request: Request):
+    raw = await read_body_limited(request, STT_MAX_UPLOAD_BYTES, "STT upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception:
+        form = {}
+    invocation = AUDIO_ADAPTER.to_transcription(form, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
+    if hasattr(form, "close"):
+        await form.close()
     return await forward_buffered(
-        "stt",
+        route.provider_id,
         "/v1/audio/transcriptions",
         request,
+        body=raw,
         max_body_bytes=STT_MAX_UPLOAD_BYTES,
         body_label="STT upload",
     )
@@ -1536,15 +1573,31 @@ async def speech(request: Request):
         if not 0.25 <= float(speed) <= 4.0:
             raise HTTPException(400, "speed must be between 0.25 and 4.0")
 
+    invocation = AUDIO_ADAPTER.to_speech(payload, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
     body = json.dumps(payload).encode("utf-8")
-    return await forward_buffered("tts", "/v1/audio/speech", request, body)
+    return await forward_buffered(route.provider_id, "/v1/audio/speech", request, body)
 
 @app.api_route("/v1/vision/analyze", methods=["POST"])
 async def vision(request: Request):
+    raw = await read_body_limited(request, VLM_MAX_UPLOAD_BYTES, "VLM upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception:
+        form = {}
+    invocation = AUDIO_ADAPTER.to_vision(form, request.state.trace_context)
+    request.state.invocation = invocation
+    route = INVOCATION_ROUTER.resolve(invocation)
+    request.state.model_route = route
+    if hasattr(form, "close"):
+        await form.close()
     return await forward_buffered(
-        "vlm",
+        route.provider_id,
         "/v1/vision/analyze",
         request,
+        body=raw,
         max_body_bytes=VLM_MAX_UPLOAD_BYTES,
         body_label="VLM upload",
     )
