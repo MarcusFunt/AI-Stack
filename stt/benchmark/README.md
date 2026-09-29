@@ -19,8 +19,8 @@ If only `text` is supplied, ASR WER/CER still works, but DER and speaker-attribu
 
 ## Metrics
 
-- **Content WER**: NFKC + lowercase + punctuation/symbol normalization, with common Danish hesitation fillers removed.
-- **Verbatim WER**: the same normalization but fillers retained.
+- **Content WER**: leaderboard-style Danish normalization (NFKC, number word/digit canonicalization, lowercase, punctuation/symbol normalization) with common Danish hesitation fillers removed.
+- **Verbatim WER**: the same text/number normalization but fillers retained.
 - **CER**: normalized character error rate.
 - **DER**: 10 ms speaker frames, overlap included, optimal speaker permutation, 250 ms reference-boundary collar by default.
 - **Speaker-attributed WER**: Nemotron turns are cut from the recording, transcribed, mapped to the reference speakers, and scored per speaker. This is deliberately separate from normal WER because short turn segmentation can hurt ASR quality.
