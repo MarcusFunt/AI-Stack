@@ -1,4 +1,5 @@
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,30 @@ from stt.benchmark.datasets import provenance
 
 
 class DatasetProvenanceTests(unittest.TestCase):
+    def test_preparation_code_fingerprint_is_deterministic_and_includes_untracked_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "stt" / "benchmark" / "datasets" / "prep.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Benchmark Test"], cwd=root, check=True)
+            subprocess.run(["git", "add", "stt/benchmark/datasets/prep.py"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=root, check=True)
+            first = provenance.preparation_code_provenance(root)
+            self.assertFalse(first["dirty"])
+
+            untracked = root / "stt" / "benchmark" / "datasets" / "extra.py"
+            untracked.write_text("VALUE = 2\n", encoding="utf-8")
+            dirty_a = provenance.preparation_code_provenance(root)
+            dirty_b = provenance.preparation_code_provenance(root)
+            self.assertTrue(dirty_a["dirty"])
+            self.assertEqual(dirty_a["working_tree_diff_sha256"], dirty_b["working_tree_diff_sha256"])
+            untracked.write_text("VALUE = 3\n", encoding="utf-8")
+            changed = provenance.preparation_code_provenance(root)
+            self.assertNotEqual(dirty_a["working_tree_diff_sha256"], changed["working_tree_diff_sha256"])
+
     def test_lock_rejects_absolute_or_parent_traversal_file_paths(self):
         for path_value in (r"C:\raw\sample.cha", "../raw/sample.cha"):
             entry = {

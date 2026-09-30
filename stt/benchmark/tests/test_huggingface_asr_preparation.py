@@ -62,6 +62,11 @@ class HuggingFaceAsrPreparationTests(unittest.TestCase):
                 self.assertEqual(prepared[0]["segments"], [])
                 self.assertEqual(prepared[0]["metadata"]["source_revision"], "f" * 40)
                 self.assertEqual(prepared[0]["metadata"]["source_license"], adapter.spec.license)
+                self.assertEqual(prepared[0]["metadata"]["bootstrap_group"], "42")
+                self.assertEqual(prepared[0]["metadata"]["bootstrap_group_type"], "speaker")
+                if adapter.spec.dataset == "nst-da-test":
+                    self.assertEqual(prepared[0]["metadata"]["test_split_status"], "utterance-held-out")
+                    self.assertEqual(prepared[0]["metadata"]["speaker_split_relation"], "speaker-overlapping")
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][0], repo_id)
                 self.assertEqual(calls[0][1], ((config,) if config else ()))
@@ -90,6 +95,25 @@ class HuggingFaceAsrPreparationTests(unittest.TestCase):
             self.assertEqual(summary["minimum_reference_words"], 1000)
             self.assertEqual(summary["strata"]["dialect"]["Fynsk"]["status"], "insufficient_n")
             self.assertEqual(summary["strata"]["age_group"]["25-49"]["reference_words"], 2)
+
+    def test_missing_speaker_id_uses_recording_as_bootstrap_group(self):
+        adapter = speech_recognition.NstDanishTestAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = adapter.prepare(
+                None,
+                root / "prepared",
+                lock_path=root / "dataset-lock.json",
+                dataset_loader=lambda *args, **kwargs: [{
+                    "id_recording": "independent-clip",
+                    "audio": _audio(),
+                    "text": "En test reference.",
+                }],
+                revision_resolver=lambda _: "c" * 40,
+            )
+            prepared = manifest.load_manifest(path)
+        self.assertEqual(prepared[0]["metadata"]["bootstrap_group"], "independent-clip")
+        self.assertEqual(prepared[0]["metadata"]["bootstrap_group_type"], "recording")
 
     def test_blank_text_is_rejected_before_manifest_is_written(self):
         adapter = speech_recognition.NstDanishTestAdapter()

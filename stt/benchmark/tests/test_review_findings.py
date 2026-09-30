@@ -58,13 +58,14 @@ class ReviewFindingTests(unittest.TestCase):
 
     def test_sam3_decision_uses_group_interval_when_available(self):
         result = {
+            "dataset": {"name": "fleurs-da-dk-test"},
             "models": {
                 "edda": {"content_wer": 0.1, "speaker_attributed_wer": 0.2},
-                "saga2": {"content_wer": 0.2, "speaker_attributed_wer": 0.2},
+                "hviske": {"content_wer": 0.2, "speaker_attributed_wer": 0.2},
             }
         }
         pairs = [{
-            "model_a": "edda", "model_b": "saga2",
+            "model_a": "edda", "model_b": "hviske",
             "ci95_low": -0.2, "ci95_high": -0.1,
             "group_ci95_low": -0.1, "group_ci95_high": 0.02,
         }]
@@ -74,6 +75,8 @@ class ReviewFindingTests(unittest.TestCase):
 
     def test_merge_rejects_same_ids_from_a_different_dataset_revision(self):
         result = {
+            "evaluation_protocol": {"protocol_id": "test-v1"},
+            "evaluation_protocol_sha256": "f" * 64,
             "dataset": {"name": "sample", "class": "HELD-OUT-IN-DOMAIN",
                         "source_revisions": ["a" * 40]},
             "recordings": [{
@@ -110,7 +113,7 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertIn("Declared model training data overlap", report)
         self.assertIn("CoRal", report)
         self.assertIn("danish-foundation-models/edda-v0.1", report)
-        self.assertIn("model_training_data", provenance)
+        self.assertIn("evidence_relationships", provenance)
 
 
 if __name__ == "__main__":

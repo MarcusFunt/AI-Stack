@@ -48,7 +48,7 @@ def load_dataset_split(
     """Load a dataset split only at the supplied immutable revision."""
     revision = validate_commit_sha(revision)
     try:
-        from datasets import load_dataset
+        from datasets import Audio, load_dataset
     except ImportError as exc:
         raise RuntimeError(
             "Hugging Face dataset preparation needs the 'datasets' package; install "
@@ -62,8 +62,12 @@ def load_dataset_split(
             token=True,
         )
         if config:
-            return load_dataset(repo_id, config, **arguments)
-        return load_dataset(repo_id, **arguments)
+            dataset = load_dataset(repo_id, config, **arguments)
+        else:
+            dataset = load_dataset(repo_id, **arguments)
+        if "audio" in (getattr(dataset, "column_names", []) or []):
+            dataset = dataset.cast_column("audio", Audio(decode=False))
+        return dataset
     except Exception as exc:
         raise RuntimeError(
             f"Could not load {repo_id!r} split {split!r} at pinned revision {revision}. "

@@ -44,6 +44,8 @@ def _draw_deltas(
         groups: dict[str, list[int]] = {}
         for index, unit in enumerate(units):
             value = str(unit.get(group_key, "")).strip()
+            if not value and group_key == "bootstrap_group":
+                value = str(unit.get("source_recording", "")).strip()
             if value:
                 groups.setdefault(value, []).append(index)
         group_values = list(groups.values())
@@ -94,7 +96,7 @@ def paired_bootstrap_wer(
     *,
     samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
     seed: int = DEFAULT_BOOTSTRAP_SEED,
-    group_key: str = "source_recording",
+    group_key: str = "bootstrap_group",
 ) -> dict[str, Any]:
     """Return paired unit and optional source-group bootstrap deltas.
 
@@ -137,9 +139,33 @@ def paired_bootstrap_wer(
     }
     result["ci_includes_zero"] = result["ci95"][0] <= 0 <= result["ci95"][1]
 
+    group_types = {
+        str(unit.get("bootstrap_group_type", "")).strip()
+        for unit in selected if str(unit.get("bootstrap_group_type", "")).strip()
+    }
     groups = {str(unit.get(group_key, "")).strip() for unit in selected}
+    if group_key == "bootstrap_group":
+        groups = {
+            value or str(unit.get("source_recording", "")).strip()
+            for unit in selected
+            for value in [str(unit.get(group_key, "")).strip()]
+        }
     groups.discard("")
-    if len(groups) >= 2 and len(groups) < len(selected):
+    if 0 < len(groups) < len(selected):
+        group_type = next(iter(group_types)) if len(group_types) == 1 else (
+            "mixed" if group_types else "source_recording"
+        )
+        if len(groups) < 2:
+            result["group_bootstrap"] = {
+                "group_key": group_key,
+                "group_type": group_type,
+                "group_count": len(groups),
+                "status": "insufficient_groups",
+                "bootstrap_samples": samples,
+                "seed": seed + 1,
+                "ci95": None,
+            }
+            return result
         group_deltas = _draw_deltas(
             selected,
             model_a,
@@ -150,7 +176,11 @@ def paired_bootstrap_wer(
         )
         result["group_bootstrap"] = {
             "group_key": group_key,
+            "group_type": next(iter(group_types)) if len(group_types) == 1 else (
+                "mixed" if group_types else "source_recording"
+            ),
             "group_count": len(groups),
+            "status": "scored",
             "bootstrap_samples": samples,
             "seed": seed + 1,
             "ci95": [
@@ -159,5 +189,15 @@ def paired_bootstrap_wer(
             ],
         }
     else:
-        result["group_bootstrap"] = None
+        result["group_bootstrap"] = {
+            "group_key": group_key,
+            "group_type": next(iter(group_types)) if len(group_types) == 1 else (
+                "mixed" if group_types else "source_recording"
+            ),
+            "group_count": len(groups),
+            "status": "independent_units",
+            "bootstrap_samples": samples,
+            "seed": seed + 1,
+            "ci95": None,
+        }
     return result

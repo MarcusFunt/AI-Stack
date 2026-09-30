@@ -13,38 +13,12 @@ from .bootstrap import DEFAULT_BOOTSTRAP_SAMPLES, DEFAULT_BOOTSTRAP_SEED
 from .comparison import (
     dataset_info,
     dataset_summary_rows,
+    is_successful_model,
     pairwise_comparison_rows,
 )
-from .strata import sam3_stratified_metrics
-
-
-MODEL_TRAINING_DATA = {
-    "edda": {
-        "model_id": "danish-foundation-models/edda-v0.1",
-        "model_card": "https://huggingface.co/danish-foundation-models/edda-v0.1",
-        "declared_training_families": [
-            "FT Speech", "CoRal v3 read-aloud", "CoRal v3 conversation",
-            "NST Danish", "FLEURS Danish", "Common Voice 17 Danish",
-        ],
-    },
-    "saga2": {
-        "model_id": "capacit-ai/saga-2-m",
-        "model_card": "https://huggingface.co/capacit-ai/saga-2-m",
-        "declared_training_families": [
-            "FTSpeech", "CoRal read-aloud", "CoRal conversation", "NST Danish",
-            "FLEURS da_dk", "Common Voice 17 Danish",
-        ],
-    },
-    "hviske": {
-        "model_id": "syvai/hviske-v6",
-        "model_card": "https://huggingface.co/syvai/hviske-v6",
-        "declared_training_families": [
-            "FT Speech", "CoRal read-aloud", "CoRal conversation",
-            "NST Danish", "Nota", "FLEURS Danish", "Common Voice",
-        ],
-    },
-}
-
+from .evidence import MODEL_DATASET_EVIDENCE, MODEL_METADATA, model_dataset_evidence
+from .strata import metadata_stratified_metrics, sam3_stratified_metrics
+from ..datasets.provenance import file_sha256
 
 def _safe_component(value: str) -> str:
     result = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")
@@ -53,7 +27,7 @@ def _safe_component(value: str) -> str:
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = list(rows[0]) if rows else []
+    fields = list(dict.fromkeys(field for row in rows for field in row)) if rows else []
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         if fields:
@@ -68,6 +42,7 @@ def _dataset_signature(result: dict[str, Any]) -> str:
         for key in (
             "name", "class", "source_url", "source_license",
             "source_revisions", "reference_transforms", "manifest_sha256",
+            "dataset_lock_sha256",
         )
     }
     recordings = [
@@ -82,7 +57,11 @@ def _dataset_signature(result: dict[str, Any]) -> str:
         for row in sorted(result.get("recordings", []), key=lambda item: str(item.get("id", "")))
     ]
     return json.dumps(
-        {"dataset": stable_dataset_fields, "recordings": recordings},
+        {
+            "dataset": stable_dataset_fields,
+            "evaluation_protocol_sha256": result.get("evaluation_protocol_sha256"),
+            "recordings": recordings,
+        },
         sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     )
 
@@ -101,6 +80,17 @@ def _merge_runs(results_paths: list[Path]) -> list[dict[str, Any]]:
             continue
 
         current = grouped[key]
+        current_protocol = current.get("evaluation_protocol_sha256")
+        next_protocol = payload.get("evaluation_protocol_sha256")
+        if not current_protocol or not next_protocol:
+            raise ValueError(
+                f"result files for {key} are missing an evaluation protocol SHA-256"
+            )
+        if current_protocol != next_protocol:
+            raise ValueError(
+                f"result files for {key} have an evaluation protocol mismatch "
+                f"({current_protocol} != {next_protocol})"
+            )
         if _dataset_signature(current) != _dataset_signature(payload):
             raise ValueError(
                 f"result files for {key} have incompatible dataset provenance or references"
@@ -128,8 +118,16 @@ def _pair_for_candidate(
         group_low, group_high = row.get("group_ci95_low"), row.get("group_ci95_high")
         if group_low is not None and group_high is not None:
             low, high = float(group_low), float(group_high)
-            interval_kind = "recording-group"
+            group_unit = row.get("group_unit") or "source_recording"
+            interval_kind = "speaker-group" if group_unit == "speaker" else "recording-group"
         else:
+            group_count = row.get("group_count")
+            if (
+                row.get("group_unit")
+                and group_count is not None
+                and int(group_count) < int(row.get("unit_count", 0))
+            ):
+                return None
             low, high = float(row["ci95_low"]), float(row["ci95_high"])
             interval_kind = "paired"
         if row["model_a"] == model:
@@ -141,16 +139,45 @@ def _pair_for_candidate(
 def _recommend_for_suite(
     result: dict[str, Any], pair_rows: list[dict[str, Any]], *, label: str
 ) -> str:
-    models = result.get("models", {})
+    successful = {
+        alias: model for alias, model in result.get("models", {}).items()
+        if is_successful_model(model)
+    }
+    if not successful:
+        return f"{label}: no successful model results are available."
+    models = {
+        alias: model for alias, model in successful.items()
+        if model_dataset_evidence(result, alias)["decisive"]
+    }
+    non_decisive = sorted(set(successful) - set(models))
+    if len(non_decisive) == 1:
+        excluded_note = (
+            f" {non_decisive[0]} is reported but excluded from model selection because "
+            "its evidence is non-decisive."
+        )
+    elif non_decisive:
+        excluded_note = (
+            f" {', '.join(non_decisive)} are reported but excluded from model selection "
+            "because their evidence is non-decisive."
+        )
+    else:
+        excluded_note = ""
     if not models:
-        return f"{label}: no model results are available."
+        candidates = ", ".join(non_decisive)
+        return (
+            f"{label}: no decisive candidate evidence is available; scores remain visible, "
+            f"but no model is selected ({candidates})."
+        )
     ranking = sorted(
         models,
         key=lambda model: float(models[model].get("content_wer", float("inf"))),
     )
     best = ranking[0]
     if len(ranking) == 1:
-        return f"{label}: {best} is the only evaluated model; this is not a comparison."
+        return (
+            f"{label}: {best} is the only evaluated model with decisive evidence; "
+            f"this is not a comparison.{excluded_note}"
+        )
 
     runner_up = ranking[1]
     interval = _pair_for_candidate(pair_rows, best, runner_up)
@@ -158,30 +185,33 @@ def _recommend_for_suite(
         return (
             f"{label}: {best} has lower content WER than {runner_up}; "
             f"{interval[2]} 95% CI for WER difference is "
-            f"[{interval[0]:.3%}, {interval[1]:.3%}]."
+            f"[{interval[0]:.3%}, {interval[1]:.3%}].{excluded_note}"
         )
     if interval and interval[0] > 0:
         return (
             f"{label}: the {interval[2]} 95% CI for the {best} minus {runner_up} "
             f"WER difference is entirely above zero "
             f"[{interval[0]:.3%}, {interval[1]:.3%}], favoring {runner_up} "
-            f"despite {best} having the lower observed content WER."
+            f"despite {best} having the lower observed content WER.{excluded_note}"
         )
 
     best_speaker = models[best].get("speaker_attributed_wer")
     other_speaker = models[runner_up].get("speaker_attributed_wer")
-    if best_speaker is not None and other_speaker is not None and best_speaker != other_speaker:
-        favored = best if best_speaker < other_speaker else runner_up
-        return (
-            f"{label}: content WER does not separate {best} and {runner_up}; "
-            f"speaker-attributed WER favors {favored} ({best_speaker:.3%} vs {other_speaker:.3%})."
-        )
+    speaker_note = (
+        f" Speaker-attributed WER is {best_speaker:.3%} vs {other_speaker:.3%} "
+        "and is descriptive only."
+        if best_speaker is not None and other_speaker is not None else ""
+    )
     if interval:
         return (
             f"{label}: no unique winner between {best} and {runner_up}; "
             f"the {interval[2]} 95% CI [{interval[0]:.3%}, {interval[1]:.3%}] includes zero."
+            f"{speaker_note}{excluded_note}"
         )
-    return f"{label}: {best} has the lowest observed content WER, but paired uncertainty is unavailable."
+    return (
+        f"{label}: no unique winner between {best} and {runner_up}; paired uncertainty is unavailable."
+        f"{speaker_note}{excluded_note}"
+    )
 
 
 def _decision_lines(runs: list[dict[str, Any]], pair_rows: list[dict[str, Any]]) -> list[str]:
@@ -266,7 +296,10 @@ def generate_report(
             run, samples=bootstrap_samples, seed=seed
         )
     ]
-    strata_rows = [row for run in runs for row in sam3_stratified_metrics(run)]
+    strata_rows = [
+        row for run in runs
+        for row in (sam3_stratified_metrics(run) + metadata_stratified_metrics(run))
+    ]
 
     summary_path = output_dir / "dataset-summary.csv"
     pairwise_path = output_dir / "pairwise-comparison.csv"
@@ -278,8 +311,29 @@ def generate_report(
     provenance = {
         "schema_version": 1,
         "bootstrap": {"samples": bootstrap_samples, "seed": seed, "confidence": 0.95},
-        "model_training_data": MODEL_TRAINING_DATA,
-        "inputs": [str(Path(path).resolve()) for path in result_paths],
+        "evidence_relationships": {
+            dataset_info(run).get("name"): {
+                alias: model_dataset_evidence(run, alias)
+                for alias in run.get("models", {})
+            }
+            for run in runs
+        },
+        "evaluation_protocols": [
+            {
+                "dataset": dataset_info(run).get("name"),
+                "protocol": run.get("evaluation_protocol"),
+                "sha256": run.get("evaluation_protocol_sha256"),
+            }
+            for run in runs
+        ],
+        "inputs": [
+            {
+                "logical_name": Path(path).name,
+                "source_path": str(Path(path).resolve()),
+                "sha256": file_sha256(Path(path)),
+            }
+            for path in result_paths
+        ],
         "datasets": [
             {
                 "name": dataset_info(run).get("name"),
@@ -288,8 +342,13 @@ def generate_report(
                 "source_license": dataset_info(run).get("source_license"),
                 "source_revisions": dataset_info(run).get("source_revisions", []),
                 "dataset_lock": dataset_info(run).get("dataset_lock"),
+                "dataset_lock_sha256": dataset_info(run).get("dataset_lock_sha256"),
+                "dataset_lock_entry": dataset_info(run).get("dataset_lock_entry"),
                 "manifest": run.get("manifest"),
                 "manifest_sha256": dataset_info(run).get("manifest_sha256"),
+                "reference_semantics": dataset_info(run).get("reference_semantics"),
+                "test_split_status": dataset_info(run).get("test_split_status"),
+                "speaker_split_relation": dataset_info(run).get("speaker_split_relation"),
                 "model_revisions": {
                     alias: model.get("revision") for alias, model in run.get("models", {}).items()
                 },
@@ -316,12 +375,14 @@ def generate_report(
         "",
         "## Dataset and model results",
         "",
-        "| Dataset | Evidence class | Model | Clips | Speakers | Ref words | Content WER | Verbatim WER | CER | Speaker WER | RTF | DER .25 | Strict DER |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Dataset | Evidence class | Model | Relationship | Decisive | WER interpretation | Clips | Speakers | Ref words | Content WER | Verbatim WER | CER | Speaker WER | RTF | DER .25 | Strict DER |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in summary_rows:
         lines.append(
             f"| {row['dataset']} | {row['dataset_class']} | {row['model']} | "
+            f"{row['evidence_status']} | {str(row['evidence_decisive']).lower()} | "
+            f"{row['reference_semantics']} | "
             f"{row['recording_count']} | {row['speaker_count']} | "
             f"{row['reference_word_count'] if row['reference_word_count'] is not None else 'n/a'} | "
             f"{percent(row['content_wer'])} | {percent(row['verbatim_wer'])} | "
@@ -329,6 +390,28 @@ def generate_report(
             f"{row['rtf'] if row['rtf'] is not None else 'n/a'} | "
             f"{percent(row['global_der'])} | {percent(row['strict_der'])} |"
         )
+    failed_models = [
+        (dataset_info(run).get("name", "unknown"), alias, model)
+        for run in runs
+        for alias, model in run.get("models", {}).items()
+        if not is_successful_model(model)
+    ]
+    if failed_models:
+        lines.extend([
+            "",
+            "## Failed candidates",
+            "",
+            "These runs did not produce scored ASR predictions and are excluded from rankings and paired comparisons.",
+            "",
+            "| Dataset | Model | Failure |",
+            "|---|---|---|",
+        ])
+        for dataset, alias, model in failed_models:
+            failure = model.get("failure") or {}
+            detail = ": ".join(
+                value for value in (failure.get("class"), failure.get("message")) if value
+            ) or "unspecified failure"
+            lines.append(f"| {dataset} | {alias} | {detail} |")
     lines.extend([
         "",
         "`dataset-summary.csv` also records total audio, RTF, failures, OOMs, empty outputs, silence-hallucination counts when available, peak VRAM, and DER miss/false-alarm/confusion totals.",
@@ -336,29 +419,39 @@ def generate_report(
     ])
     training_rows = [
         "",
-        "## Declared model training data overlap",
+        "## Declared model training data overlap and dataset evidence",
         "",
-        "The listed families come from published model cards. Held-out splits remain in-domain evidence; pretraining exposure cannot be ruled out from these declarations.",
+        "Relationships are model-by-dataset declarations. Recommendation logic uses only successful candidates marked decisive; all scores remain visible. Model revisions identify the exact evaluated checkpoint.",
         "",
-        "| Model | Model card | Declared training data families |",
-        "|---|---|---|",
+        "| Model | Dataset | Status | Decisive | Evidence note |",
+        "|---|---|---|---:|---|",
     ]
-    for alias, details in MODEL_TRAINING_DATA.items():
-        families = ", ".join(details["declared_training_families"])
-        training_rows.append(
-            f"| {alias} | [{details['model_id']}]({details['model_card']}) | {families} |"
-        )
+    dataset_names = sorted({
+        dataset for relationships in MODEL_DATASET_EVIDENCE.values()
+        for dataset in relationships
+    })
+    for alias, details in MODEL_METADATA.items():
+        for dataset_name in dataset_names:
+            relationship = MODEL_DATASET_EVIDENCE.get(alias, {}).get(dataset_name, {
+                "status": "unknown", "decisive": False,
+                "note": "No candidate-specific evidence is recorded for this dataset.",
+            })
+            training_rows.append(
+                f"| [{alias}]({details['model_card']}) | {dataset_name} | "
+                f"{relationship['status']} | {str(relationship['decisive']).lower()} | "
+                f"{relationship['note']} |"
+            )
     training_rows.extend([
         "",
-        "No declared candidate fine-tuning overlap was found for Sam3; base-model pretraining overlap cannot be ruled out. The synthetic K=3 suite reuses audio-source families that overlap candidate training data, so its WER is not decisive.",
+        "No declared candidate fine-tuning overlap was found for Sam3; base-model pretraining exposure is unknown. The synthetic K=3 suite reuses audio-source families that overlap candidate training data, so its WER is not decisive.",
         "",
     ])
     lines.extend(training_rows)
     lines.extend(["", "## Pairwise uncertainty", ""])
     if pair_rows:
         lines.extend([
-            "| Dataset | Model A | Model B | Δ WER | Paired 95% CI | Source-group 95% CI |",
-            "|---|---|---|---:|---:|---:|",
+            "| Dataset | Model A | Model B | Δ WER | Paired 95% CI | Grouped by | Grouped 95% CI |",
+            "|---|---|---|---:|---:|---|---:|",
         ])
         for row in pair_rows:
             group_ci = (
@@ -368,7 +461,8 @@ def generate_report(
             lines.append(
                 f"| {row['dataset']} | {row['model_a']} | {row['model_b']} | "
                 f"{row['delta_wer_a_minus_b']:.3%} | "
-                f"[{row['ci95_low']:.3%}, {row['ci95_high']:.3%}] | {group_ci} |"
+                f"[{row['ci95_low']:.3%}, {row['ci95_high']:.3%}] | "
+                f"{row.get('group_unit') or 'n/a'} | {group_ci} |"
             )
     else:
         lines.append("No within-suite model pairs were available.")
@@ -385,9 +479,14 @@ def generate_report(
         "",
         "Diarization is evaluated separately from ASR. Standard DER uses a 0.25 s collar, strict DER uses a 0 s collar, and overlap/non-overlap DER uses the same speaker mapping selected over each full recording.",
         "",
-        "Dataset-specific contamination and provenance labels are in `provenance.json`.",
+        "Dataset-specific contamination and provenance labels are in `provenance.json`. Sam3 content WER is chronological single-stream WER, so concurrent speech is not scored with an overlap-aware ordering metric.",
         "",
     ])
+    if any(dataset_info(run).get("name") == "nst-da-test" for run in runs):
+        lines.extend([
+            "NST references are utterance-held-out; speakers overlap the broader training corpus, so the suite does not establish speaker-independent generalization.",
+            "",
+        ])
     report_path = output_dir / "report.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return {

@@ -6,6 +6,11 @@ import statistics
 from collections import defaultdict
 from typing import Any
 
+from .comparison import is_successful_model
+
+
+MIN_REFERENCE_WORDS = 1000
+
 
 def _overlap_bucket(value: float) -> str:
     if value <= 0.02:
@@ -61,6 +66,8 @@ def sam3_stratified_metrics(result: dict[str, Any]) -> list[dict[str, Any]]:
         der_error = sum(float(der.get(key, 0.0)) for key in ("miss", "false_alarm", "confusion"))
         der_reference = float(der.get("reference_speaker_time", 0.0))
         for model, model_result in result.get("models", {}).items():
+            if not is_successful_model(model_result):
+                continue
             scores = model_result.get("per_recording", {}).get(record_id, {})
             errors = int(scores.get("content_errors", 0))
             words = int(scores.get("content_reference_words", 0))
@@ -96,3 +103,67 @@ def sam3_stratified_metrics(result: dict[str, Any]) -> list[dict[str, Any]]:
             "dominant_speaker_over_70pct": bucket == ">70% dominant" if dimension == "speaker_balance" else None,
         })
     return rows
+
+
+def metadata_stratified_metrics(
+    result: dict[str, Any], *, minimum_reference_words: int = MIN_REFERENCE_WORDS
+) -> list[dict[str, Any]]:
+    """Aggregate single-speaker WER over metadata strata with minimum-n labels."""
+    dataset = result.get("dataset", {})
+    if dataset.get("name") == "samtalebank-sam3":
+        return []
+    grouped: dict[tuple[str, str, str], dict[str, int]] = defaultdict(
+        lambda: {"recordings": 0, "content_errors": 0, "reference_words": 0}
+    )
+    for record in result.get("recordings", []):
+        metadata = record.get("metadata", {}) or {}
+        dimensions = {
+            str(key): str(value).strip()
+            for key, value in (metadata.get("strata", {}) or {}).items()
+            if str(value).strip()
+        }
+        speaker = str(metadata.get("speaker_id", "")).strip()
+        if not speaker and metadata.get("bootstrap_group_type") == "speaker":
+            speaker = str(metadata.get("bootstrap_group", "")).strip()
+        if speaker:
+            dimensions["speaker"] = speaker
+        record_id = str(record.get("id", ""))
+        for alias, model in result.get("models", {}).items():
+            if not is_successful_model(model):
+                continue
+            scores = model.get("per_recording", {}).get(record_id)
+            if not scores or scores.get("content_errors") is None:
+                continue
+            errors = int(scores["content_errors"])
+            words = int(scores.get("content_reference_words", 0))
+            for dimension, bucket in dimensions.items():
+                totals = grouped[(dimension, bucket, alias)]
+                totals["recordings"] += 1
+                totals["content_errors"] += errors
+                totals["reference_words"] += words
+    return [
+        {
+            "dataset": dataset.get("name", "unknown"),
+            "dimension": dimension,
+            "bucket": bucket,
+            "model": model,
+            "recordings": totals["recordings"],
+            "content_errors": totals["content_errors"],
+            "reference_words": totals["reference_words"],
+            "content_wer": (
+                totals["content_errors"] / totals["reference_words"]
+                if totals["reference_words"] else None
+            ),
+            "der_error_s": None,
+            "der_reference_speaker_time_s": None,
+            "der": None,
+            "turn_rate_median_reference_duration_s": None,
+            "dominant_speaker_over_70pct": None,
+            "status": (
+                "included" if totals["reference_words"] >= minimum_reference_words
+                else "insufficient_n"
+            ),
+            "minimum_reference_words": minimum_reference_words,
+        }
+        for (dimension, bucket, model), totals in sorted(grouped.items())
+    ]

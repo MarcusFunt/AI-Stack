@@ -21,6 +21,9 @@ from .metrics import (
 )
 from .models import MODEL_SPECS, load_adapter
 from .revisions import parse_revision_overrides
+from .evaluation_protocol import evaluation_protocol
+from .datasets.provenance import canonical_json_sha256, file_sha256
+from .analysis.evidence import model_dataset_evidence
 
 
 def package_versions() -> dict[str, str]:
@@ -102,22 +105,42 @@ def _dataset_info(records: list[dict], manifest_path: Path) -> dict:
     metadata = [record.get("metadata", {}) for record in records]
     values = {
         field: sorted({str(item.get(field, "")).strip() for item in metadata if item.get(field)})
-        for field in ("source_url", "source_license", "source_revision", "reference_transform")
+        for field in (
+            "source_url", "source_license", "source_revision", "reference_transform",
+            "reference_semantics", "test_split_status", "speaker_split_relation",
+        )
     }
     lock_candidate = manifest_path.resolve().parents[2] / "dataset-lock.json"
+    lock_payload = (
+        json.loads(lock_candidate.read_text(encoding="utf-8"))
+        if lock_candidate.is_file() else None
+    )
+    dataset_name = next(iter(names), "private-manifest")
+    lock_entry = (
+        (lock_payload or {}).get("datasets", {}).get(dataset_name)
+        if isinstance(lock_payload, dict) else None
+    )
+    reference_semantics = values["reference_semantics"][0] if values["reference_semantics"] else (
+        "chronological_single_stream" if dataset_name == "samtalebank-sam3" else "record_transcript"
+    )
     return {
-        "name": next(iter(names), "private-manifest"),
+        "name": dataset_name,
         "class": next(iter(classes), "PRIVATE-USER-PROVIDED"),
         "source_url": values["source_url"][0] if values["source_url"] else None,
         "source_license": values["source_license"][0] if values["source_license"] else None,
         "source_revisions": values["source_revision"],
         "reference_transforms": values["reference_transform"],
+        "reference_semantics": reference_semantics,
+        "test_split_status": values["test_split_status"][0] if values["test_split_status"] else None,
+        "speaker_split_relation": values["speaker_split_relation"][0] if values["speaker_split_relation"] else None,
         "manifest": str(manifest_path),
         "manifest_sha256": (
             hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             if manifest_path.is_file() else None
         ),
         "dataset_lock": str(lock_candidate) if lock_candidate.is_file() else None,
+        "dataset_lock_sha256": file_sha256(lock_candidate) if lock_candidate.is_file() else None,
+        "dataset_lock_entry": lock_entry,
     }
 
 
@@ -375,8 +398,22 @@ def main() -> int:
     )
     speaker_count_rows = sum(bool(record["segments"]) for record in records)
 
+    reference_semantics = next(
+        (record.get("metadata", {}).get("reference_semantics") for record in records
+         if record.get("metadata", {}).get("reference_semantics")),
+        "chronological_single_stream" if any(
+            record.get("dataset") == "samtalebank-sam3" for record in records
+        ) else "record_transcript",
+    )
+    protocol = evaluation_protocol(
+        args.collar,
+        reference_semantics,
+        speaker_attributed=not args.no_speaker_attributed,
+    )
     results = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "evaluation_protocol": protocol,
+        "evaluation_protocol_sha256": canonical_json_sha256(protocol),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "manifest": str(args.manifest),
         "total_audio_s": total_audio_s,
@@ -439,6 +476,7 @@ def main() -> int:
     for alias in args.models:
         adapter = None
         failure_class = None
+        failure_message = None
         oom_failure = False
         elapsed = 0.0
         try:
@@ -451,6 +489,7 @@ def main() -> int:
             except Exception as exc:
                 hypotheses = [""] * len(records)
                 failure_class = type(exc).__name__
+                failure_message = str(exc)
                 oom_failure = _is_oom_error(exc)
             else:
                 started = time.perf_counter()
@@ -465,8 +504,47 @@ def main() -> int:
                 except Exception as exc:
                     hypotheses = [""] * len(records)
                     failure_class = type(exc).__name__
+                    failure_message = str(exc)
                     oom_failure = _is_oom_error(exc)
                 elapsed = time.perf_counter() - started
+
+            if failure_class:
+                results["models"][alias] = {
+                    "repo": MODEL_SPECS[alias]["repo"],
+                    "license": MODEL_SPECS[alias]["license"],
+                    "revision": getattr(adapter, "revision", None),
+                    "requested_revision": requested_revisions.get(alias),
+                    "status": "failed",
+                    "failure": {"class": failure_class, "message": failure_message or ""},
+                    "content_wer": None,
+                    "content_errors": None,
+                    "content_reference_words": None,
+                    "verbatim_wer": None,
+                    "verbatim_errors": None,
+                    "verbatim_reference_words": None,
+                    "cer": None,
+                    "cer_errors": None,
+                    "cer_reference_characters": None,
+                    "speaker_attributed_wer": None,
+                    "elapsed_s": elapsed,
+                    "rtf": None,
+                    "failure_count": len(records),
+                    "oom_count": len(records) if oom_failure else 0,
+                    "empty_output_count": len(records),
+                    "hallucination_on_silence_count": None,
+                    "peak_vram_mb": None,
+                    "per_recording": {
+                        record["id"]: {
+                            "hypothesis": "",
+                            "scored": False,
+                            "failure_class": failure_class,
+                            "failure_message": failure_message or "",
+                        }
+                        for record in records
+                    },
+                }
+                continue
+
             content_stats = []
             verbatim_stats = []
             cer_stats = []
@@ -518,6 +596,8 @@ def main() -> int:
                 "license": MODEL_SPECS[alias]["license"],
                 "revision": getattr(adapter, "revision", None),
                 "requested_revision": requested_revisions.get(alias),
+                "status": "success",
+                "failure": None,
                 "content_wer": content_total.rate,
                 "content_errors": content_total.errors,
                 "content_reference_words": content_total.reference_units,
@@ -553,6 +633,8 @@ def main() -> int:
                 adapter.unload()
 
     der_values = [item["der"] for item in der_by_id.values()]
+    for alias, model_result in results["models"].items():
+        model_result["evidence"] = model_dataset_evidence(results, alias)
     results["diarization"]["macro_der"] = (
         sum(der_values) / len(der_values) if der_values else None
     )
@@ -567,9 +649,16 @@ def main() -> int:
         der_error_time / der_reference_time if der_reference_time else None
     )
     ranking = sorted(
-        results["models"],
+        (
+            alias for alias, row in results["models"].items()
+            if row.get("status") == "success" and row.get("content_wer") is not None
+        ),
         key=lambda alias: results["models"][alias]["content_wer"],
     )
+    failed_aliases = [
+        alias for alias, row in results["models"].items()
+        if row.get("status") == "failed"
+    ]
     results["ranking_by_content_wer"] = ranking
     (args.output / "results.json").write_text(
         json.dumps(results, indent=2, ensure_ascii=False),
@@ -584,11 +673,14 @@ def main() -> int:
             [
                 "rank",
                 "model",
+                "status",
                 "content_wer",
                 "verbatim_wer",
                 "cer",
                 "speaker_attributed_wer",
                 "rtf",
+                "failure_class",
+                "failure_message",
             ]
         )
         for rank, alias in enumerate(ranking, start=1):
@@ -597,13 +689,24 @@ def main() -> int:
                 [
                     rank,
                     alias,
+                    row.get("status", "success"),
                     row["content_wer"],
                     row["verbatim_wer"],
                     row["cer"],
                     row.get("speaker_attributed_wer"),
                     row["rtf"],
+                    None,
+                    None,
                 ]
             )
+        for alias in failed_aliases:
+            row = results["models"][alias]
+            writer.writerow([
+                "", alias, "failed", row.get("content_wer"), row.get("verbatim_wer"),
+                row.get("cer"), row.get("speaker_attributed_wer"), row.get("rtf"),
+                (row.get("failure") or {}).get("class"),
+                (row.get("failure") or {}).get("message"),
+            ])
 
     lines = [
         "# Danish STT benchmark",
@@ -615,29 +718,44 @@ def main() -> int:
             else "Nemotron DER: no reference segments supplied"
         ),
         "",
-        "| Rank | Model | Content WER | Verbatim WER | CER | Speaker WER | RTF |",
-        "|---:|---|---:|---:|---:|---:|---:|",
     ]
-    for rank, alias in enumerate(ranking, start=1):
-        row = results["models"][alias]
-        speaker = row.get("speaker_attributed_wer")
-        rtf = row.get("rtf")
-        rtf_cell = f"{rtf:.3f}" if rtf is not None else "n/a"
-        if speaker is None:
-            speaker_cell = "n/a"
-        else:
-            speaker_cell = f"{speaker:.2%}"
-        lines.append(
-            f"| {rank} | {alias} | {row['content_wer']:.2%} | "
-            f"{row['verbatim_wer']:.2%} | {row['cer']:.2%} | "
-            f"{speaker_cell} | {rtf_cell} |"
-        )
+    if ranking:
+        lines.extend([
+            "| Rank | Model | Content WER | Verbatim WER | CER | Speaker WER | RTF |",
+            "|---:|---|---:|---:|---:|---:|---:|",
+        ])
+        for rank, alias in enumerate(ranking, start=1):
+            row = results["models"][alias]
+            speaker = row.get("speaker_attributed_wer")
+            rtf = row.get("rtf")
+            rtf_cell = f"{rtf:.3f}" if rtf is not None else "n/a"
+            speaker_cell = f"{speaker:.2%}" if speaker is not None else "n/a"
+            lines.append(
+                f"| {rank} | {alias} | {row['content_wer']:.2%} | "
+                f"{row['verbatim_wer']:.2%} | {row['cer']:.2%} | "
+                f"{speaker_cell} | {rtf_cell} |"
+            )
+    else:
+        lines.append("No successful model produced scored results.")
+    if failed_aliases:
+        lines.extend([
+            "",
+            "## Failed candidates",
+            "",
+            "Failed runs are unscored and excluded from ranking.",
+            "",
+            "| Model | Failure |",
+            "|---|---|",
+        ])
+        for alias in failed_aliases:
+            failure = results["models"][alias]["failure"]
+            lines.append(f"| {alias} | {failure['class']}: {failure['message']} |")
 
     (args.output / "summary.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
     print("\n".join(lines))
-    return 0
+    return 1 if failed_aliases else 0
 
 
 if __name__ == "__main__":

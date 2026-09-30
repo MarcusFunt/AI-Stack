@@ -13,7 +13,9 @@ from .base import DatasetAdapter, DatasetSpec
 from .audio import write_audio_16k_mono as _write_audio
 from .huggingface import load_dataset_split, resolve_dataset_revision, validate_commit_sha
 from .manifest import write_manifest
-from .provenance import build_lock_entry, file_sha256, load_lock, update_lock
+from .provenance import (
+    build_lock_entry, file_sha256, load_lock, preparation_code_provenance, update_lock,
+)
 
 
 DATASET_ID = "syvai/danish-diarization-bench"
@@ -191,6 +193,7 @@ def prepare_diarization_k3(
     )
     lock_root = Path(lock_path).resolve().parent
     lock_files = prepared_files + [manifest_path, validation_path]
+    preparation_code = preparation_code_provenance()
     entry = build_lock_entry(
         dataset=DATASET_NAME,
         dataset_class="CONTROLLED-SYNTHETIC",
@@ -199,7 +202,8 @@ def prepare_diarization_k3(
         revision=pinned_revision,
         files=lock_files,
         root=lock_root,
-        preparation_code_git_sha=_git_revision(),
+        preparation_code_git_sha=preparation_code["git_sha"],
+        preparation_code=preparation_code,
         reference_transform=REFERENCE_TRANSFORM,
     )
     update_lock(lock_path, entry)

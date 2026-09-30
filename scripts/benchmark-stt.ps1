@@ -3,6 +3,9 @@
 param(
   [string]$Manifest = "",
   [string]$Output = "",
+  [string]$BenchmarkDataRoot = "",
+  [string]$CodeDirectory = "",
+  [switch]$UseExistingStack,
   [string[]]$Models = @("edda","saga2","hviske"),
   [ValidateRange(1,16)][int]$BatchSize = 2,
   [ValidateRange(1,10)][int]$BeamSize = 5,
@@ -13,8 +16,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$BenchRoot = Join-Path $Root "data\stt-benchmark"
+$BenchRoot = if($BenchmarkDataRoot) {
+  [System.IO.Path]::GetFullPath($BenchmarkDataRoot)
+} else {
+  Join-Path $Root "data\stt-benchmark"
+}
 if(-not (Test-Path $BenchRoot)) { New-Item -ItemType Directory -Path $BenchRoot | Out-Null }
+$BenchRoot = (Resolve-Path $BenchRoot).Path
 function Assert-UnderBenchmarkRoot([string]$Path, [string]$Label) {
   $rootPrefix = $BenchRoot.TrimEnd("\") + "\"
   if(-not $Path.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -34,6 +42,10 @@ if(-not $Output) {
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 $Output = (Resolve-Path $Output).Path
 Assert-UnderBenchmarkRoot $Output "Output"
+if($CodeDirectory) {
+  $CodeDirectory = (Resolve-Path $CodeDirectory).Path
+  Assert-UnderBenchmarkRoot $CodeDirectory "CodeDirectory"
+}
 
 function To-ContainerPath([string]$Path) {
   $relative = $Path.Substring($BenchRoot.Length).TrimStart("\")
@@ -46,8 +58,10 @@ function Invoke-Supervisor([string]$Method, [string]$Path, [int]$Timeout = 600) 
 }
 
 Set-Location $Root
-& (Join-Path $PSScriptRoot "ai.ps1") start gateway | Out-Null
-if($LASTEXITCODE -ne 0) { throw "failed to start AI-Stack control plane" }
+if(-not $UseExistingStack) {
+  & (Join-Path $PSScriptRoot "ai.ps1") start gateway | Out-Null
+  if($LASTEXITCODE -ne 0) { throw "failed to start AI-Stack control plane" }
+}
 & docker inspect ai-stack-stt 2>$null | Out-Null
 if($LASTEXITCODE -ne 0) {
   throw "ai-stack-stt has not been created. Run .\scripts\ai.ps1 create first."
@@ -60,8 +74,13 @@ try {
   $acquired = $true
   & docker exec ai-stack-stt python -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/internal/benchmark/unload',method='POST'),timeout=30).read()"
   if($LASTEXITCODE -ne 0) { throw "failed to unload the resident faster-whisper model" }
-  $args = @(
-    "exec","ai-stack-stt","python","-m","benchmark.runner",
+  $containerCodeDirectory = if($CodeDirectory) { To-ContainerPath $CodeDirectory } else { $null }
+  $args = @("exec")
+  if($containerCodeDirectory) {
+    $args += @("-w",$containerCodeDirectory,"-e",("PYTHONPATH=" + $containerCodeDirectory))
+  }
+  $args += @(
+    "ai-stack-stt","python","-m","benchmark.runner",
     "--manifest",(To-ContainerPath $Manifest),
     "--output",(To-ContainerPath $Output),
     "--batch-size",$BatchSize,
@@ -70,16 +89,7 @@ try {
     "--models"
   ) + $Models
   foreach($item in $Revision) {
-    if($item -notmatch '^[A-Za-z0-9_-]+=[^=]+  & docker @args
-  if($LASTEXITCODE -ne 0) { throw "STT benchmark failed with exit code $LASTEXITCODE" }
-} finally {
-  if($acquired) {
-    try { Invoke-Supervisor "POST" ("/release/stt?lease_id=" + $leaseId) 60 | Out-Null }
-    catch { Write-Warning ("Failed to release STT benchmark lease: " + $_) }
-  }
-}
-Write-Output ("Benchmark results: " + $Output)
-) {
+    if($item -notmatch '^[A-Za-z0-9_-]+=[^=]+$') {
       throw "Invalid -Revision '$item'. Expected alias=revision."
     }
     $args += @("--revision", $item)

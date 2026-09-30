@@ -18,7 +18,7 @@ from typing import Any, Iterable
 from .base import DatasetAdapter, DatasetSpec
 from .chat import parse_chat_file
 from .manifest import write_manifest
-from .provenance import build_lock_entry, file_sha256, update_lock
+from .provenance import build_lock_entry, file_sha256, preparation_code_provenance, update_lock
 
 
 def _validated_segments(segments: Iterable[dict]) -> list[dict]:
@@ -515,6 +515,9 @@ def prepare_samtalebank(
             ]
             metadata = {
                 **window["metadata"],
+                "bootstrap_group": recording_rel,
+                "bootstrap_group_type": "source_recording",
+                "reference_semantics": "chronological_single_stream",
                 "source_license": source_license,
                 "source_url": source_url,
                 "source_hash": source_hash,
@@ -565,6 +568,7 @@ def prepare_samtalebank(
     )
     lock_root = lock_path.resolve().parent
     lock_files = [path for path in set(prepared_files + [manifest_path, validation_path]) if path.is_file()]
+    preparation_code = preparation_code_provenance()
     entry = build_lock_entry(
         dataset="samtalebank-sam3",
         dataset_class="PRIMARY-INDEPENDENTISH",
@@ -574,7 +578,8 @@ def prepare_samtalebank(
         revision=_source_revision(list(set(all_source_files)), source_root),
         files=lock_files,
         root=lock_root,
-        preparation_code_git_sha=_git_revision(),
+        preparation_code_git_sha=preparation_code["git_sha"],
+        preparation_code=preparation_code,
         reference_transform="talkbank-ca-v1",
     )
     entry["source_files_relative_to"] = "SourcePath"

@@ -4,13 +4,19 @@ param(
   [ValidateSet("samtalebank-sam3", "diarization-k3", "coral-conversation-test", "nst-da-test", "fleurs-da-dk-test", "danpass-dialogue")][string]$Suite = "samtalebank-sam3",
   [string]$SourcePath = "",
   [string]$OutputDirectory = "",
+  [string]$BenchmarkDataRoot = "",
+  [string]$LockPath = "",
   [int]$Seed = 20260930,
   [string]$Revision = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$BenchmarkRoot = Join-Path $Root "data\stt-benchmark"
+$BenchmarkRoot = if($BenchmarkDataRoot) {
+  [System.IO.Path]::GetFullPath($BenchmarkDataRoot)
+} else {
+  Join-Path $Root "data\stt-benchmark"
+}
 if(-not (Test-Path $BenchmarkRoot)) {
   New-Item -ItemType Directory -Force -Path $BenchmarkRoot | Out-Null
 }
@@ -18,14 +24,21 @@ if(-not $OutputDirectory) {
   $OutputDirectory = Join-Path $BenchmarkRoot ("prepared\" + $Suite)
 }
 if(-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
-  $OutputDirectory = Join-Path $Root $OutputDirectory
+  $OutputDirectory = Join-Path $BenchmarkRoot $OutputDirectory
 }
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $RootPrefix = [System.IO.Path]::GetFullPath($BenchmarkRoot).TrimEnd("\") + "\"
 if(-not $OutputDirectory.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
   throw "OutputDirectory must live under $BenchmarkRoot."
 }
-$LockPath = Join-Path $BenchmarkRoot "dataset-lock.json"
+if(-not $LockPath) { $LockPath = Join-Path $BenchmarkRoot "dataset-lock.json" }
+if(-not [System.IO.Path]::IsPathRooted($LockPath)) {
+  $LockPath = Join-Path $BenchmarkRoot $LockPath
+}
+$LockPath = [System.IO.Path]::GetFullPath($LockPath)
+if(-not $LockPath.StartsWith($RootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "LockPath must live under $BenchmarkRoot."
+}
 $PythonArgs = @(
   "-m", "stt.benchmark.datasets.prepare",
   "--suite", $Suite,

@@ -60,25 +60,40 @@ def _sam3_result():
 
 
 class AnalysisReportTests(unittest.TestCase):
+    def test_analysis_input_hash_changes_when_result_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "results.json"
+            input_path.write_text(json.dumps({"dataset": {"name": "first"}, "models": {}}), encoding="utf-8")
+            first = generate_report([input_path], root / "report-a")
+            first_provenance = json.loads(first["provenance"].read_text(encoding="utf-8"))
+            input_path.write_text(json.dumps({"dataset": {"name": "second"}, "models": {}}), encoding="utf-8")
+            second = generate_report([input_path], root / "report-b")
+            second_provenance = json.loads(second["provenance"].read_text(encoding="utf-8"))
+        self.assertEqual(first_provenance["inputs"][0]["logical_name"], "results.json")
+        self.assertEqual(first_provenance["inputs"][0]["source_path"], str(input_path.resolve()))
+        self.assertNotEqual(first_provenance["inputs"][0]["sha256"], second_provenance["inputs"][0]["sha256"])
+
     def test_recommendation_reports_when_interval_favors_runner_up(self):
         result = {
+            "dataset": {"name": "fleurs-da-dk-test"},
             "models": {
                 "edda": {"content_wer": 0.1},
-                "saga2": {"content_wer": 0.2},
+                "hviske": {"content_wer": 0.2},
             }
         }
         pair_rows = [{
             "model_a": "edda",
-            "model_b": "saga2",
+            "model_b": "hviske",
             "ci95_low": 0.01,
             "ci95_high": 0.03,
         }]
 
         recommendation = _recommend_for_suite(result, pair_rows, label="Suite")
 
-        self.assertIn("95% CI for the edda minus saga2 WER difference", recommendation)
+        self.assertIn("95% CI for the edda minus hviske WER difference", recommendation)
         self.assertIn("entirely above zero", recommendation)
-        self.assertIn("favoring saga2", recommendation)
+        self.assertIn("favoring hviske", recommendation)
         self.assertNotIn("includes zero", recommendation)
 
     def test_report_keeps_classes_separate_and_writes_requested_artifacts(self):
@@ -117,8 +132,8 @@ class AnalysisReportTests(unittest.TestCase):
             self.assertEqual(int(pairs[0]["group_count"]), 2)
             report_text = outputs["report"].read_text(encoding="utf-8")
             self.assertIn("No overall average combines", report_text)
-            self.assertIn("Best model for natural three-speaker Danish conversation: edda", report_text)
-            self.assertIn("Source-group 95% CI", report_text)
+            self.assertIn("Best model for natural three-speaker Danish conversation: no decisive candidate evidence", report_text)
+            self.assertIn("Grouped 95% CI", report_text)
             with outputs["strata_summary"].open(encoding="utf-8", newline="") as handle:
                 strata = list(csv.DictReader(handle))
             self.assertIn(("overlap", ">10%"), {(row["dimension"], row["bucket"]) for row in strata})

@@ -13,7 +13,9 @@ from .audio import write_audio_16k_mono
 from .base import DatasetAdapter, DatasetSpec
 from .huggingface import load_dataset_split, resolve_dataset_revision, validate_commit_sha
 from .manifest import write_manifest
-from .provenance import build_lock_entry, file_sha256, load_lock, update_lock
+from .provenance import (
+    build_lock_entry, file_sha256, load_lock, preparation_code_provenance, update_lock,
+)
 
 
 CORAL = {
@@ -200,6 +202,8 @@ def prepare_single_speaker_suite(
 
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         speaker_id = _categorical(row, "speaker_id", "id_speaker")
+        bootstrap_group = speaker_id or source_id
+        bootstrap_group_type = "speaker" if speaker_id else "recording"
         records.append({
             "id": record_id,
             "dataset": spec.dataset,
@@ -220,6 +224,12 @@ def prepare_single_speaker_suite(
                 "source_config": config or "default",
                 "source_recording_id": source_id,
                 "speaker_id": speaker_id or "",
+                "bootstrap_group": bootstrap_group,
+                "bootstrap_group_type": bootstrap_group_type,
+                **({
+                    "test_split_status": "utterance-held-out",
+                    "speaker_split_relation": "speaker-overlapping",
+                } if spec.dataset == NST["dataset"] else {}),
                 "duration_s": round(duration_s, 6),
                 "strata": groups,
             },
@@ -257,6 +267,7 @@ def prepare_single_speaker_suite(
     )
 
     lock_root = Path(lock_path).resolve().parent
+    preparation_code = preparation_code_provenance()
     entry = build_lock_entry(
         dataset=spec.dataset,
         dataset_class=spec.dataset_class,
@@ -265,7 +276,8 @@ def prepare_single_speaker_suite(
         revision=pinned_revision,
         files=prepared_files + [manifest_path, validation_path, strata_path],
         root=lock_root,
-        preparation_code_git_sha=_git_revision(),
+        preparation_code_git_sha=preparation_code["git_sha"],
+        preparation_code=preparation_code,
         reference_transform=REFERENCE_TRANSFORM,
     )
     update_lock(lock_path, entry)

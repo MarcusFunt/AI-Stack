@@ -1,10 +1,33 @@
 import unittest
 from pathlib import Path
+import json
+import tempfile
 
 from stt.benchmark.runner import _aggregate_der, _dataset_info, _is_oom_error
 
 
 class RunnerResultSupportTests(unittest.TestCase):
+    def test_dataset_info_embeds_exact_lock_entry_and_content_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            suite_dir = root / "data" / "stt-benchmark" / "prepared" / "fleurs"
+            suite_dir.mkdir(parents=True)
+            manifest = suite_dir / "manifest.jsonl"
+            manifest.write_text("{}\n", encoding="utf-8")
+            entry = {"dataset": "fleurs-da-dk-test", "revision": "a" * 40,
+                     "files": [{"path": "manifest.jsonl", "sha256": "b" * 64}]}
+            lock = root / "data" / "stt-benchmark" / "dataset-lock.json"
+            lock.write_text(json.dumps({"schema_version": 1, "datasets": {
+                "fleurs-da-dk-test": entry,
+            }}), encoding="utf-8")
+            expected_lock_hash = __import__("hashlib").sha256(lock.read_bytes()).hexdigest()
+            info = _dataset_info([{
+                "dataset": "fleurs-da-dk-test", "dataset_class": "HELD-OUT-IN-DOMAIN",
+                "metadata": {"source_revision": "a" * 40},
+            }], manifest)
+        self.assertEqual(info["dataset_lock_sha256"], expected_lock_hash)
+        self.assertEqual(info["dataset_lock_entry"], entry)
+
     def test_dataset_info_collects_schema_v2_provenance(self):
         records = [{
             "dataset": "samtalebank-sam3",
