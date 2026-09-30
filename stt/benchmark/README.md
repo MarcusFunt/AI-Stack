@@ -78,4 +78,13 @@ Each .cha transcript must have its matching audio/video file named by @Media. Vi
 
 CHAT/CA speaker tiers, hidden millisecond time bullets, continuation lines, and overlap are retained as timed reference segments. raw_text is preserved beside deterministic talkbank-ca-v1 scoring text. Windows are selected in source order, do not overlap, target 90 seconds (60–120 seconds allowed), and require all three speakers with at least three seconds each. The preparer writes manifest.jsonl, dataset-validation.json, and the ignored local data\stt-benchmark\dataset-lock.json with SHA-256 hashes and the preparation revision.
 
+The controlled synthetic K=3 suite uses every row with `num_speakers == 3` from the dataset's `test` split. Install the benchmark requirements and prepare it with:
+
+```powershell
+pip install -r stt\requirements-benchmark.txt
+.\scripts\prepare-stt-benchmark.ps1 -Suite diarization-k3
+```
+
+The first run resolves the dataset's current Hub ref to a full commit SHA and stores it in `dataset-lock.json`; reruns reuse that pinned SHA. To intentionally upgrade, use a new lock file or clear the existing suite entry after reviewing the dataset revision. `HF_TOKEN` is consumed by the Hugging Face libraries for gated access and is never printed. This suite is marked `CONTROLLED-SYNTHETIC`: use it for diarization and overlap diagnostics, not as decisive ASR WER evidence, because its source audio pool overlaps candidate training data.
+
 Dataset interpretation remains separated by evidence class: Sam3 and DanPASS are PRIMARY-INDEPENDENTISH; CoRal/NST/FLEURS are held-out in-domain suites; the synthetic diarization dataset is CONTROLLED-SYNTHETIC. No overall score averages these classes together. Sam3 has no declared candidate fine-tuning overlap, though base-model pretraining overlap cannot be ruled out.

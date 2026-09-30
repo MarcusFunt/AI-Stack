@@ -12,6 +12,7 @@ from .samtalebank import (
     prepare_samtalebank,
     window_metrics,
 )
+from .synthetic import DiarizationK3Adapter, prepare_diarization_k3
 
 __all__ = [
     "DATASET_CLASSES",
@@ -21,6 +22,7 @@ __all__ = [
     "DatasetAdapter",
     "DatasetSpec",
     "SamtaleBankSam3Adapter",
+    "DiarizationK3Adapter",
     "build_lock_entry",
     "build_windows",
     "cut_wav_window",
@@ -32,6 +34,7 @@ __all__ = [
     "parse_chat_file",
     "parse_chat_text",
     "prepare_samtalebank",
+    "prepare_diarization_k3",
     "update_lock",
     "validate_manifest",
     "window_metrics",

@@ -1,10 +1,11 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-  [ValidateSet("samtalebank-sam3")][string]$Suite = "samtalebank-sam3",
+  [ValidateSet("samtalebank-sam3", "diarization-k3")][string]$Suite = "samtalebank-sam3",
   [string]$SourcePath = "",
   [string]$OutputDirectory = "",
-  [int]$Seed = 20260930
+  [int]$Seed = 20260930,
+  [string]$Revision = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,9 @@ $PythonArgs = @(
   "--lock-path", $LockPath,
   "--seed", $Seed
 )
+if($Revision) {
+  $PythonArgs += @("--revision", $Revision)
+}
 if($SourcePath) {
   $PythonArgs += @("--source-path", (Resolve-Path $SourcePath).Path)
 }
