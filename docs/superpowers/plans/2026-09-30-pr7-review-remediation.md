@@ -101,7 +101,7 @@
 - [x] **Step 2: Prepare and validate FLEURS; verify pinned SHA, audio format, transcript mapping, and lock/provenance hashes.**
 - [x] **Step 3: Run all available candidates sequentially through the existing wrapper; retain partial results and failure status if gated access blocks a model.**
 - [x] **Step 4: Generate and inspect the combined report; replay one candidate with exact stored revisions and compare references/config/metrics.**
-- [ ] **Step 5: Run full local verification, push the follow-up commit(s), and confirm PR #7 CI is green. Do not merge.**
+- [x] **Step 5: Run full local verification, push the follow-up commit(s), and confirm PR #7 CI is green. Do not merge.**
 
 ---
 
