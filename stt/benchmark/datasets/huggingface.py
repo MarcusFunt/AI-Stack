@@ -39,6 +39,7 @@ def resolve_dataset_revision(repo_id: str, revision: str = "main") -> str:
 
 def load_dataset_split(
     repo_id: str,
+    config: str | None = None,
     *,
     split: str,
     revision: str,
@@ -54,13 +55,15 @@ def load_dataset_split(
             "stt/requirements-benchmark.txt."
         ) from exc
     try:
-        return load_dataset(
-            repo_id,
+        arguments = dict(
             split=split,
             revision=revision,
             cache_dir=str(cache_dir) if cache_dir else None,
             token=True,
         )
+        if config:
+            return load_dataset(repo_id, config, **arguments)
+        return load_dataset(repo_id, **arguments)
     except Exception as exc:
         raise RuntimeError(
             f"Could not load {repo_id!r} split {split!r} at pinned revision {revision}. "

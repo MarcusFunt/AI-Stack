@@ -8,13 +8,28 @@ from pathlib import Path
 
 from .samtalebank import SamtaleBankSam3Adapter, TalkBankAccessError
 from .synthetic import DiarizationK3Adapter
+from .speech_recognition import (
+    CoRalConversationTestAdapter,
+    FleursDanishTestAdapter,
+    NstDanishTestAdapter,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Prepare Danish public STT benchmark datasets."
     )
-    parser.add_argument("--suite", choices=("samtalebank-sam3", "diarization-k3"), required=True)
+    parser.add_argument(
+        "--suite",
+        choices=(
+            "samtalebank-sam3",
+            "diarization-k3",
+            "coral-conversation-test",
+            "nst-da-test",
+            "fleurs-da-dk-test",
+        ),
+        required=True,
+    )
     parser.add_argument("--source-path", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--lock-path", type=Path)
@@ -35,8 +50,20 @@ def main(argv: list[str] | None = None) -> int:
                 lock_path=lock_path,
                 seed=args.seed,
             )
-        else:
+        elif args.suite == "diarization-k3":
             manifest = DiarizationK3Adapter().prepare(
+                args.source_path,
+                output_dir,
+                lock_path=lock_path,
+                revision=args.revision,
+            )
+        else:
+            adapters = {
+                "coral-conversation-test": CoRalConversationTestAdapter,
+                "nst-da-test": NstDanishTestAdapter,
+                "fleurs-da-dk-test": FleursDanishTestAdapter,
+            }
+            manifest = adapters[args.suite]().prepare(
                 args.source_path,
                 output_dir,
                 lock_path=lock_path,

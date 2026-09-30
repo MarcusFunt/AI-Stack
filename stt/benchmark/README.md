@@ -87,4 +87,15 @@ pip install -r stt\requirements-benchmark.txt
 
 The first run resolves the dataset's current Hub ref to a full commit SHA and stores it in `dataset-lock.json`; reruns reuse that pinned SHA. To intentionally upgrade, use a new lock file or clear the existing suite entry after reviewing the dataset revision. `HF_TOKEN` is consumed by the Hugging Face libraries for gated access and is never printed. This suite is marked `CONTROLLED-SYNTHETIC`: use it for diarization and overlap diagnostics, not as decisive ASR WER evidence, because its source audio pool overlaps candidate training data.
 
+Single-speaker held-out suites are prepared independently so optional data is downloaded only when requested:
+
+```powershell
+# CoRal requires logging in to Hugging Face and accepting its gated dataset terms first.
+.\scripts\prepare-stt-benchmark.ps1 -Suite coral-conversation-test
+.\scripts\prepare-stt-benchmark.ps1 -Suite nst-da-test
+.\scripts\prepare-stt-benchmark.ps1 -Suite fleurs-da-dk-test
+```
+
+CoRal reads the `conversational` config's `test` split; NST and FLEURS read their official `test` splits, with FLEURS using `da_dk`. Each manifest retains raw reference text, available speaker/dialect/age/gender metadata, audio duration, and an immutable dataset SHA. `strata-summary.json` groups available dialect, accent, age, gender, and duration categories; groups below 1,000 reference words are marked `insufficient_n`. CoRal uses the Hugging Face card's `openrail` license label, NST is CC0, and FLEURS is CC-BY-4.0.
+
 Dataset interpretation remains separated by evidence class: Sam3 and DanPASS are PRIMARY-INDEPENDENTISH; CoRal/NST/FLEURS are held-out in-domain suites; the synthetic diarization dataset is CONTROLLED-SYNTHETIC. No overall score averages these classes together. Sam3 has no declared candidate fine-tuning overlap, though base-model pretraining overlap cannot be ruled out.

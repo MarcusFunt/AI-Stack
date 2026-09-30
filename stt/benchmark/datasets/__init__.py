@@ -13,6 +13,12 @@ from .samtalebank import (
     window_metrics,
 )
 from .synthetic import DiarizationK3Adapter, prepare_diarization_k3
+from .speech_recognition import (
+    CoRalConversationTestAdapter,
+    FleursDanishTestAdapter,
+    NstDanishTestAdapter,
+    prepare_single_speaker_suite,
+)
 
 __all__ = [
     "DATASET_CLASSES",
@@ -23,6 +29,9 @@ __all__ = [
     "DatasetSpec",
     "SamtaleBankSam3Adapter",
     "DiarizationK3Adapter",
+    "CoRalConversationTestAdapter",
+    "NstDanishTestAdapter",
+    "FleursDanishTestAdapter",
     "build_lock_entry",
     "build_windows",
     "cut_wav_window",
@@ -35,6 +44,7 @@ __all__ = [
     "parse_chat_text",
     "prepare_samtalebank",
     "prepare_diarization_k3",
+    "prepare_single_speaker_suite",
     "update_lock",
     "validate_manifest",
     "window_metrics",
