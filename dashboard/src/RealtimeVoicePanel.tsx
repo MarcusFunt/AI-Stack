@@ -122,7 +122,26 @@ export default function RealtimeVoicePanel() {
         onTransportStateChanged: (state) => {
           if (attempt !== attemptRef.current) return
           if (state === 'connected' || state === 'ready') updateState('connected')
-          if (state === 'error') setErrorMessage('The WebRTC connection reported an error.')
+          if (state === 'error') {
+            const cleanupAttempt = ++attemptRef.current
+            const activeClient = clientRef.current ?? client
+            const activeStream = streamRef.current ?? stream
+            clientRef.current = null
+            streamRef.current = null
+            setRemoteStream(null)
+            void (async () => {
+              try {
+                await activeClient?.disconnect()
+              } catch {
+                // Still release the microphone when the transport is already closed.
+              } finally {
+                stopTracks(activeStream)
+              }
+              if (attemptRef.current !== cleanupAttempt) return
+              updateState('signaling-failure')
+              setErrorMessage('The WebRTC connection reported an error. Retry starts a fresh session.')
+            })()
+          }
         },
         onDisconnected: () => {
           if (attempt !== attemptRef.current || stateRef.current !== 'connected') return

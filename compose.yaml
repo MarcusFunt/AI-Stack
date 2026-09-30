@@ -209,8 +209,10 @@ services:
       - ALL
     entrypoint: ["/bin/sh", "-ec"]
     command: |
-      test -n "$${VOICE_TURN_SHARED_SECRET}"
-      test -n "$${VOICE_TURN_HOSTNAME}"
+      if [ -z "$${VOICE_TURN_SHARED_SECRET}" ] || [ -z "$${VOICE_TURN_HOSTNAME}" ]; then
+        echo "coturn disabled: optional TURN configuration is incomplete"
+        exit 0
+      fi
       exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-tls --no-dtls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}

@@ -140,6 +140,38 @@ describe('RealtimeVoicePanel', () => {
     expect(mocks.createRealtimeVoiceClient).toHaveBeenCalledWith(media.stream, expect.any(Object))
   })
 
+  it('cleans up the client and microphone before offering retry after a transport error', async () => {
+    const media = setupMedia()
+    let finishConnect: (() => void) | undefined
+    let finishDisconnect: (() => void) | undefined
+    const { client, callbacks } = setupClient(() => new Promise<void>((resolve) => {
+      finishConnect = resolve
+    }))
+    client.disconnect.mockImplementation(() => new Promise<void>((resolve) => {
+      finishDisconnect = resolve
+    }))
+    render(<RealtimeVoicePanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start voice test' }))
+    await waitFor(() => expect(client.connect).toHaveBeenCalledOnce())
+    act(() => callbacks()?.onTransportStateChanged?.('error' as never))
+
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Stop voice test' })).toBeTruthy()
+    expect(client.disconnect).toHaveBeenCalledOnce()
+    expect(media.track.stop).not.toHaveBeenCalled()
+
+    await act(async () => {
+      finishDisconnect?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Signaling failed'))
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(media.track.stop).toHaveBeenCalledOnce()
+
+    finishConnect?.()
+  })
+
   it('renders user and assistant transcript events and remote audio', async () => {
     setupMedia()
     const { callbacks } = setupClient()

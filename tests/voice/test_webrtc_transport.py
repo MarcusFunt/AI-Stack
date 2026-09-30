@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import os
 import unittest
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,6 +34,7 @@ class FakePeer:
         self.release = release
         self.offer = None
         self.close_calls = 0
+        self.close_reason = None
 
     async def accept_offer(self, offer):
         self.offer = dict(offer)
@@ -46,6 +48,7 @@ class FakePeer:
         if self.close_calls:
             return
         self.close_calls += 1
+        self.close_reason = reason
         await self.on_closed(reason)
 
 
@@ -90,13 +93,17 @@ def load_voice_app_module():
         return importlib.import_module("voice.app")
 
 
-def new_app(peer_factory, *, metrics=None):
+def new_app(peer_factory, *, metrics=None, session_max_seconds=None):
     voice_app = load_voice_app_module()
+    options = {}
+    if session_max_seconds is not None:
+        options["session_max_seconds"] = session_max_seconds
     return voice_app.create_app(
         api_key="voice-test-key",
         provider_factory=lambda **_kwargs: GatedProviders(),
         metrics=metrics or VoiceMetrics(),
         webrtc_factory=peer_factory,
+        **options,
     )
 
 
@@ -126,6 +133,27 @@ def offer_request(client, session, *, ticket=None, headers=None, sdp="v=0\r\nt=0
 
 
 class WebRTCOfferRouteTests(unittest.TestCase):
+    def test_webrtc_peer_closes_and_releases_session_at_configured_maximum_lifetime(self):
+        peers = []
+        metrics = VoiceMetrics()
+        app = new_app(
+            lambda **kwargs: peers.append(FakePeer(**kwargs)) or peers[-1],
+            metrics=metrics,
+            session_max_seconds=0.02,
+        )
+        with TestClient(app) as client:
+            session = create_session(client)
+            response = offer_request(client, session)
+            self.assertEqual(response.status_code, 200)
+            deadline = time.monotonic() + 1
+            while peers[0].close_calls == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertEqual(peers[0].close_calls, 1)
+        self.assertEqual(peers[0].close_reason, "timeout")
+        self.assertEqual(metrics.active_sessions, 0)
+        self.assertNotIn(session["id"], app.state.webrtc_peers)
+
     def test_offer_requires_api_key_and_one_use_ticket(self):
         peers = []
         app = new_app(lambda **kwargs: peers.append(FakePeer(**kwargs)) or peers[-1])

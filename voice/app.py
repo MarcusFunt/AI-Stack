@@ -62,10 +62,16 @@ def create_app(
     provider_factory: Callable[..., Any] | None = None,
     webrtc_factory: Callable[..., Any] | None = None,
     api_key: str | None = None,
+    session_max_seconds: float | None = None,
 ) -> FastAPI:
     configured_key = (os.getenv("AI_API_KEY", "") if api_key is None else api_key).strip()
     if not configured_key:
         raise RuntimeError("AI_API_KEY must be set")
+    max_session_seconds = (
+        MAX_SESSION_SECONDS if session_max_seconds is None else float(session_max_seconds)
+    )
+    if max_session_seconds <= 0:
+        raise ValueError("session_max_seconds must be positive")
 
     sessions = registry or VoiceSessionRegistry(
         token_ttl_seconds=int(os.getenv("VOICE_SESSION_TOKEN_TTL_SECONDS", "60")),
@@ -76,6 +82,8 @@ def create_app(
     app = FastAPI(title="AI-Stack Realtime Voice", version="0.1.0")
     app.state.sessions = sessions
     app.state.webrtc_peers = {}
+    app.state.webrtc_timeout_handles = {}
+    app.state.webrtc_timeout_tasks = set()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -197,11 +205,35 @@ def create_app(
         finalized = False
         peer = None
 
+        async def close_expired_peer() -> None:
+            current_peer = app.state.webrtc_peers.get(session.id)
+            if current_peer is None:
+                return
+            try:
+                await current_peer.close("timeout")
+            except Exception:
+                finalize_peer("timeout")
+
+        def schedule_session_timeout() -> None:
+            def timeout_callback() -> None:
+                app.state.webrtc_timeout_handles.pop(session.id, None)
+                task = asyncio.create_task(close_expired_peer())
+                app.state.webrtc_timeout_tasks.add(task)
+                task.add_done_callback(app.state.webrtc_timeout_tasks.discard)
+
+            handle = asyncio.get_running_loop().call_later(
+                max_session_seconds, timeout_callback
+            )
+            app.state.webrtc_timeout_handles[session.id] = handle
+
         def finalize_peer(reason: str = "closed") -> None:
             nonlocal finalized
             if finalized:
                 return
             finalized = True
+            timeout_handle = app.state.webrtc_timeout_handles.pop(session.id, None)
+            if timeout_handle is not None:
+                timeout_handle.cancel()
             session.state = "CLOSED"
             sessions.remove(session.id)
             active_metrics.active_sessions = max(0, active_metrics.active_sessions - 1)
@@ -242,6 +274,7 @@ def create_app(
                 raise ValueError("invalid SDP answer")
             session.state = "LISTENING"
             active_metrics.record_webrtc_offer("succeeded")
+            schedule_session_timeout()
             return {"sdp": answer_sdp, "type": "answer"}
         except Exception as exc:
             active_metrics.record_webrtc_offer("failed")
@@ -310,7 +343,7 @@ def create_app(
                 parent_trace_context=session_trace_context,
             )
             while True:
-                remaining = MAX_SESSION_SECONDS - (time.monotonic() - connected_at)
+                remaining = max_session_seconds - (time.monotonic() - connected_at)
                 if remaining <= 0:
                     await send("session.timeout")
                     break
