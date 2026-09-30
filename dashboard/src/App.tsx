@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   Activity, AudioLines, Bot, BrainCircuit, ChevronRight, CircleStop,
@@ -15,7 +15,9 @@ import {
 import { isBadState } from './state'
 import './index.css'
 
-type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'vision' | 'studio' | 'setup' | 'network' | 'maintenance' | 'system'
+const RealtimeVoicePanel = lazy(() => import('./RealtimeVoicePanel'))
+
+type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'voice' | 'vision' | 'studio' | 'setup' | 'network' | 'maintenance' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 const navGroups = [
@@ -35,6 +37,7 @@ const navGroups = [
       ['agentlab', Bot, 'Agent Lab'],
       ['chat', MessageSquareText, 'Chat'],
       ['speech', AudioLines, 'Speech'],
+      ['voice', Mic, 'Realtime voice'],
       ['vision', Bot, 'Robot vision'],
       ['studio', Sparkles, 'Studio'],
     ],
@@ -59,6 +62,7 @@ const sectionMeta: Record<Section, { title: string; context: string }> = {
   agentlab: { title: 'Agent Lab', context: 'Autonomous coding runs and evaluation' },
   chat: { title: 'Chat', context: 'Local language models' },
   speech: { title: 'Speech', context: 'Transcription and voice' },
+  voice: { title: 'Realtime voice', context: 'Browser WebRTC test' },
   vision: { title: 'Robot vision', context: 'Visual reasoning' },
   studio: { title: 'Studio', context: 'Image and video generation' },
   setup: { title: 'Setup', context: 'Workstation configuration' },
@@ -612,6 +616,11 @@ export default function App() {
     section === 'agentlab' ? <AgentLabPanel /> :
     section === 'chat' ? <ChatPanel models={models} /> :
     section === 'speech' ? <SpeechPanel /> :
+    section === 'voice' ? (
+      <Suspense fallback={<div className="workspace"><div className="tool-card">Loading realtime voice test…</div></div>}>
+        <RealtimeVoicePanel />
+      </Suspense>
+    ) :
     section === 'vision' ? <VisionPanel /> :
     section === 'studio' ? (
       <StudioPanel onStart={(name) => serviceAction(name, 'start')} busy={busyServices} network={network} />

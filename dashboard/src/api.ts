@@ -108,8 +108,17 @@ export type NetworkStatus = {
   studio_routes?: { comfyui?: boolean; wangp?: boolean }
   mcp_mode?: 'public' | 'private' | 'off'
   legacy_443?: boolean
+  voice_turn_enabled?: boolean
+  voice_turn_target?: string
   route_state?: Record<string, unknown>
   host_agent_version?: string
+}
+
+export type RealtimeVoiceSession = {
+  id: string
+  offer_url: string
+  client_secret: { value: string; expires_at: number }
+  ice_servers: RTCIceServer[]
 }
 
 export type PlatformComponent = {
@@ -267,6 +276,16 @@ export const localAI = {
   status: () => request<SupervisorStatus>('/control/status'),
   snapshot: () => request<Snapshot>('/control/snapshot'),
   models: () => request<ModelsResponse>('/v1/models'),
+  createRealtimeVoiceSession: async () => {
+    const session = await request<RealtimeVoiceSession>('/v1/realtime/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ language: 'en' }),
+    })
+    if (!session.offer_url.startsWith('/v1/realtime/sessions/')) {
+      throw new Error('Gateway returned an invalid realtime offer route.')
+    }
+    return { ...session, offer_url: '/api' + session.offer_url }
+  },
   capabilities: () => request<ApiCapabilities>('/v1/capabilities'),
   doctor: () => request<{ status: string; checks: DoctorCheck[] }>('/control/doctor'),
   platformHealth: () => request<PlatformHealth>('/control/platform-health'),
@@ -299,6 +318,7 @@ export const localAI = {
     studio_enabled?: boolean
     mcp_mode: 'public' | 'private' | 'off'
     clear_legacy_443?: boolean
+    voice_turn_enabled: boolean
   }) => request<{ ok: boolean; status: NetworkStatus }>('/control/network/tailscale', {
     method: 'POST',
     body: JSON.stringify(settings),
