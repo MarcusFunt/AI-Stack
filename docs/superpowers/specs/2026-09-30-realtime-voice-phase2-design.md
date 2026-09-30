@@ -1,6 +1,6 @@
 # Realtime Voice Phase 2: Pipecat and WebRTC
 
-**Status:** Draft for user review
+**Status:** Approved by user on 2026-09-30
 **Date:** 2026-09-30
 **Basis:** `voice/REALTIME_VOICE_PLAN.md`, Phase 2
 **Branch:** `codex/voice-realtime-phase2`

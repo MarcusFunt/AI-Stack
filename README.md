@@ -63,6 +63,14 @@ The session accepts mono, little-endian PCM16 at 16 kHz, as binary WebSocket fra
 
 This initial voice API supports English. Whisper produces a final transcription before the service emits its segment-based transcription deltas; they are not live interim ASR. Speech recognition, chat, and speech synthesis each go through the gateway, which keeps the supervisor as the only Docker/GPU lifecycle owner. The existing GPU scheduler runs one heavyweight worker at a time, so voice requests can switch between STT, LLM, and TTS workers and may reload a model between stages. The `voice` workload profile expresses scheduling intent; it does not pin multiple models in memory. Multi-worker residency is deferred until GPU capacity is measured and verified.
 
+### Dashboard WebRTC test page
+
+The Dashboard includes **Work → Realtime voice** for testing microphone capture and two-way WebRTC audio. Start the local control plane with `.\scripts\ai.ps1 start voice`, then open `http://127.0.0.1:3000`. The page creates a fresh session for each start or retry, requests echo cancellation, noise suppression, and automatic gain control, and displays the browser-reported settings. Stop ends the peer connection and releases the microphone. Signaling uses same-origin `/api/v1/realtime/...` routes; the API key stays in Dashboard Nginx and the short-lived session ticket is sent in a header. Audio travels over WebRTC media, with no WebSocket fallback.
+
+The existing Dashboard Tailscale HTTPS address above also works from devices enrolled in the tailnet, including a device on the same physical LAN. A LAN connection without Tailscale is not supported; Dashboard and Gateway host ports remain loopback-bound.
+
+The optional voice TURN relay is off by default. It requires `VOICE_TURN_SHARED_SECRET` and `VOICE_TURN_HOSTNAME` to be injected into the voice runtime, then an explicit **Voice TURN relay** opt-in in the Dashboard Network panel. The host agent exposes the relay only through private Tailscale Serve TLS TCP on port 8447; do not enable Funnel or publish a host UDP port. Port 8446 already serves another local endpoint. Treat remote relay as unverified until a second tailnet device completes two-way speech and WebRTC stats show a selected relay candidate pair.
+
 Compose voice settings (all optional) are:
 
 | Variable | Default | Purpose |
