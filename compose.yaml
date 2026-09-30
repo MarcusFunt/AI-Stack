@@ -182,6 +182,8 @@ services:
       VOICE_VAD_END_SILENCE_SECONDS: ${VOICE_VAD_END_SILENCE_SECONDS:-0.65}
       VOICE_VAD_SPEECH_THRESHOLD: ${VOICE_VAD_SPEECH_THRESHOLD:-420}
       VOICE_MAX_TURN_SECONDS: ${VOICE_MAX_TURN_SECONDS:-90}
+      VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
+      VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       gateway:
@@ -192,6 +194,30 @@ services:
       interval: 10s
       timeout: 4s
       retries: 6
+
+  coturn:
+    image: coturn/coturn:4.18.0
+    container_name: ai-stack-coturn
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    entrypoint: ["/bin/sh", "-ec"]
+    command: |
+      test -n "$${VOICE_TURN_SHARED_SECRET}"
+      test -n "$${VOICE_TURN_HOSTNAME}"
+      exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-tls --no-dtls --min-port=49160 --max-port=49200
+    environment:
+      VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
+      VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
+    ports:
+      - "127.0.0.1:3478:3478/tcp"
+    networks: [voice]
 
   eval-router:
     build:

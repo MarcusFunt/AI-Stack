@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -315,6 +316,33 @@ def tailscale_exe():
             return str(item)
     return "tailscale"
 
+
+def voice_turn_listener_ready(timeout=0.5):
+    try:
+        with socket.create_connection(("127.0.0.1", 3478), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def voice_turn_route_enabled(routes, dns_name):
+    if not dns_name or not isinstance(routes, dict):
+        return False
+    key = f"{dns_name}:8446"
+    tcp = routes.get("TCP", {})
+    allow_funnel = routes.get("AllowFunnel", {})
+    if not isinstance(tcp, dict) or not isinstance(allow_funnel, dict):
+        return False
+    endpoint = tcp.get(key)
+    return bool(
+        isinstance(endpoint, dict)
+        and endpoint.get("TCPForward") == "127.0.0.1:3478"
+        and endpoint.get("TerminateTLS") == dns_name
+        and not allow_funnel.get(key)
+        and voice_turn_listener_ready()
+    )
+
+
 def tailscale_status():
     exe = tailscale_exe()
     status = run([exe, "status", "--json"], max_output=1_000_000)
@@ -364,6 +392,8 @@ def tailscale_status():
         "studio_routes": {"comfyui": comfyui_enabled, "wangp": wangp_enabled},
         "mcp_mode": "public" if mcp_public else ("private" if mcp_enabled else "off"),
         "legacy_443": legacy_443,
+        "voice_turn_enabled": voice_turn_route_enabled(routes, dns_name),
+        "voice_turn_target": "127.0.0.1:3478",
         "route_state": routes,
         "host_agent_version": HOST_AGENT_VERSION,
     }
@@ -397,6 +427,34 @@ def configure_tailscale(payload):
             results.append(run([exe, "serve", "--https=8445", "off"]))
     if payload.get("clear_legacy_443"):
         results.append(run([exe, "serve", "--https=443", "off"]))
+    voice_turn_enabled = payload.get("voice_turn_enabled")
+    if voice_turn_enabled is True:
+        current = tailscale_status()
+        if not current.get("dns_name"):
+            results.append({
+                "ok": False,
+                "code": 503,
+                "stdout": "",
+                "stderr": "Tailscale DNS name is unavailable; TURN route remains disabled",
+            })
+        elif not voice_turn_listener_ready():
+            results.append({
+                "ok": False,
+                "code": 503,
+                "stdout": "",
+                "stderr": "voice TURN loopback listener is unavailable; route remains disabled",
+            })
+        else:
+            results.append(run([
+                exe,
+                "serve",
+                "--tls-terminated-tcp=8446",
+                "--bg",
+                "--yes",
+                "tcp://127.0.0.1:3478",
+            ]))
+    elif voice_turn_enabled is False:
+        results.append(run([exe, "serve", "--tls-terminated-tcp=8446", "off"]))
     failed = [r for r in results if not r["ok"]]
     return {"ok": not failed, "steps": results, "status": tailscale_status()}
 
