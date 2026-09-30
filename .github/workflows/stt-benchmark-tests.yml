@@ -23,8 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install normalization dependencies
-        run: pip install "num2words>=0.5.14,<1" "text2num>=3.1,<4"
+      - name: Install benchmark test dependencies
+        run: pip install "num2words>=0.5.14,<1" "text2num>=3.1,<4" "numpy>=1.26,<3" "scipy>=1.13,<2" "soundfile>=0.13,<1"
       - name: Compile benchmark code
         run: python -m compileall -q stt/benchmark
       - name: Run benchmark core tests
