@@ -95,7 +95,7 @@ class ReviewFindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "provenance"):
                 _merge_runs([first, second])
 
-    def test_report_contains_declared_model_training_data_map(self):
+    def test_report_shows_frozen_model_training_evidence_for_evaluated_dataset(self):
         result = {
             "dataset": {"name": "samtalebank-sam3", "class": "PRIMARY-INDEPENDENTISH",
                         "source_revisions": []},
@@ -110,8 +110,9 @@ class ReviewFindingTests(unittest.TestCase):
             outputs = generate_report([input_path], root / "report")
             report = outputs["report"].read_text(encoding="utf-8")
             provenance = json.loads(outputs["provenance"].read_text(encoding="utf-8"))
-        self.assertIn("Declared model training data overlap", report)
-        self.assertIn("CoRal", report)
+        self.assertIn("Model training data declarations and dataset evidence", report)
+        self.assertIn("samtalebank-sam3", report)
+        self.assertNotIn("coral-conversation-test", report)
         self.assertIn("danish-foundation-models/edda-v0.1", report)
         self.assertIn("evidence_relationships", provenance)
 
