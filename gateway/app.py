@@ -85,6 +85,7 @@ STT_MAX_UPLOAD_BYTES = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(256 * 1024 * 10
 VLM_MAX_UPLOAD_BYTES = int(os.getenv("VLM_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 COMFY_MAX_BODY_BYTES = int(os.getenv("COMFY_MAX_BODY_BYTES", str(128 * 1024 * 1024)))
 WANGP_MAX_BODY_BYTES = int(os.getenv("WANGP_MAX_BODY_BYTES", str(512 * 1024 * 1024)))
+VOICE_SDP_MAX_BYTES = 128 * 1024
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -1627,12 +1628,77 @@ async def create_realtime_session(request: Request):
         result = upstream.json()
     except ValueError as exc:
         raise HTTPException(502, "realtime voice service returned an invalid session") from exc
-    if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("id"), str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", result["id"])
+    ):
         raise HTTPException(502, "realtime voice service returned an invalid session")
 
     scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
     result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"
+    result["offer_url"] = f"/v1/realtime/sessions/{result['id']}/offer"
     return result
+
+
+@app.post("/v1/realtime/sessions/{session_id}/offer")
+async def proxy_realtime_offer(request: Request, session_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+        raise HTTPException(400, "invalid realtime session id")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(415, "offer must use application/json")
+    ticket = request.headers.get("x-voice-session-ticket", "")
+    if not ticket or len(ticket) > 128:
+        raise HTTPException(401, "invalid realtime session ticket")
+
+    raw = await read_body_limited(request, VOICE_SDP_MAX_BYTES, "WebRTC offer")
+    try:
+        payload = json.loads(raw or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "offer must be valid JSON") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") != "offer"
+        or not isinstance(payload.get("sdp"), str)
+        or not payload["sdp"].strip()
+    ):
+        raise HTTPException(400, "offer must include type=offer and non-empty sdp")
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "X-Voice-Session-Ticket": ticket,
+    }
+    trace_context = getattr(request.state, "trace_context", None)
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            upstream = await client.post(
+                f"{VOICE_URL}/sessions/{session_id}/offer",
+                headers=headers,
+                json={"type": "offer", "sdp": payload["sdp"]},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "realtime voice service is unavailable") from exc
+    if upstream.status_code >= 400:
+        raise HTTPException(upstream.status_code, "realtime voice offer was rejected")
+    if len(upstream.content) > VOICE_SDP_MAX_BYTES:
+        raise HTTPException(502, "realtime voice returned an oversized answer")
+    try:
+        answer = upstream.json()
+    except ValueError as exc:
+        raise HTTPException(502, "realtime voice returned an invalid answer") from exc
+    if (
+        not isinstance(answer, dict)
+        or answer.get("type") != "answer"
+        or not isinstance(answer.get("sdp"), str)
+        or not answer["sdp"].strip()
+        or len(answer["sdp"].encode("utf-8")) > VOICE_SDP_MAX_BYTES
+    ):
+        raise HTTPException(502, "realtime voice returned an invalid answer")
+    return {"sdp": answer["sdp"], "type": "answer"}
 
 
 @app.post("/internal/voice-evaluations")

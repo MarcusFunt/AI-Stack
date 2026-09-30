@@ -79,6 +79,134 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_session_response_adds_same_origin_offer_url(self):
+        original = self.gateway.httpx.AsyncClient.post
+
+        async def fake_post(client, url, **_kwargs):
+            return self.gateway.httpx.Response(200, json={
+                "id": "session-123",
+                "client_secret": {"value": "one-use-ticket", "expires_at": 2000},
+                "ws_url": "ws://voice:8000/ws/session-123",
+                "offer_url": "http://voice:8000/sessions/session-123/offer",
+            })
+
+        self.gateway.httpx.AsyncClient.post = fake_post
+        try:
+            response = self.client.post(
+                "/v1/realtime/sessions",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"language": "en"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.post = original
+
+        result = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["offer_url"], "/v1/realtime/sessions/session-123/offer")
+        self.assertNotIn("voice:8000", str(result))
+
+    def test_offer_proxy_authenticates_bounds_and_forwards_ticket_out_of_url(self):
+        observed = {}
+        original_post = self.gateway.httpx.AsyncClient.post
+
+        async def fake_post(client, url, **kwargs):
+            if kwargs["json"]["sdp"] == "oversized-answer":
+                return self.gateway.httpx.Response(200, json={
+                    "sdp": "x" * (128 * 1024),
+                    "type": "answer",
+                })
+            observed["url"] = url
+            observed["headers"] = kwargs["headers"]
+            observed["json"] = kwargs["json"]
+            return self.gateway.httpx.Response(200, json={
+                "sdp": "v=0\r\nt=0 0\r\n",
+                "type": "answer",
+                "pc_id": "private-peer-id",
+            })
+
+        self.gateway.httpx.AsyncClient.post = fake_post
+        try:
+            unauthenticated = self.client.post(
+                "/v1/realtime/sessions/session-123/offer",
+                headers={"X-Voice-Session-Ticket": "one-use-ticket"},
+                json={"type": "offer", "sdp": "v=0"},
+            )
+            oversized = self.client.post(
+                "/v1/realtime/sessions/session-123/offer",
+                headers={
+                    "Authorization": "Bearer test-only-gateway-key",
+                    "X-Voice-Session-Ticket": "one-use-ticket",
+                },
+                json={"type": "offer", "sdp": "x" * (128 * 1024)},
+            )
+            response = self.client.post(
+                "/v1/realtime/sessions/session-123/offer",
+                headers={
+                    "Authorization": "Bearer test-only-gateway-key",
+                    "X-Voice-Session-Ticket": "one-use-ticket",
+                },
+                json={"type": "offer", "sdp": "v=0\r\nt=0 0\r\n"},
+            )
+            oversized_answer = self.client.post(
+                "/v1/realtime/sessions/session-123/offer",
+                headers={
+                    "Authorization": "Bearer test-only-gateway-key",
+                    "X-Voice-Session-Ticket": "one-use-ticket",
+                },
+                json={"type": "offer", "sdp": "oversized-answer"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.post = original_post
+
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(oversized_answer.status_code, 502)
+        self.assertEqual(response.json(), {"sdp": "v=0\r\nt=0 0\r\n", "type": "answer"})
+        self.assertEqual(observed["url"], "http://voice-test:8000/sessions/session-123/offer")
+        self.assertEqual(observed["headers"]["Authorization"], "Bearer test-only-gateway-key")
+        self.assertEqual(observed["headers"]["X-Voice-Session-Ticket"], "one-use-ticket")
+        self.assertNotIn("one-use-ticket", observed["url"])
+        self.assertEqual(observed["json"], {"type": "offer", "sdp": "v=0\r\nt=0 0\r\n"})
+
+    def test_gateway_metrics_include_voice_webrtc_metrics(self):
+        original_get = self.gateway.httpx.AsyncClient.get
+        original_supervisor = self.gateway.supervisor
+
+        async def fake_get(client, url, **_kwargs):
+            body = (
+                'ai_stack_voice_webrtc_offers_total{outcome="succeeded"} 4\n'
+                if url == "http://voice-test:8000/metrics"
+                else ""
+            )
+            return self.gateway.httpx.Response(
+                200,
+                text=body,
+                request=self.gateway.httpx.Request("GET", url),
+            )
+
+        async def fake_supervisor(_method, path, **_kwargs):
+            if path == "/status":
+                return {"active_jobs": {}, "gpu_owner": "idle", "service_states": {}}
+            raise AssertionError(f"unexpected supervisor route: {path}")
+
+        self.gateway.httpx.AsyncClient.get = fake_get
+        self.gateway.supervisor = fake_supervisor
+        try:
+            response = self.client.get(
+                "/metrics",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.get = original_get
+            self.gateway.supervisor = original_supervisor
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            'ai_stack_voice_webrtc_offers_total{outcome="succeeded"} 4',
+            response.text,
+        )
+
     def test_voice_evaluation_forwarding_is_authenticated_and_fail_open(self):
         observed = {}
         original = self.gateway.httpx.AsyncClient.post
