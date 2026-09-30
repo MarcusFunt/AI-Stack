@@ -6,6 +6,17 @@ from stt.benchmark.datasets import provenance
 
 
 class DatasetProvenanceTests(unittest.TestCase):
+    def test_lock_rejects_absolute_or_parent_traversal_file_paths(self):
+        for path_value in (r"C:\raw\sample.cha", "../raw/sample.cha"):
+            entry = {
+                "dataset": "samtalebank-sam3",
+                "revision": "a" * 40,
+                "files": [{"path": path_value, "sha256": "b" * 64}],
+            }
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(ValueError, "relative path"):
+                    provenance.update_lock(Path(tmp) / "dataset-lock.json", entry)
+
     def test_lock_records_file_hash_and_rejects_revision_or_file_drift(self):
         for name in ("file_sha256", "build_lock_entry", "update_lock", "load_lock"):
             self.assertTrue(callable(getattr(provenance, name, None)), f"missing provenance API: {name}")

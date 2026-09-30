@@ -139,6 +139,14 @@ class SamtaleBankPreparationTests(unittest.TestCase):
             self.assertEqual(report["lexical_utterances_without_timing"], 0)
             self.assertGreater(report["total_speaker_time_s"], 0)
             lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            locked_files = lock["datasets"]["samtalebank-sam3"]["files"]
+            self.assertEqual(
+                lock["datasets"]["samtalebank-sam3"]["source_files_relative_to"],
+                "SourcePath",
+            )
+            self.assertTrue(all(not Path(item["path"]).is_absolute() for item in locked_files))
+            self.assertTrue(all(".." not in Path(item["path"]).parts for item in locked_files))
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
             self.assertIn("samtalebank-sam3", lock["datasets"])
 
 

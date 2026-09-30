@@ -577,10 +577,13 @@ def prepare_samtalebank(
         preparation_code_git_sha=_git_revision(),
         reference_transform="talkbank-ca-v1",
     )
+    entry["source_files_relative_to"] = "SourcePath"
     for source_file in set(all_source_files):
-        entry["files"].append(
-            {"path": source_file.resolve().as_posix(), "sha256": file_sha256(source_file)}
-        )
+        source_relative = source_file.relative_to(source_root).as_posix()
+        entry["files"].append({
+            "path": f"source/{source_relative}",
+            "sha256": file_sha256(source_file),
+        })
     entry["files"].sort(key=lambda item: item["path"].lower())
     update_lock(lock_path, entry)
     return manifest_path

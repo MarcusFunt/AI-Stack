@@ -76,7 +76,7 @@ SamtaleBank Sam3 is the primary real three-speaker suite. Prepare it from locall
 
 Each .cha transcript must have its matching audio/video file named by @Media. Video conversion requires ffmpeg on PATH; extraction keeps the complete media timeline and writes mono 16 kHz PCM16 WAV without loudness normalization. The preparer never logs in to TalkBank or bypasses its access rules. If local Sam3 files are missing, it prints the steps needed to obtain them.
 
-CHAT/CA speaker tiers, hidden millisecond time bullets, continuation lines, and overlap are retained as timed reference segments. raw_text is preserved beside deterministic talkbank-ca-v1 scoring text. Windows are selected in source order, do not overlap, target 90 seconds (60–120 seconds allowed), and require all three speakers with at least three seconds each. The preparer writes manifest.jsonl, dataset-validation.json, and the ignored local data\stt-benchmark\dataset-lock.json with SHA-256 hashes and the preparation revision.
+CHAT/CA speaker tiers, hidden millisecond time bullets, continuation lines, and overlap are retained as timed reference segments. raw_text is preserved beside deterministic talkbank-ca-v1 scoring text. Windows are selected in source order, do not overlap, target 90 seconds (60–120 seconds allowed), and require all three speakers with at least three seconds each. The preparer writes manifest.jsonl, dataset-validation.json, and the ignored local data\stt-benchmark\dataset-lock.json with SHA-256 hashes and the preparation revision. Lock entries store source-file paths relative to the supplied SourcePath under a stable source/ prefix, so they do not contain machine-specific absolute paths.
 
 The controlled synthetic K=3 suite uses every row with `num_speakers == 3` from the dataset's `test` split. Install the benchmark requirements and prepare it with:
 
@@ -105,5 +105,17 @@ The DanPASS sound archives are password-protected. Until the corpus password is 
 ```
 
 This writes `dataset-status.json` with `PENDING_ACCESS`, the corpus contact, and the official non-commercial attribution terms. Request the password from the listed contact, then download stereo dialogue audio, separate speaker channels, and TextGrids through the official DanPASS page. The command does not contact the corpus or request/store credentials.
+
+After running candidate models on prepared manifests, build a combined comparison without rerunning inference:
+
+```powershell
+.\scripts\analyze-stt-benchmark.ps1 -Results @(
+  "data\stt-benchmark\results\sam3\results.json",
+  "data\stt-benchmark\results\coral\results.json",
+  "data\stt-benchmark\results\k3\results.json"
+)
+```
+
+The analysis writes `dataset-summary.csv`, `pairwise-comparison.csv`, `strata-summary.csv`, `errors\`, `provenance.json`, and `report.md` under the chosen output directory. The paired 95% bootstrap uses 5,000 samples by default and the fixed seed `20260930`; Sam3 additionally gets a source-recording-group interval when it has repeated windows per recording. Strict and 0.25-second DER, overlap/non-overlap DER, speaker-count accuracy, and the objective model-decision hierarchy are included.
 
 Dataset interpretation remains separated by evidence class: Sam3 and DanPASS are PRIMARY-INDEPENDENTISH; CoRal/NST/FLEURS are held-out in-domain suites; the synthetic diarization dataset is CONTROLLED-SYNTHETIC. No overall score averages these classes together. Sam3 has no declared candidate fine-tuning overlap, though base-model pretraining overlap cannot be ruled out.

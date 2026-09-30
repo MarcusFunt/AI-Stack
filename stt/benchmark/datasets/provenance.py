@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -99,9 +99,15 @@ def update_lock(path: Path, entry: dict) -> dict:
     if not dataset or not revision or not isinstance(files, list):
         raise ValueError("lock entry requires dataset, revision, and file hashes")
     for item in files:
+        value = str(item.get("path", "")) if isinstance(item, dict) else ""
+        normalized = value.replace("\\", "/")
         if (
             not isinstance(item, dict)
-            or not item.get("path")
+            or not value
+            or Path(value).is_absolute()
+            or PurePosixPath(normalized).is_absolute()
+            or re.match(r"^[A-Za-z]:/", normalized)
+            or ".." in PurePosixPath(normalized).parts
             or not re.fullmatch(r"[0-9a-fA-F]{64}", str(item.get("sha256", "")))
         ):
             raise ValueError("every locked file requires a relative path and SHA-256")

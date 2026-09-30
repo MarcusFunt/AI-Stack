@@ -241,6 +241,46 @@ def diarization_error(
     }
 
 
+def diarization_error_regions(
+    reference_segments: list[dict],
+    hypothesis_segments: list[dict],
+    *,
+    duration_s: float,
+    frame_s: float = 0.01,
+    collar_s: float = 0.25,
+) -> dict:
+    """Score reference-overlap and non-overlap frames using one global mapping."""
+    overall = diarization_error(
+        reference_segments,
+        hypothesis_segments,
+        duration_s=duration_s,
+        frame_s=frame_s,
+        collar_s=collar_s,
+    )
+    frame_count = max(1, int(math.ceil(duration_s / frame_s)))
+    ref_frames = _active_sets(reference_segments, frame_s, frame_count)
+    hyp_frames = _active_sets(hypothesis_segments, frame_s, frame_count)
+    collar_mask = _collar_mask(reference_segments, frame_s, frame_count, collar_s)
+    result = {"mapping": overall["mapping"], "collar_s": collar_s, "frame_s": frame_s}
+
+    for name, wants_overlap in (("overlap", True), ("non_overlap", False)):
+        ignored = [
+            collar_mask[index] or ((len(reference) >= 2) != wants_overlap)
+            for index, reference in enumerate(ref_frames)
+        ]
+        miss, false_alarm, confusion, denominator = _der_counts(
+            ref_frames, hyp_frames, overall["mapping"], ignored
+        )
+        error_time = (miss + false_alarm + confusion) * frame_s
+        reference_time = denominator * frame_s
+        result[f"{name}_der"] = error_time / reference_time if reference_time else 0.0
+        result[f"{name}_miss"] = miss * frame_s
+        result[f"{name}_false_alarm"] = false_alarm * frame_s
+        result[f"{name}_confusion"] = confusion * frame_s
+        result[f"{name}_reference_speaker_time"] = reference_time
+    return result
+
+
 def aggregate_error_stats(stats: Iterable[ErrorStats]) -> ErrorStats:
     stats = list(stats)
     return ErrorStats(sum(item.errors for item in stats), sum(item.reference_units for item in stats))
