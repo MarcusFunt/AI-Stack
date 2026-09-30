@@ -172,6 +172,39 @@ describe('RealtimeVoicePanel', () => {
     finishConnect?.()
   })
 
+  it('waits for transport-error cleanup when the user stops', async () => {
+    const media = setupMedia()
+    let finishConnect: (() => void) | undefined
+    let finishDisconnect: (() => void) | undefined
+    const { client, callbacks } = setupClient(() => new Promise<void>((resolve) => {
+      finishConnect = resolve
+    }))
+    client.disconnect.mockImplementation(() => new Promise<void>((resolve) => {
+      finishDisconnect = resolve
+    }))
+    render(<RealtimeVoicePanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start voice test' }))
+    await waitFor(() => expect(client.connect).toHaveBeenCalledOnce())
+    act(() => callbacks()?.onTransportStateChanged?.('error' as never))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop voice test' }))
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.queryByRole('button', { name: 'Start voice test' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(media.track.stop).not.toHaveBeenCalled()
+
+    await act(async () => {
+      finishDisconnect?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByText('Stopped')).toBeTruthy())
+    expect(media.track.stop).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: 'Start voice test' })).toBeTruthy()
+
+    finishConnect?.()
+  })
+
   it('renders user and assistant transcript events and remote audio', async () => {
     setupMedia()
     const { callbacks } = setupClient()

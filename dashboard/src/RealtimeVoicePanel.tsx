@@ -38,6 +38,7 @@ export default function RealtimeVoicePanel() {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const clientRef = useRef<RealtimeVoiceClient | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const cleanupRef = useRef<Promise<void> | null>(null)
   const attemptRef = useRef(0)
   const stateRef = useRef<VoiceState>('idle')
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -67,6 +68,7 @@ export default function RealtimeVoicePanel() {
     attemptRef.current += 1
     const client = clientRef.current
     const stream = streamRef.current
+    const pendingCleanup = cleanupRef.current
     clientRef.current = null
     streamRef.current = null
     setRemoteStream(null)
@@ -77,6 +79,7 @@ export default function RealtimeVoicePanel() {
       // Media tracks are still stopped even if the transport was already closed.
     } finally {
       stopTracks(stream)
+      await pendingCleanup?.catch(() => {})
       updateState('stopped')
     }
   }
@@ -129,7 +132,7 @@ export default function RealtimeVoicePanel() {
             clientRef.current = null
             streamRef.current = null
             setRemoteStream(null)
-            void (async () => {
+            const cleanup = (async () => {
               try {
                 await activeClient?.disconnect()
               } catch {
@@ -141,6 +144,11 @@ export default function RealtimeVoicePanel() {
               updateState('signaling-failure')
               setErrorMessage('The WebRTC connection reported an error. Retry starts a fresh session.')
             })()
+            cleanupRef.current = cleanup
+            const clearCleanup = () => {
+              if (cleanupRef.current === cleanup) cleanupRef.current = null
+            }
+            void cleanup.then(clearCleanup, clearCleanup)
           }
         },
         onDisconnected: () => {

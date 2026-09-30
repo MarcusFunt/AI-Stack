@@ -173,7 +173,8 @@
 - Tailscale CLI 1.102.2 supports `--tls-terminated-tcp`. Its existing private Serve route on port 8446 forwards to `127.0.0.1:8087`, so the voice route was moved to unused port 8447 and the existing route was covered by a regression test.
 - No loopback listener exists on port 3478 and no TURN relay-range listeners were found. No second-device relay call was completed, so the Dashboard opt-in remains off and no relay candidate pair is claimed.
 - Review follow-up adds the configured WebRTC session lifetime watchdog, Dashboard cleanup before transport-error retry, and a clean successful coturn exit when its optional configuration is missing.
-- Automated checks passed in the final run: voice 48, gateway 29, host-agent 5, Dashboard 14; Python compileall, Dashboard lint/build, Compose config, PowerShell script parsing, and `git diff --check` also exited successfully. Compose emitted unset-variable warnings; no interpolated values were printed.
+- An isolated aiortc smoke connected to the actual voice ASGI app, sent synthetic speech through VAD and a fake provider turn, received response audio, and closed the peer cleanly. This does not replace the live Dashboard or remote TURN checks.
+- Automated checks passed in the final run: voice 48, gateway 29, host-agent 5, Dashboard 15; Python compileall, Dashboard lint/build, Compose config, PowerShell script parsing, and `git diff --check` also exited successfully. Compose emitted unset-variable warnings; no interpolated values were printed.
 
 ## References
 
