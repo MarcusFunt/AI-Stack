@@ -77,7 +77,7 @@ Compose voice settings (all optional) are:
 | --- | ---: | --- |
 | `VOICE_MAX_SESSIONS` | `8` | Maximum active voice sessions. |
 | `VOICE_SESSION_TOKEN_TTL_SECONDS` | `60` | Lifetime of the one-use WebSocket ticket. |
-| `VOICE_SESSION_MAX_SECONDS` | `3600` | Maximum duration of one WebSocket session. |
+| `VOICE_SESSION_MAX_SECONDS` | `3600` | Maximum duration of one voice session over WebSocket or WebRTC. |
 | `VOICE_VAD_END_SILENCE_SECONDS` | `0.65` | Silence hangover before a turn is transcribed. |
 | `VOICE_VAD_SPEECH_THRESHOLD` | `420` | PCM16 RMS amplitude threshold for speech detection. |
 | `VOICE_MAX_TURN_SECONDS` | `90` | Maximum buffered audio duration per turn. |

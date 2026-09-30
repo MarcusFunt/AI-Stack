@@ -49,7 +49,8 @@ creates a session, uses the gateway's same-origin `/api/v1/realtime/sessions`
 and offer routes, and sends the one-use ticket in
 `X-Voice-Session-Ticket`. It creates a new ticket for every retry and has no
 WebSocket fallback. Stop the call to close WebRTC and release the local audio
-track.
+track. The voice service also closes an otherwise-idle WebRTC session when it
+reaches `VOICE_SESSION_MAX_SECONDS`.
 
 Use the existing Dashboard HTTPS URL from a device enrolled in the Tailscale
 network. This includes a tailnet device on the same physical LAN; being on the
