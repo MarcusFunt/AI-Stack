@@ -62,6 +62,7 @@ class VoiceTurnEvaluationEvent(BaseModel):
     time_to_first_transcript_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     time_to_first_token_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     time_to_first_audio_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    latency_baseline_ms: VoiceLatencyBaseline | None = None
     audio_input_bytes: int = Field(ge=0)
     audio_output_bytes: int = Field(ge=0)
     interrupted: bool = False
@@ -89,6 +90,23 @@ class VoiceTurnEvaluationEvent(BaseModel):
         if normalized == "0" * 32:
             raise ValueError("trace_id must not be all zeroes")
         return normalized
+
+
+class LatencyPercentileSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_count: int = Field(ge=1)
+    p50: float = Field(ge=0, allow_inf_nan=False)
+    p95: float = Field(ge=0, allow_inf_nan=False)
+
+
+class VoiceLatencyBaseline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_count: int = Field(ge=0)
+    time_to_first_transcript_ms: LatencyPercentileSummary | None = None
+    time_to_first_token_ms: LatencyPercentileSummary | None = None
+    time_to_first_audio_ms: LatencyPercentileSummary | None = None
 
 
 class EvaluationScreenResult(BaseModel):

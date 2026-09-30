@@ -5,12 +5,29 @@ import json
 import os
 import wave
 from collections.abc import AsyncIterator
+from typing import Protocol
 
 import httpx
 
 
-class GatewayVoiceProviders:
-    """Voice pipeline adapter that invokes models only through the gateway."""
+class RealtimeProvider(Protocol):
+    """Transport-neutral capabilities required by the realtime runtime."""
+
+    async def transcribe(self, wav_audio: bytes, *, traceparent: str | None = None) -> dict: ...
+
+    def chat_deltas(
+        self, history: list[dict[str, str]], *, traceparent: str | None = None
+    ) -> AsyncIterator[str]: ...
+
+    async def synthesize(
+        self, text: str, *, traceparent: str | None = None
+    ) -> tuple[bytes, int, int]: ...
+
+    async def close(self) -> None: ...
+
+
+class CascadedRealtimeProvider:
+    """STT -> chat -> TTS provider that invokes models only through the gateway."""
 
     def __init__(self, *, traceparent: str | None, session_id: str) -> None:
         api_key = os.getenv("AI_API_KEY", "").strip()
@@ -116,3 +133,7 @@ class GatewayVoiceProviders:
             return response.status_code < 300
         except httpx.HTTPError:
             return False
+
+
+# Compatibility for callers that still use the original adapter name.
+GatewayVoiceProviders = CascadedRealtimeProvider

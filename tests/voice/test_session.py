@@ -24,6 +24,21 @@ class VoiceSessionRegistryTests(unittest.TestCase):
         self.assertIsNone(registry.consume(session.id, token, now=102))
         self.assertIsNone(registry.consume(session.id, "wrong", now=102))
 
+    def test_response_generations_are_monotonic_and_invalidated_on_cancel(self):
+        registry = VoiceSessionRegistry()
+        session, _ = registry.create(principal="client-1", traceparent=None, now=100)
+
+        first = session.begin_generation("resp_first")
+        self.assertTrue(session.generation_is_current(first, "resp_first"))
+        self.assertEqual(session.invalidate_generation(), first + 1)
+        self.assertFalse(session.generation_is_current(first, "resp_first"))
+
+        second = session.begin_generation("resp_second")
+        self.assertGreater(second, first)
+        self.assertTrue(session.generation_is_current(second, "resp_second"))
+        self.assertTrue(session.finish_generation(second))
+        self.assertFalse(session.generation_is_current(second, "resp_second"))
+
     def test_expired_session_is_rejected_and_capacity_is_bounded(self):
         registry = VoiceSessionRegistry(token_ttl_seconds=30, max_sessions=1)
         session, token = registry.create(principal="client-1", traceparent=None, now=100)

@@ -28,6 +28,12 @@ def voice_event(**changes):
         "time_to_first_transcript_ms": 460,
         "time_to_first_token_ms": 700,
         "time_to_first_audio_ms": 1100,
+        "latency_baseline_ms": {
+            "sample_count": 3,
+            "time_to_first_transcript_ms": {"sample_count": 3, "p50": 460, "p95": 510},
+            "time_to_first_token_ms": {"sample_count": 3, "p50": 700, "p95": 820},
+            "time_to_first_audio_ms": {"sample_count": 3, "p50": 1100, "p95": 1300},
+        },
         "audio_input_bytes": 48_000,
         "audio_output_bytes": 96_000,
         "interrupted": False,
@@ -51,6 +57,7 @@ class VoiceEvaluationTests(unittest.TestCase):
         self.assertEqual(result.metric, "voice_turn_health")
         self.assertEqual(reasons, ())
         self.assertTrue(result.evidence["checks"]["audio_integrity_ok"])
+        self.assertEqual(result.evidence["latency_baseline_ms"]["time_to_first_audio_ms"]["p95"], 1300)
         self.assertNotIn("transcript", result.evidence)
         self.assertNotIn("audio", result.evidence)
 

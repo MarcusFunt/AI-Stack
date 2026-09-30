@@ -62,6 +62,11 @@ def evaluate_voice_turn(
             "time_to_first_transcript_ms": event.time_to_first_transcript_ms,
             "time_to_first_token_ms": event.time_to_first_token_ms,
             "time_to_first_audio_ms": event.time_to_first_audio_ms,
+            "latency_baseline_ms": (
+                event.latency_baseline_ms.model_dump(mode="json")
+                if event.latency_baseline_ms is not None
+                else None
+            ),
             "audio_input_bytes": event.audio_input_bytes,
             "audio_output_bytes": event.audio_output_bytes,
             "interrupted": event.interrupted,

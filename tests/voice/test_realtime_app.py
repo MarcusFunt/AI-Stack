@@ -53,6 +53,41 @@ class FakeProviders:
         return True
 
 
+class CancellationSwallowingLLMProviders(FakeProviders):
+    async def chat_deltas(self, history, *, traceparent: str | None = None):
+        self.chat_histories.append([dict(message) for message in history])
+        if len(self.chat_histories) == 1:
+            yield "First sentence. "
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                yield "Stale output after cancellation."
+        else:
+            yield "Fresh response."
+
+
+class CancellationSwallowingTTSProviders(FakeProviders):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.synthesis_count = 0
+
+    async def chat_deltas(self, history, *, traceparent: str | None = None):
+        self.chat_histories.append([dict(message) for message in history])
+        yield "First sentence. Second sentence."
+        if len(self.chat_histories) > 1:
+            yield "Fresh answer."
+
+    async def synthesize(self, text: str, *, traceparent: str | None = None):
+        self.synthesis_count += 1
+        if self.synthesis_count == 2:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.02)
+                return b"stale-audio", 24_000, 1
+        return b"\x00\x00" * 2_400, 24_000, 1
+
+
 class RealtimeVoiceAppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -180,6 +215,161 @@ class RealtimeVoiceAppTests(unittest.TestCase):
         self.assertTrue(provider.evaluation_events[0]["truncation_recorded"])
         self.assertNotIn("transcript", provider.evaluation_events[0])
         self.assertNotIn("audio", provider.evaluation_events[0])
+        first_generation = next(
+            event["generation_id"]
+            for event in received
+            if event["type"] == "response.cancelled"
+        )
+        self.assertGreater(first_generation, 0)
+        self.assertEqual(first_generation, first_audio["generation_id"])
+        next_response = next(event for event in received if event["type"] == "response.created")
+        self.assertGreater(next_response["generation_id"], first_generation)
+
+    def test_response_event_order_and_latency_baseline_are_reported(self):
+        session = self.client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer voice-test-key"},
+            json={"language": "en"},
+        ).json()
+        with self.client.websocket_connect(
+            f"/ws/{session['id']}",
+            subprotocols=["ai-stack.voice.v1", f"ai-stack.ticket.{session['client_secret']['value']}"],
+        ) as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            self._send_turn(websocket)
+            events = []
+            for _ in range(20):
+                event = websocket.receive_json()
+                events.append(event)
+                if event["type"] == "response.done":
+                    break
+
+        response_events = [
+            event for event in events
+            if event["type"] in {
+                "response.created",
+                "response.output_text.delta",
+                "response.audio.delta",
+                "response.done",
+            }
+        ]
+        self.assertEqual(
+            [event["type"] for event in response_events],
+            [
+                "response.created",
+                "response.output_text.delta",
+                "response.audio.delta",
+                "response.output_text.delta",
+                "response.audio.delta",
+                "response.done",
+            ],
+        )
+        self.assertEqual(len({event["generation_id"] for event in response_events}), 1)
+        self.assertTrue(all(event["turn_id"] for event in response_events))
+        baseline = self.providers[0].evaluation_events[0]["latency_baseline_ms"]
+        self.assertGreaterEqual(baseline["sample_count"], 1)
+        self.assertIn("p50", baseline["time_to_first_audio_ms"])
+        self.assertIn("p95", baseline["time_to_first_audio_ms"])
+
+    def test_cancelled_llm_generation_cannot_emit_late_text(self):
+        def make_provider(**kwargs):
+            provider = CancellationSwallowingLLMProviders(**kwargs)
+            self.providers.append(provider)
+            return provider
+
+        self.client = TestClient(
+            self.voice.create_app(api_key="voice-test-key", provider_factory=make_provider)
+        )
+        session = self.client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer voice-test-key"},
+            json={"language": "en"},
+        ).json()
+        with self.client.websocket_connect(
+            f"/ws/{session['id']}",
+            subprotocols=["ai-stack.voice.v1", f"ai-stack.ticket.{session['client_secret']['value']}"],
+        ) as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            self._send_turn(websocket)
+            first_audio = None
+            for _ in range(12):
+                event = websocket.receive_json()
+                if event["type"] == "response.audio.delta":
+                    first_audio = event
+                    break
+            self.assertIsNotNone(first_audio)
+
+            self._send_turn(websocket)
+            received = []
+            for _ in range(30):
+                event = websocket.receive_json()
+                received.append(event)
+                if event["type"] == "response.done":
+                    break
+
+        self.assertNotIn("Stale output after cancellation.", "".join(
+            event.get("delta", "") for event in received
+        ))
+        cancellation_index = next(
+            index for index, event in enumerate(received)
+            if event["type"] == "response.cancelled"
+        )
+        late_old_response_events = [
+            event for event in received[cancellation_index + 1:]
+            if event.get("response_id") == first_audio["response_id"]
+            and event["type"] in {"response.output_text.delta", "response.audio.delta", "response.done"}
+        ]
+        self.assertEqual(late_old_response_events, [])
+
+    def test_cancelled_tts_generation_cannot_emit_late_audio(self):
+        def make_provider(**kwargs):
+            provider = CancellationSwallowingTTSProviders(**kwargs)
+            self.providers.append(provider)
+            return provider
+
+        self.client = TestClient(
+            self.voice.create_app(api_key="voice-test-key", provider_factory=make_provider)
+        )
+        session = self.client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer voice-test-key"},
+            json={"language": "en"},
+        ).json()
+        with self.client.websocket_connect(
+            f"/ws/{session['id']}",
+            subprotocols=["ai-stack.voice.v1", f"ai-stack.ticket.{session['client_secret']['value']}"],
+        ) as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            self._send_turn(websocket)
+            first_audio = None
+            for _ in range(12):
+                event = websocket.receive_json()
+                if event["type"] == "response.audio.delta":
+                    first_audio = event
+                    break
+            self.assertIsNotNone(first_audio)
+
+            self._send_turn(websocket)
+            received = []
+            for _ in range(30):
+                event = websocket.receive_json()
+                received.append(event)
+                if event["type"] == "response.done":
+                    break
+
+        canceled_audio = [
+            event for event in received
+            if event["type"] == "response.audio.delta"
+            and event.get("response_id") == first_audio["response_id"]
+        ]
+        self.assertEqual(len(canceled_audio), 0)
+        self.assertEqual(
+            [event["type"] for event in received if event["type"] == "response.cancelled"],
+            ["response.cancelled"],
+        )
 
     def test_voice_stage_spans_preserve_and_forward_the_inbound_trace_id(self):
         parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
