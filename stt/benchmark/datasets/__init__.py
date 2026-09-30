@@ -19,6 +19,7 @@ from .speech_recognition import (
     NstDanishTestAdapter,
     prepare_single_speaker_suite,
 )
+from .danpass import write_pending_access_status
 
 __all__ = [
     "DATASET_CLASSES",
@@ -45,6 +46,7 @@ __all__ = [
     "prepare_samtalebank",
     "prepare_diarization_k3",
     "prepare_single_speaker_suite",
+    "write_pending_access_status",
     "update_lock",
     "validate_manifest",
     "window_metrics",

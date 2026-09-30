@@ -98,4 +98,12 @@ Single-speaker held-out suites are prepared independently so optional data is do
 
 CoRal reads the `conversational` config's `test` split; NST and FLEURS read their official `test` splits, with FLEURS using `da_dk`. Each manifest retains raw reference text, available speaker/dialect/age/gender metadata, audio duration, and an immutable dataset SHA. `strata-summary.json` groups available dialect, accent, age, gender, and duration categories; groups below 1,000 reference words are marked `insufficient_n`. CoRal uses the Hugging Face card's `openrail` license label, NST is CC0, and FLEURS is CC-BY-4.0.
 
+The DanPASS sound archives are password-protected. Until the corpus password is configured, record the access state and continue other suites:
+
+```powershell
+.\scripts\prepare-stt-benchmark.ps1 -Suite danpass-dialogue
+```
+
+This writes `dataset-status.json` with `PENDING_ACCESS`, the corpus contact, and the official non-commercial attribution terms. Request the password from the listed contact, then download stereo dialogue audio, separate speaker channels, and TextGrids through the official DanPASS page. The command does not contact the corpus or request/store credentials.
+
 Dataset interpretation remains separated by evidence class: Sam3 and DanPASS are PRIMARY-INDEPENDENTISH; CoRal/NST/FLEURS are held-out in-domain suites; the synthetic diarization dataset is CONTROLLED-SYNTHETIC. No overall score averages these classes together. Sam3 has no declared candidate fine-tuning overlap, though base-model pretraining overlap cannot be ruled out.

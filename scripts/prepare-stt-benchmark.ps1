@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-  [ValidateSet("samtalebank-sam3", "diarization-k3", "coral-conversation-test", "nst-da-test", "fleurs-da-dk-test")][string]$Suite = "samtalebank-sam3",
+  [ValidateSet("samtalebank-sam3", "diarization-k3", "coral-conversation-test", "nst-da-test", "fleurs-da-dk-test", "danpass-dialogue")][string]$Suite = "samtalebank-sam3",
   [string]$SourcePath = "",
   [string]$OutputDirectory = "",
   [int]$Seed = 20260930,

@@ -13,6 +13,7 @@ from .speech_recognition import (
     FleursDanishTestAdapter,
     NstDanishTestAdapter,
 )
+from .danpass import write_pending_access_status
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
             "coral-conversation-test",
             "nst-da-test",
             "fleurs-da-dk-test",
+            "danpass-dialogue",
         ),
         required=True,
     )
@@ -57,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
                 lock_path=lock_path,
                 revision=args.revision,
             )
+        elif args.suite == "danpass-dialogue":
+            status_path = write_pending_access_status(output_dir)
+            print(f"Dataset status: {status_path} (PENDING_ACCESS)")
+            return 0
         else:
             adapters = {
                 "coral-conversation-test": CoRalConversationTestAdapter,
