@@ -6,6 +6,7 @@ import io
 import time
 import wave
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +23,17 @@ from voice.session import RealtimeSession, SentenceChunker, visible_assistant_te
 from voice.turn_detection import TurnEvent
 
 VOICE_SAMPLE_RATE = 16_000
+
+
+@dataclass(frozen=True, slots=True)
+class AudioOutput:
+    pcm: bytes
+    sample_rate: int
+    channels: int
+    text: str
+    response_id: str
+    turn_id: str
+    generation_id: int
 
 
 def _pcm_wav(audio: bytes, sample_rate: int = VOICE_SAMPLE_RATE) -> bytes:
@@ -51,12 +63,14 @@ class RealtimeRuntime:
         metrics: VoiceMetrics,
         send_event: Callable[[dict[str, Any]], Awaitable[None]],
         parent_trace_context: Any,
+        send_audio: Callable[[AudioOutput], Awaitable[bool]] | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
         self.metrics = metrics
         self.send_event = send_event
         self.parent_trace_context = parent_trace_context
+        self.send_audio = send_audio
         self.response_task: asyncio.Task | None = None
         self.response_state: dict[str, Any] | None = None
         self.active_turn_stats: dict[str, Any] | None = None
@@ -421,19 +435,40 @@ class RealtimeRuntime:
                 if not is_current() or not pcm:
                     return
 
-                async def send_audio_delta() -> bool:
-                    return await self._emit(
-                        "response.audio.delta",
-                        response_id=response_id,
-                        turn_id=turn["id"],
-                        generation_id=generation_id,
-                        guard_generation_id=generation_id,
-                        guard_response_id=response_id,
-                        delta=base64.b64encode(pcm).decode("ascii"),
+                if self.send_audio is None:
+
+                    async def send_audio_delta() -> bool:
+                        return await self._emit(
+                            "response.audio.delta",
+                            response_id=response_id,
+                            turn_id=turn["id"],
+                            generation_id=generation_id,
+                            guard_generation_id=generation_id,
+                            guard_response_id=response_id,
+                            delta=base64.b64encode(pcm).decode("ascii"),
+                            sample_rate=sample_rate,
+                            channels=channels,
+                            text=chunk,
+                        )
+
+                else:
+                    audio_output = AudioOutput(
+                        pcm=pcm,
                         sample_rate=sample_rate,
                         channels=channels,
                         text=chunk,
+                        response_id=response_id,
+                        turn_id=turn["id"],
+                        generation_id=generation_id,
                     )
+
+                    async def send_audio_delta() -> bool:
+                        async with self._send_lock:
+                            if not self.session.generation_is_current(
+                                generation_id, response_id
+                            ):
+                                return False
+                            return await self.send_audio(audio_output)
 
                 send_task = asyncio.create_task(send_audio_delta())
                 self._pending_audio_send_task = send_task

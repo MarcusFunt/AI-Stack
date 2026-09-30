@@ -253,5 +253,135 @@ class RealtimeRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def test_webrtc_audio_sink_replaces_base64_event_and_records_transport_acceptance(self):
+        session, _ = VoiceSessionRegistry().create(principal="client", traceparent=None)
+        providers = ImmediateProviders()
+        events = []
+        audio_outputs = []
+
+        async def send_event(event):
+            events.append(dict(event))
+
+        async def send_audio(output):
+            audio_outputs.append(output)
+            return True
+
+        runtime = RealtimeRuntime(
+            session=session,
+            provider=providers,
+            metrics=VoiceMetrics(),
+            send_event=send_event,
+            send_audio=send_audio,
+            parent_trace_context=extract_trace_context({}, session_id=session.id),
+        )
+        runtime.start_turn(b"\x00\x00" * 100)
+        await runtime.response_task
+        await runtime.close()
+
+        self.assertNotIn("response.audio.delta", [event["type"] for event in events])
+        self.assertEqual(len(audio_outputs), 1)
+        self.assertEqual(audio_outputs[0].pcm, b"\x00\x00" * 24)
+        self.assertEqual(audio_outputs[0].sample_rate, 24_000)
+        self.assertEqual(audio_outputs[0].channels, 1)
+        self.assertEqual(audio_outputs[0].text, "Answer.")
+        self.assertEqual(session.audio_output_bytes, 48)
+        self.assertEqual(providers.evaluations[0]["audio_output_bytes"], 48)
+
+    async def test_webrtc_audio_sink_rejects_stale_generation(self):
+        session, _ = VoiceSessionRegistry().create(principal="client", traceparent=None)
+        providers = GatedSynthesisProviders()
+        events = []
+        audio_outputs = []
+
+        async def send_event(event):
+            events.append(dict(event))
+
+        async def send_audio(output):
+            audio_outputs.append(output)
+            return True
+
+        runtime = RealtimeRuntime(
+            session=session,
+            provider=providers,
+            metrics=VoiceMetrics(),
+            send_event=send_event,
+            send_audio=send_audio,
+            parent_trace_context=extract_trace_context({}, session_id=session.id),
+        )
+        runtime.start_turn(b"\x00\x00" * 100)
+        await asyncio.wait_for(providers.synthesis_started.wait(), timeout=1)
+        await runtime._send_lock.acquire()
+        providers.release_synthesis.set()
+
+        async def pending_audio_send_exists():
+            while runtime._pending_audio_send_task is None:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(pending_audio_send_exists(), timeout=1)
+        session.invalidate_generation()
+        runtime._send_lock.release()
+        await runtime.response_task
+        await runtime.close()
+
+        self.assertEqual(audio_outputs, [])
+        self.assertNotIn("response.audio.delta", [event["type"] for event in events])
+        self.assertEqual(session.audio_output_bytes, 0)
+
+    async def test_webrtc_audio_sink_records_only_transport_acceptance(self):
+        session, _ = VoiceSessionRegistry().create(principal="client", traceparent=None)
+        providers = ImmediateProviders()
+        events = []
+        audio_outputs = []
+
+        async def send_event(event):
+            events.append(dict(event))
+
+        async def send_audio(output):
+            audio_outputs.append(output)
+            return False
+
+        runtime = RealtimeRuntime(
+            session=session,
+            provider=providers,
+            metrics=VoiceMetrics(),
+            send_event=send_event,
+            send_audio=send_audio,
+            parent_trace_context=extract_trace_context({}, session_id=session.id),
+        )
+        runtime.start_turn(b"\x00\x00" * 100)
+        await runtime.response_task
+        await runtime.close()
+
+        self.assertEqual(len(audio_outputs), 1)
+        self.assertNotIn("response.audio.delta", [event["type"] for event in events])
+        self.assertEqual(session.audio_output_bytes, 0)
+        self.assertEqual(providers.evaluations[0]["audio_output_bytes"], 0)
+
+    async def test_websocket_default_emits_existing_base64_audio_delta(self):
+        session, _ = VoiceSessionRegistry().create(principal="client", traceparent=None)
+        providers = ImmediateProviders()
+        events = []
+
+        async def send_event(event):
+            events.append(dict(event))
+
+        runtime = RealtimeRuntime(
+            session=session,
+            provider=providers,
+            metrics=VoiceMetrics(),
+            send_event=send_event,
+            parent_trace_context=extract_trace_context({}, session_id=session.id),
+        )
+        runtime.start_turn(b"\x00\x00" * 100)
+        await runtime.response_task
+        await runtime.close()
+
+        audio = next(event for event in events if event["type"] == "response.audio.delta")
+        self.assertEqual(audio["delta"], "A" * 64)
+        self.assertEqual(audio["sample_rate"], 24_000)
+        self.assertEqual(audio["channels"], 1)
+        self.assertEqual(audio["text"], "Answer.")
+        self.assertEqual(audio["generation_id"], 1)
+        self.assertEqual(session.audio_output_bytes, 48)
 if __name__ == "__main__":
     unittest.main()
