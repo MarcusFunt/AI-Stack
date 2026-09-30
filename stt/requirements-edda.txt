@@ -1,0 +1,2 @@
+# Edda's pinned tokenizer config uses the Transformers v5 extra-special-token API.
+transformers==5.10.1

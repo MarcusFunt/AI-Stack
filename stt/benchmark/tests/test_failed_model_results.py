@@ -64,9 +64,9 @@ class FailedModelResultTests(unittest.TestCase):
             payload = json.loads((output / "results.json").read_text(encoding="utf-8"))
         self.assertEqual(exit_code, 1)
         self.assertEqual(payload["models"]["edda"]["status"], "failed")
-        self.assertEqual(payload["models"]["edda"]["failure"], {
-            "class": "RuntimeError", "message": "decoder failed",
-        })
+        self.assertEqual(payload["models"]["edda"]["failure"]["class"], "RuntimeError")
+        self.assertEqual(payload["models"]["edda"]["failure"]["message"], "decoder failed")
+        self.assertIn("RuntimeError: decoder failed", payload["models"]["edda"]["failure"]["traceback"])
         self.assertIsNone(payload["models"]["edda"]["content_wer"])
 
     def test_oom_is_unscored_and_excluded_from_ranking_and_pairs(self):

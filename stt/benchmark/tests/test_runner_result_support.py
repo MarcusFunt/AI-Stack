@@ -4,6 +4,7 @@ import json
 import tempfile
 
 from stt.benchmark.runner import _aggregate_der, _dataset_info, _is_oom_error
+from stt.benchmark.datasets.provenance import canonical_json_sha256
 
 
 class RunnerResultSupportTests(unittest.TestCase):
@@ -27,6 +28,7 @@ class RunnerResultSupportTests(unittest.TestCase):
             }], manifest)
         self.assertEqual(info["dataset_lock_sha256"], expected_lock_hash)
         self.assertEqual(info["dataset_lock_entry"], entry)
+        self.assertEqual(info["dataset_lock_entry_sha256"], canonical_json_sha256(entry))
 
     def test_dataset_info_collects_schema_v2_provenance(self):
         records = [{

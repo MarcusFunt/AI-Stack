@@ -5,7 +5,9 @@ param(
   [string]$Output = "",
   [string]$BenchmarkDataRoot = "",
   [string]$CodeDirectory = "",
+  [string]$PythonExecutable = "python",
   [switch]$UseExistingStack,
+  [switch]$InstallEddaRuntime,
   [string[]]$Models = @("edda","saga2","hviske"),
   [ValidateRange(1,16)][int]$BatchSize = 2,
   [ValidateRange(1,10)][int]$BeamSize = 5,
@@ -45,6 +47,12 @@ Assert-UnderBenchmarkRoot $Output "Output"
 if($CodeDirectory) {
   $CodeDirectory = (Resolve-Path $CodeDirectory).Path
   Assert-UnderBenchmarkRoot $CodeDirectory "CodeDirectory"
+  if(-not (Test-Path (Join-Path $CodeDirectory "benchmark\runner.py"))) {
+    throw "CodeDirectory must contain benchmark\runner.py."
+  }
+}
+if($PythonExecutable -notmatch '^[A-Za-z0-9_./-]+$') {
+  throw "PythonExecutable must be a container executable path using letters, digits, '.', '_', '/', or '-'."
 }
 
 function To-ContainerPath([string]$Path) {
@@ -72,6 +80,18 @@ $acquired = $false
 try {
   Invoke-Supervisor "POST" ("/acquire/stt?lease_id=" + $leaseId + "&profile=benchmark&exclusive=true") | Out-Null
   $acquired = $true
+  if($InstallEddaRuntime) {
+    if($Models -notcontains "edda") { throw "-InstallEddaRuntime requires edda in -Models." }
+    & docker exec ai-stack-stt python -m venv --system-site-packages /edda-venv
+    if($LASTEXITCODE -ne 0) { throw "failed to create the isolated Edda Python environment" }
+    $sharedPackagesCode = 'import pathlib,site,sys; shared=f"/venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"; pathlib.Path(site.getsitepackages()[0],"ai_stack_shared.pth").write_text(shared + "\n",encoding="utf-8")'
+    & docker exec ai-stack-stt /edda-venv/bin/python -c $sharedPackagesCode
+    if($LASTEXITCODE -ne 0) { throw "failed to link shared base packages into the Edda environment" }
+    & docker exec ai-stack-stt /edda-venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check "transformers==5.10.1"
+    if($LASTEXITCODE -ne 0) { throw "failed to install the pinned Edda Transformers runtime" }
+    & docker exec ai-stack-stt /edda-venv/bin/python -c "import torch,transformers; print('Edda runtime:', transformers.__version__, 'Torch:', torch.__version__)"
+    if($LASTEXITCODE -ne 0) { throw "the isolated Edda runtime could not import its model dependencies" }
+  }
   & docker exec ai-stack-stt python -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/internal/benchmark/unload',method='POST'),timeout=30).read()"
   if($LASTEXITCODE -ne 0) { throw "failed to unload the resident faster-whisper model" }
   $containerCodeDirectory = if($CodeDirectory) { To-ContainerPath $CodeDirectory } else { $null }
@@ -80,7 +100,7 @@ try {
     $args += @("-w",$containerCodeDirectory,"-e",("PYTHONPATH=" + $containerCodeDirectory))
   }
   $args += @(
-    "ai-stack-stt","python","-m","benchmark.runner",
+    "ai-stack-stt",$PythonExecutable,"-m","benchmark.runner",
     "--manifest",(To-ContainerPath $Manifest),
     "--output",(To-ContainerPath $Output),
     "--batch-size",$BatchSize,

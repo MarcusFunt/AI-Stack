@@ -8,6 +8,10 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0 \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-benchmark.txt
+COPY requirements-edda.txt ./
+RUN python3 -m venv --system-site-packages /edda-venv \
+    && /edda-venv/bin/python -c 'import pathlib, site, sys; shared = f"/venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"; pathlib.Path(site.getsitepackages()[0], "ai_stack_shared.pth").write_text(shared + "\n", encoding="utf-8")' \
+    && /edda-venv/bin/python -m pip install --no-cache-dir -r requirements-edda.txt
 COPY app.py .
 COPY benchmark ./benchmark
 ARG SOURCE_HASH=unknown

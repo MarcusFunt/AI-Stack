@@ -132,7 +132,7 @@ class AnalysisReportTests(unittest.TestCase):
             self.assertEqual(int(pairs[0]["group_count"]), 2)
             report_text = outputs["report"].read_text(encoding="utf-8")
             self.assertIn("No overall average combines", report_text)
-            self.assertIn("Best model for natural three-speaker Danish conversation: no decisive candidate evidence", report_text)
+            self.assertIn("Natural three-speaker Danish conversation evidence: no decisive candidate evidence", report_text)
             self.assertIn("Grouped 95% CI", report_text)
             with outputs["strata_summary"].open(encoding="utf-8", newline="") as handle:
                 strata = list(csv.DictReader(handle))

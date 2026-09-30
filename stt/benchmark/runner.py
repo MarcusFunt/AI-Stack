@@ -4,8 +4,10 @@ import argparse
 import csv
 import hashlib
 import json
+import platform
 import tempfile
 import time
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -23,12 +25,15 @@ from .models import MODEL_SPECS, load_adapter
 from .revisions import parse_revision_overrides
 from .evaluation_protocol import evaluation_protocol
 from .datasets.provenance import canonical_json_sha256, file_sha256
-from .analysis.evidence import model_dataset_evidence
+from .analysis.evidence import build_model_dataset_evidence
 
 
 def package_versions() -> dict[str, str]:
-    names = ["torch", "transformers", "librosa", "num2words", "text2num"]
-    versions = {}
+    names = [
+        "torch", "transformers", "librosa", "num2words", "text2num",
+        "huggingface-hub", "tokenizers", "accelerate", "safetensors", "sentencepiece",
+    ]
+    versions = {"python": platform.python_version()}
     for name in names:
         try:
             versions[name] = version(name)
@@ -141,6 +146,9 @@ def _dataset_info(records: list[dict], manifest_path: Path) -> dict:
         "dataset_lock": str(lock_candidate) if lock_candidate.is_file() else None,
         "dataset_lock_sha256": file_sha256(lock_candidate) if lock_candidate.is_file() else None,
         "dataset_lock_entry": lock_entry,
+        "dataset_lock_entry_sha256": (
+            canonical_json_sha256(lock_entry) if isinstance(lock_entry, dict) else None
+        ),
     }
 
 
@@ -477,6 +485,7 @@ def main() -> int:
         adapter = None
         failure_class = None
         failure_message = None
+        failure_traceback = None
         oom_failure = False
         elapsed = 0.0
         try:
@@ -490,6 +499,7 @@ def main() -> int:
                 hypotheses = [""] * len(records)
                 failure_class = type(exc).__name__
                 failure_message = str(exc)
+                failure_traceback = traceback.format_exc()
                 oom_failure = _is_oom_error(exc)
             else:
                 started = time.perf_counter()
@@ -505,6 +515,7 @@ def main() -> int:
                     hypotheses = [""] * len(records)
                     failure_class = type(exc).__name__
                     failure_message = str(exc)
+                    failure_traceback = traceback.format_exc()
                     oom_failure = _is_oom_error(exc)
                 elapsed = time.perf_counter() - started
 
@@ -512,10 +523,14 @@ def main() -> int:
                 results["models"][alias] = {
                     "repo": MODEL_SPECS[alias]["repo"],
                     "license": MODEL_SPECS[alias]["license"],
-                    "revision": getattr(adapter, "revision", None),
+                    "revision": getattr(adapter, "revision", None) or requested_revisions.get(alias),
                     "requested_revision": requested_revisions.get(alias),
                     "status": "failed",
-                    "failure": {"class": failure_class, "message": failure_message or ""},
+                    "failure": {
+                        "class": failure_class,
+                        "message": failure_message or "",
+                        "traceback": failure_traceback or "",
+                    },
                     "content_wer": None,
                     "content_errors": None,
                     "content_reference_words": None,
@@ -634,7 +649,7 @@ def main() -> int:
 
     der_values = [item["der"] for item in der_by_id.values()]
     for alias, model_result in results["models"].items():
-        model_result["evidence"] = model_dataset_evidence(results, alias)
+        model_result["evidence"] = build_model_dataset_evidence(results, alias)
     results["diarization"]["macro_der"] = (
         sum(der_values) / len(der_values) if der_values else None
     )

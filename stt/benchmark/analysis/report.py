@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,9 @@ from .comparison import (
     is_successful_model,
     pairwise_comparison_rows,
 )
-from .evidence import MODEL_DATASET_EVIDENCE, MODEL_METADATA, model_dataset_evidence
+from .evidence import model_dataset_evidence
 from .strata import metadata_stratified_metrics, sam3_stratified_metrics
-from ..datasets.provenance import file_sha256
+from ..datasets.provenance import canonical_json_sha256, file_sha256
 
 def _safe_component(value: str) -> str:
     result = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")
@@ -37,14 +38,15 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _dataset_signature(result: dict[str, Any]) -> str:
     dataset = dataset_info(result)
+    lock_entry_hash = _dataset_lock_entry_hash(dataset)
     stable_dataset_fields = {
         key: dataset.get(key)
         for key in (
             "name", "class", "source_url", "source_license",
             "source_revisions", "reference_transforms", "manifest_sha256",
-            "dataset_lock_sha256",
         )
     }
+    stable_dataset_fields["dataset_lock_entry_sha256"] = lock_entry_hash
     recordings = [
         {
             "id": row.get("id"),
@@ -66,11 +68,41 @@ def _dataset_signature(result: dict[str, Any]) -> str:
     )
 
 
+def _dataset_lock_entry_hash(dataset: dict[str, Any]) -> str | None:
+    entry = dataset.get("dataset_lock_entry")
+    stored_hash = dataset.get("dataset_lock_entry_sha256")
+    calculated_hash = canonical_json_sha256(entry) if isinstance(entry, dict) else None
+    if stored_hash and calculated_hash and stored_hash != calculated_hash:
+        raise ValueError("dataset lock entry SHA-256 does not match the embedded lock entry")
+    return stored_hash or calculated_hash
+
+
+def _provenance_evidence(run: dict[str, Any], alias: str) -> dict[str, Any]:
+    try:
+        schema_version = int(run.get("schema_version", 0) or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    model = run.get("models", {}).get(alias, {})
+    if schema_version >= 3:
+        evidence = model.get("evidence") if isinstance(model, dict) else None
+        if not isinstance(evidence, dict):
+            raise ValueError(f"schema-v3 result is missing model evidence for {alias}")
+        return deepcopy(evidence)
+    return model_dataset_evidence(run, alias)
+
+
 def _merge_runs(results_paths: list[Path]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for path in results_paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         dataset = dataset_info(payload)
+        try:
+            schema_version = int(payload.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
+        if schema_version >= 3:
+            for alias in payload.get("models", {}):
+                model_dataset_evidence(payload, alias)
         key = str(dataset.get("name", "private-manifest"))
         if key not in grouped:
             merged = dict(payload)
@@ -221,11 +253,11 @@ def _decision_lines(runs: list[dict[str, Any]], pair_rows: list[dict[str, Any]])
     if sam3:
         sam3_pairs = [row for row in pair_rows if row["dataset"] == "samtalebank-sam3"]
         lines.append(_recommend_for_suite(
-            sam3, sam3_pairs, label="Best model for natural three-speaker Danish conversation"
+            sam3, sam3_pairs, label="Natural three-speaker Danish conversation evidence"
         ))
         lines.append("No declared candidate fine-tuning overlap was found for Sam3; base-model pretraining overlap cannot be ruled out.")
     else:
-        lines.append("Best model for natural three-speaker Danish conversation: pending Sam3 results.")
+        lines.append("Natural three-speaker Danish conversation evidence: pending Sam3 results.")
 
     conventional_name = next(
         (name for name in ("coral-conversation-test", "nst-da-test", "fleurs-da-dk-test") if name in by_name),
@@ -236,11 +268,11 @@ def _decision_lines(runs: list[dict[str, Any]], pair_rows: list[dict[str, Any]])
         lines.append(_recommend_for_suite(
             conventional,
             [row for row in pair_rows if row["dataset"] == conventional_name],
-            label=f"Best model for conventional single-speaker Danish ASR ({conventional_name})",
+            label=f"Conventional single-speaker Danish ASR evidence ({conventional_name})",
         ))
         lines.append("Other single-speaker suites are supporting evidence; their scores are not pooled.")
     else:
-        lines.append("Best model for conventional single-speaker Danish ASR: pending held-out single-speaker results.")
+        lines.append("Conventional single-speaker Danish ASR evidence: pending held-out single-speaker results.")
     if "coral-conversation-test" in by_name:
         lines.append("CoRal is a held-out in-domain robustness check. No automatic Sam3-winner rejection threshold is configured; any claimed large regression needs a predeclared threshold and reproducible evidence.")
     if "diarization-k3" in by_name:
@@ -313,7 +345,7 @@ def generate_report(
         "bootstrap": {"samples": bootstrap_samples, "seed": seed, "confidence": 0.95},
         "evidence_relationships": {
             dataset_info(run).get("name"): {
-                alias: model_dataset_evidence(run, alias)
+                alias: _provenance_evidence(run, alias)
                 for alias in run.get("models", {})
             }
             for run in runs
@@ -344,6 +376,7 @@ def generate_report(
                 "dataset_lock": dataset_info(run).get("dataset_lock"),
                 "dataset_lock_sha256": dataset_info(run).get("dataset_lock_sha256"),
                 "dataset_lock_entry": dataset_info(run).get("dataset_lock_entry"),
+                "dataset_lock_entry_sha256": _dataset_lock_entry_hash(dataset_info(run)),
                 "manifest": run.get("manifest"),
                 "manifest_sha256": dataset_info(run).get("manifest_sha256"),
                 "reference_semantics": dataset_info(run).get("reference_semantics"),
@@ -419,25 +452,21 @@ def generate_report(
     ])
     training_rows = [
         "",
-        "## Declared model training data overlap and dataset evidence",
+        "## Model training data declarations and dataset evidence",
         "",
         "Relationships are model-by-dataset declarations. Recommendation logic uses only successful candidates marked decisive; all scores remain visible. Model revisions identify the exact evaluated checkpoint.",
         "",
         "| Model | Dataset | Status | Decisive | Evidence note |",
         "|---|---|---|---:|---|",
     ]
-    dataset_names = sorted({
-        dataset for relationships in MODEL_DATASET_EVIDENCE.values()
-        for dataset in relationships
-    })
-    for alias, details in MODEL_METADATA.items():
-        for dataset_name in dataset_names:
-            relationship = MODEL_DATASET_EVIDENCE.get(alias, {}).get(dataset_name, {
-                "status": "unknown", "decisive": False,
-                "note": "No candidate-specific evidence is recorded for this dataset.",
-            })
+    for run in runs:
+        dataset_name = dataset_info(run).get("name", "unknown")
+        for alias in run.get("models", {}):
+            relationship = model_dataset_evidence(run, alias)
+            model_card = relationship.get("model_card") or relationship.get("source_url") or ""
+            model_label = f"[{alias}]({model_card})" if model_card else alias
             training_rows.append(
-                f"| [{alias}]({details['model_card']}) | {dataset_name} | "
+                f"| {model_label} | {dataset_name} | "
                 f"{relationship['status']} | {str(relationship['decisive']).lower()} | "
                 f"{relationship['note']} |"
             )

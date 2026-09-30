@@ -49,6 +49,8 @@ The wrapper acquires an **exclusive** supervisor lease for `stt` with the `bench
 
 For a worktree whose Docker worker mounts benchmark data from another checkout, `prepare-stt-benchmark.ps1` and `benchmark-stt.ps1` accept `-BenchmarkDataRoot` to target that mounted host directory. The run wrapper also accepts `-CodeDirectory` for a `benchmark` package staged under that mount, and `-UseExistingStack` skips Compose startup after the supervisor status has been checked. These options let a branch be exercised with the existing worker image and its installed dependencies while keeping GPU access behind the normal exclusive lease.
 
+Edda uses an isolated `/edda-venv` with `transformers==5.10.1`; it shares the worker's existing Torch install, while the shared `/venv` remains pinned for Saga and Hviske. The wrapper can create this side environment in an existing worker with `-InstallEddaRuntime`; rebuilt STT images include it. Select it for Edda runs with `-PythonExecutable /edda-venv/bin/python`. Each result records Python, Torch, Transformers, Hugging Face Hub, Tokenizers, and the other benchmark runtime package versions.
+
 Useful options:
 
 ```powershell
