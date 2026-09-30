@@ -64,6 +64,7 @@ class RealtimeRuntime:
         send_event: Callable[[dict[str, Any]], Awaitable[None]],
         parent_trace_context: Any,
         send_audio: Callable[[AudioOutput], Awaitable[bool]] | None = None,
+        clear_audio: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.session = session
         self.provider = provider
@@ -71,6 +72,7 @@ class RealtimeRuntime:
         self.send_event = send_event
         self.parent_trace_context = parent_trace_context
         self.send_audio = send_audio
+        self.clear_audio = clear_audio
         self.response_task: asyncio.Task | None = None
         self.response_state: dict[str, Any] | None = None
         self.active_turn_stats: dict[str, Any] | None = None
@@ -94,6 +96,18 @@ class RealtimeRuntime:
                 return False
             await self.send_event(event)
         return True
+
+    async def _clear_audio(self) -> None:
+        if self.clear_audio is None:
+            return
+        # Keep the interruption ordered after any already-accepted output frame;
+        # generation invalidation prevents a later frame from entering the queue.
+        async with self._send_lock:
+            try:
+                await self.clear_audio()
+            except Exception:
+                # Audio cleanup must not prevent cancellation or session teardown.
+                return
 
     def _trace_id(self) -> str:
         parts = (self.session.traceparent or "").split("-")
@@ -145,6 +159,9 @@ class RealtimeRuntime:
                     generation_already_invalidated=True,
                     captured_state=captured_state,
                 )
+            else:
+                # A completed response may still have media queued in the transport.
+                await self._clear_audio()
             self.session.state = "LISTENING"
         elif event.kind == "speech_stopped" and event.audio:
             self.session.state = "TURN_PENDING"
@@ -280,10 +297,12 @@ class RealtimeRuntime:
         if response is not None and response.get("terminal_status") is not None:
             # Completion has been committed and its final event is in flight. Let that
             # event settle instead of turning a completed response into an interruption.
+            await self._clear_audio()
             if task is not None and not task.done():
                 await asyncio.gather(task, return_exceptions=True)
             return
         if task is None or task.done():
+            await self._clear_audio()
             if generation_already_invalidated and captured_state is not None:
                 await self._record_interruption(turn, response, reason)
             if self.response_task is task:
@@ -293,6 +312,7 @@ class RealtimeRuntime:
             return
         if not generation_already_invalidated:
             self.session.invalidate_generation()
+        await self._clear_audio()
         if response is not None:
             response["cancel_reason"] = reason
         task.cancel()

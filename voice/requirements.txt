@@ -6,3 +6,4 @@ opentelemetry-sdk>=1.29
 opentelemetry-exporter-otlp-proto-http>=1.29
 numpy>=2,<3
 scipy>=1.14,<2
+pipecat-ai[webrtc]==1.12.0

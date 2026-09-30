@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
+from voice.transports.turn import TurnCredentials
+
 
 @dataclass
 class RealtimeSession:
@@ -20,6 +22,7 @@ class RealtimeSession:
     conversation_id: str = field(default_factory=lambda: str(uuid4()))
     transport_type: str = "websocket"
     provider_type: str = "cascaded"
+    turn_credentials: TurnCredentials | None = None
     history: list[dict[str, str]] = field(default_factory=list)
     current_user_turn: int = 0
     current_assistant_turn: int = 0

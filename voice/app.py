@@ -21,9 +21,11 @@ from voice.providers import CascadedRealtimeProvider
 from voice.runtime import RealtimeRuntime
 from voice.session import VoiceSessionRegistry
 from voice.turn_detection import VoiceTurnDetector
+from voice.transports.turn import client_ice_servers, make_turn_credentials
 
 MAX_SESSION_BODY_BYTES = 16 * 1024
 MAX_AUDIO_MESSAGE_BYTES = 128 * 1024
+MAX_SDP_OFFER_BYTES = 128 * 1024
 VOICE_SAMPLE_RATE = 16_000
 VOICE_SUBPROTOCOL = "ai-stack.voice.v1"
 VOICE_TICKET_PREFIX = "ai-stack.ticket."
@@ -58,6 +60,7 @@ def create_app(
     registry: VoiceSessionRegistry | None = None,
     metrics: VoiceMetrics | None = None,
     provider_factory: Callable[..., Any] | None = None,
+    webrtc_factory: Callable[..., Any] | None = None,
     api_key: str | None = None,
 ) -> FastAPI:
     configured_key = (os.getenv("AI_API_KEY", "") if api_key is None else api_key).strip()
@@ -72,6 +75,7 @@ def create_app(
     make_providers = provider_factory or CascadedRealtimeProvider
     app = FastAPI(title="AI-Stack Realtime Voice", version="0.1.0")
     app.state.sessions = sessions
+    app.state.webrtc_peers = {}
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -114,17 +118,144 @@ def create_app(
             traceparent=request.headers.get("traceparent"),
         )
         expires_at = int(session.token_expires_at)
+        ice_servers: list[dict[str, object]] = []
+        turn_secret = os.getenv("VOICE_TURN_SHARED_SECRET", "").strip()
+        turn_hostname = os.getenv("VOICE_TURN_HOSTNAME", "").strip()
+        if turn_secret and turn_hostname:
+            credentials = make_turn_credentials(turn_secret)
+            ice_servers = client_ice_servers(credentials, hostname=turn_hostname)
+            if ice_servers:
+                session.turn_credentials = credentials
         return {
             "id": session.id,
             "object": "realtime.session",
             "expires_at": expires_at,
             "client_secret": {"value": token, "expires_at": expires_at},
             "ws_url": f"ws://voice:8000/ws/{session.id}",
+            "offer_url": f"http://voice:8000/sessions/{session.id}/offer",
+            "ice_servers": ice_servers,
             "language": "en",
             "input_audio_format": "pcm16",
             "input_sample_rate": VOICE_SAMPLE_RATE,
             "output_audio_format": "pcm16",
         }
+
+    @app.post("/sessions/{session_id}/offer")
+    async def create_webrtc_offer(request: Request, session_id: str) -> dict[str, str]:
+        active_metrics.record_webrtc_offer("started")
+
+        def fail_offer(status_code: int, detail: str, *, failure_class: str) -> None:
+            active_metrics.record_webrtc_offer("failed")
+            active_metrics.record_webrtc_offer_failure(failure_class)
+            raise HTTPException(status_code, detail)
+
+        supplied = request.headers.get("authorization", "")
+        if not secrets.compare_digest(supplied, f"Bearer {configured_key}"):
+            fail_offer(401, "invalid API key", failure_class="unauthorized")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            fail_offer(415, "offer must use application/json", failure_class="invalid_offer")
+        try:
+            content_length = int(request.headers.get("content-length", "0") or 0)
+        except ValueError:
+            fail_offer(400, "invalid offer content length", failure_class="invalid_offer")
+        if content_length > MAX_SDP_OFFER_BYTES:
+            fail_offer(413, "offer is too large", failure_class="invalid_offer")
+
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > MAX_SDP_OFFER_BYTES:
+                fail_offer(413, "offer is too large", failure_class="invalid_offer")
+        try:
+            body = json.loads(raw or b"{}")
+        except (ValueError, UnicodeDecodeError) as exc:
+            fail_offer(400, "offer must be JSON", failure_class="invalid_offer")
+        if (
+            not isinstance(body, dict)
+            or body.get("type") != "offer"
+            or not isinstance(body.get("sdp"), str)
+            or not body["sdp"].strip()
+        ):
+            fail_offer(
+                400,
+                "offer must include type=offer and non-empty sdp",
+                failure_class="invalid_offer",
+            )
+
+        ticket = request.headers.get("X-Voice-Session-Ticket", "")
+        if not ticket or len(ticket) > 128:
+            fail_offer(401, "invalid session ticket", failure_class="ticket_rejected")
+        session = sessions.consume(session_id, ticket)
+        if session is None:
+            fail_offer(401, "invalid session ticket", failure_class="ticket_rejected")
+
+        session.transport_type = "webrtc"
+        session.state = "CONNECTING"
+        active_metrics.active_sessions += 1
+        active_metrics.record_webrtc_peer_started()
+        finalized = False
+        peer = None
+
+        def finalize_peer(reason: str = "closed") -> None:
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            session.state = "CLOSED"
+            sessions.remove(session.id)
+            active_metrics.active_sessions = max(0, active_metrics.active_sessions - 1)
+            active_metrics.record_webrtc_peer_disconnected(reason)
+            app.state.webrtc_peers.pop(session.id, None)
+
+        async def on_peer_closed(reason: str = "closed") -> None:
+            finalize_peer(reason)
+
+        try:
+            session_trace_context = extract_trace_context(
+                {"traceparent": session.traceparent or "", "x-session-id": session.id},
+                session_id=session.id,
+            )
+            if webrtc_factory is None:
+                # Pipecat stays lazy so WebSocket-only sessions do not import its
+                # optional WebRTC dependencies.
+                from voice.transports.small_webrtc import SmallWebRTCPeer
+
+                make_webrtc_peer = SmallWebRTCPeer
+            else:
+                make_webrtc_peer = webrtc_factory
+            peer = make_webrtc_peer(
+                session=session,
+                provider_factory=make_providers,
+                metrics=active_metrics,
+                parent_trace_context=session_trace_context,
+                on_closed=on_peer_closed,
+            )
+            app.state.webrtc_peers[session.id] = peer
+            answer = await peer.accept_offer({"type": "offer", "sdp": body["sdp"]})
+            answer_sdp = answer.get("sdp") if isinstance(answer, dict) else None
+            if (
+                not isinstance(answer_sdp, str)
+                or not answer_sdp
+                or len(answer_sdp.encode("utf-8")) > MAX_SDP_OFFER_BYTES
+            ):
+                raise ValueError("invalid SDP answer")
+            session.state = "LISTENING"
+            active_metrics.record_webrtc_offer("succeeded")
+            return {"sdp": answer_sdp, "type": "answer"}
+        except Exception as exc:
+            active_metrics.record_webrtc_offer("failed")
+            active_metrics.record_webrtc_offer_failure("peer_error")
+            if peer is not None:
+                try:
+                    await peer.close("failed")
+                except Exception:
+                    finalize_peer("failed")
+            else:
+                finalize_peer("failed")
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(502, "WebRTC offer could not be processed") from exc
 
     @app.websocket("/ws/{session_id}")
     async def realtime_socket(websocket: WebSocket, session_id: str) -> None:

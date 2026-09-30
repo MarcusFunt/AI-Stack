@@ -35,5 +35,31 @@ class VoiceMetricsTests(unittest.TestCase):
         self.assertFalse(hasattr(metrics, "first_audio_seconds"))
 
 
+    def test_webrtc_metrics_use_only_bounded_labels(self) -> None:
+        metrics = VoiceMetrics()
+        metrics.record_webrtc_offer("started")
+        metrics.record_webrtc_offer("succeeded")
+        metrics.record_webrtc_offer_failure("unauthorized")
+        metrics.record_webrtc_offer_failure("session-secret")
+        metrics.record_webrtc_peer_started()
+        metrics.record_webrtc_audio("input", 640)
+        metrics.record_webrtc_audio("output", 960)
+        metrics.observe_webrtc_conversion("input", 0.004)
+        metrics.record_webrtc_conversion_failure("invalid_frame")
+        metrics.record_webrtc_conversion_failure("secret-session-value")
+        metrics.record_webrtc_frame_drop("output")
+        metrics.record_webrtc_peer_disconnected("secret-session-value")
+
+        rendered = metrics.render()
+
+        self.assertIn('ai_stack_voice_webrtc_offers_total{outcome="started"} 1', rendered)
+        self.assertIn('ai_stack_voice_webrtc_offer_failures_total{class="unauthorized"} 1', rendered)
+        self.assertIn('ai_stack_voice_webrtc_audio_frames_total{direction="input"} 1', rendered)
+        self.assertIn('ai_stack_voice_webrtc_audio_bytes_total{direction="output"} 960', rendered)
+        self.assertIn('ai_stack_voice_webrtc_audio_conversion_failures_total{class="invalid_frame"} 1', rendered)
+        self.assertNotIn("secret-session-value", rendered)
+        self.assertNotIn("turn-fixed", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
