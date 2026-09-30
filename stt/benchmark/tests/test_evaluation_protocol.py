@@ -105,6 +105,27 @@ class EvaluationProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incompatible dataset provenance"):
                 _merge_runs(paths)
 
+    def test_dataset_lock_entry_hash_is_validated_against_embedded_entry(self):
+        entry = {
+            "dataset": "fleurs-da-dk-test", "revision": "a" * 40,
+            "files": [{"path": "manifest.jsonl", "sha256": "b" * 64}],
+        }
+        first = self._result("f" * 64, "edda")
+        second = self._result("f" * 64, "hviske")
+        for payload in (first, second):
+            payload["dataset"].update({
+                "dataset_lock_entry": entry,
+                "dataset_lock_entry_sha256": canonical_json_sha256(entry),
+            })
+        second["dataset"]["dataset_lock_entry_sha256"] = "0" * 64
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / "first.json", Path(tmp) / "second.json"]
+            for path, payload in zip(paths, (first, second)):
+                path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "dataset lock entry SHA-256"):
+                _merge_runs(paths)
+
     def test_schema_v3_merge_rejects_missing_frozen_evidence(self):
         result = self._result("f" * 64, "edda")
         del result["models"]["edda"]["evidence"]
