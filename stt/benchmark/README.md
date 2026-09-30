@@ -63,3 +63,19 @@ Useful options:
 ```
 
 For an RTX 3060 12 GB, start with batch size 2; retry with 1 if a custom model runs out of VRAM.
+
+## Public dataset preparation
+
+Public suites use schema-v2 manifest rows and retain dataset class, source hashes, transcript hashes, license, source URL, and reference transformation metadata. The existing runner continues to accept private schema-v1 manifests.
+
+SamtaleBank Sam3 is the primary real three-speaker suite. Prepare it from locally downloaded and extracted files:
+
+    # First register/log in to TalkBank and accept the applicable SamtaleBank ground rules.
+    # Place the transcript and linked media files under data\stt-benchmark\raw\samtalebank-sam3.
+    .\scripts\prepare-stt-benchmark.ps1 -Suite samtalebank-sam3 -SourcePath data\stt-benchmark\raw\samtalebank-sam3
+
+Each .cha transcript must have its matching audio/video file named by @Media. Video conversion requires ffmpeg on PATH; extraction keeps the complete media timeline and writes mono 16 kHz PCM16 WAV without loudness normalization. The preparer never logs in to TalkBank or bypasses its access rules. If local Sam3 files are missing, it prints the steps needed to obtain them.
+
+CHAT/CA speaker tiers, hidden millisecond time bullets, continuation lines, and overlap are retained as timed reference segments. raw_text is preserved beside deterministic talkbank-ca-v1 scoring text. Windows are selected in source order, do not overlap, target 90 seconds (60–120 seconds allowed), and require all three speakers with at least three seconds each. The preparer writes manifest.jsonl, dataset-validation.json, and the ignored local data\stt-benchmark\dataset-lock.json with SHA-256 hashes and the preparation revision.
+
+Dataset interpretation remains separated by evidence class: Sam3 and DanPASS are PRIMARY-INDEPENDENTISH; CoRal/NST/FLEURS are held-out in-domain suites; the synthetic diarization dataset is CONTROLLED-SYNTHETIC. No overall score averages these classes together. Sam3 has no declared candidate fine-tuning overlap, though base-model pretraining overlap cannot be ruled out.
