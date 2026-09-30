@@ -44,19 +44,19 @@ describe('NetworkPanel voice TURN route', () => {
     const onNetwork = vi.fn()
     const { rerender } = render(<NetworkPanel network={network()} onNetwork={onNetwork} />)
 
-    const toggle = screen.getByRole('checkbox', { name: /Tailnet voice relay on :8446/i })
+    const toggle = screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i })
     expect((toggle as HTMLInputElement).checked).toBe(false)
     expect(within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement).getByText('OFF')).toBeTruthy()
 
     rerender(<NetworkPanel network={network({ voice_turn_enabled: true })} onNetwork={onNetwork} />)
-    expect((screen.getByRole('checkbox', { name: /Tailnet voice relay on :8446/i }) as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i }) as HTMLInputElement).checked).toBe(true)
     expect(within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement).getByText('TAILNET ONLY')).toBeTruthy()
   })
 
   it('sends the opt-in relay setting through the existing authenticated host-agent route', async () => {
     const onNetwork = vi.fn()
     render(<NetworkPanel network={network()} onNetwork={onNetwork} />)
-    fireEvent.click(screen.getByRole('checkbox', { name: /Tailnet voice relay on :8446/i }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Apply routes' }))
 
     await waitFor(() => expect(mocks.configureTailscale).toHaveBeenCalledWith({

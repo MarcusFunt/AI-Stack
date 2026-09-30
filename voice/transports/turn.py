@@ -41,7 +41,7 @@ def client_ice_servers(
     credentials: TurnCredentials,
     *,
     hostname: str,
-    port: int = 8446,
+    port: int = 8447,
 ) -> list[dict[str, object]]:
     hostname = hostname.strip().rstrip(".")
     if not hostname or not credentials.username or not credentials.credential:

@@ -11,7 +11,7 @@ from scripts import host_agent
 
 
 TAILNET_NAME = "voice-host.example.ts.net"
-TURN_KEY = f"{TAILNET_NAME}:8446"
+TURN_KEY = f"{TAILNET_NAME}:8447"
 
 
 def status_json():
@@ -54,7 +54,7 @@ class FakeTailscale:
             return {"ok": True, "code": 0, "stdout": json.dumps(self.config), "stderr": ""}
         if args[1:3] == ["serve", "status"]:
             return {"ok": True, "code": 0, "stdout": "Serve running", "stderr": ""}
-        if args[1] == "serve" and "--tls-terminated-tcp=8446" in args:
+        if args[1] == "serve" and "--tls-terminated-tcp=8447" in args:
             if self.unsupported:
                 return {"ok": False, "code": 2, "stdout": "", "stderr": "unknown flag"}
             if "off" in args:
@@ -75,6 +75,26 @@ class FakeTailscale:
 
 
 class VoiceTurnRouteTests(unittest.TestCase):
+    def test_existing_https_8446_route_is_preserved_and_not_detected_as_voice_turn(self):
+        cli = FakeTailscale()
+        existing_key = f"{TAILNET_NAME}:8446"
+        existing_route = {"Handlers": {"/": {"Proxy": "127.0.0.1:8087"}}}
+        cli.config["Web"][existing_key] = existing_route
+
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+        ):
+            status = host_agent.tailscale_status()
+            host_agent.configure_tailscale({
+                "dashboard_enabled": False,
+                "mcp_mode": "off",
+                "voice_turn_enabled": False,
+            })
+
+        self.assertFalse(status["voice_turn_enabled"])
+        self.assertEqual(cli.config["Web"][existing_key], existing_route)
+
     def test_voice_turn_route_uses_tls_terminated_tcp_and_never_enables_funnel(self):
         cli = FakeTailscale()
         with (
@@ -89,7 +109,7 @@ class VoiceTurnRouteTests(unittest.TestCase):
             })
 
         self.assertIn(
-            ["tailscale.exe", "serve", "--tls-terminated-tcp=8446", "--bg", "--yes", "tcp://127.0.0.1:3478"],
+            ["tailscale.exe", "serve", "--tls-terminated-tcp=8447", "--bg", "--yes", "tcp://127.0.0.1:3478"],
             cli.calls,
         )
         self.assertFalse(any(call[1] == "funnel" and "--bg" in call for call in cli.calls))
@@ -108,7 +128,7 @@ class VoiceTurnRouteTests(unittest.TestCase):
             })
 
         self.assertIn(
-            ["tailscale.exe", "serve", "--tls-terminated-tcp=8446", "off"], cli.calls
+            ["tailscale.exe", "serve", "--tls-terminated-tcp=8447", "off"], cli.calls
         )
         self.assertTrue(result["status"]["dashboard_enabled"])
         self.assertFalse(result["status"]["voice_turn_enabled"])
@@ -128,7 +148,7 @@ class VoiceTurnRouteTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["status"]["voice_turn_enabled"])
-        self.assertTrue(any("--tls-terminated-tcp=8446" in call for call in cli.calls))
+        self.assertTrue(any("--tls-terminated-tcp=8447" in call for call in cli.calls))
         self.assertFalse(any(call[1] == "funnel" and "--bg" in call for call in cli.calls))
 
     def test_turn_status_requires_exact_loopback_tls_target_and_no_funnel(self):

@@ -1280,7 +1280,7 @@ export function NetworkPanel(props: {
       state: props.network?.studio_routes?.wangp ? 'ready' : 'stopped',
     },
     {
-      port: ':8446',
+      port: ':8447',
       title: 'Voice TURN relay',
       target: props.network?.voice_turn_target || '127.0.0.1:3478',
       exposure: props.network?.voice_turn_enabled ? 'TAILNET ONLY' : 'OFF',
@@ -1346,9 +1346,9 @@ export function NetworkPanel(props: {
             <span><strong>Private studio routes on :8444 and :8445</strong>
               <small>Routes ComfyUI and WanGP through loopback-only dashboard proxies; never public Funnel.</small></span></label>
           <label className="switch-row"><input type="checkbox" checked={effectiveVoiceTurnEnabled}
-            aria-label="Tailnet voice relay on :8446"
+            aria-label="Tailnet voice relay on :8447"
             onChange={(e) => setVoiceTurnEnabled(e.target.checked)} />
-            <span><strong>Tailnet voice relay on :8446</strong>
+            <span><strong>Tailnet voice relay on :8447</strong>
               <small>Optional TLS-terminated TURN over Tailscale. Starts off and never uses public Funnel.</small></span></label>
           <div className="form-grid single-control">
             <label>MCP exposure<select value={effectiveMcpMode}

@@ -43,7 +43,7 @@ class TurnCredentialTests(unittest.TestCase):
         self.assertEqual(
             client_ice_servers(credentials, hostname="voice.example.ts.net"),
             [{
-                "urls": "turns:voice.example.ts.net:8446?transport=tcp",
+                "urls": "turns:voice.example.ts.net:8447?transport=tcp",
                 "username": credentials.username,
                 "credential": credentials.credential,
             }],

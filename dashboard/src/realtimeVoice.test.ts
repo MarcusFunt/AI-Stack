@@ -59,14 +59,14 @@ describe('createRealtimeVoiceClient', () => {
     await client.connect({
       offerUrl: '/api/v1/realtime/sessions/session-1/offer',
       ticket: 'one-use-ticket',
-      iceServers: [{ urls: 'turns:host.tailnet.example:8446?transport=tcp' }],
+      iceServers: [{ urls: 'turns:host.tailnet.example:8447?transport=tcp' }],
     })
 
     expect(mocks.clientConnect).toHaveBeenCalledOnce()
     const request = mocks.clientConnect.mock.calls[0][0]
     expect(request).toEqual({
       webrtcRequestParams: expect.objectContaining({ endpoint: '/api/v1/realtime/sessions/session-1/offer' }),
-      iceConfig: { iceServers: [{ urls: 'turns:host.tailnet.example:8446?transport=tcp' }] },
+      iceConfig: { iceServers: [{ urls: 'turns:host.tailnet.example:8447?transport=tcp' }] },
     })
     expect(request.webrtcRequestParams.headers).toBeInstanceOf(Headers)
     expect(request.webrtcRequestParams.headers.get('X-Voice-Session-Ticket')).toBe('one-use-ticket')

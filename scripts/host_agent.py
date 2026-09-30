@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 STATE_DIR = ROOT / "data" / "state"
 HOST_AGENT_VERSION = "1.4"
+VOICE_TURN_PORT = 8447
 INSTALL_JOBS = {}
 INSTALL_LOCK = threading.Lock()
 OPERATION_DIR = STATE_DIR / "operations"
@@ -328,7 +329,7 @@ def voice_turn_listener_ready(timeout=0.5):
 def voice_turn_route_enabled(routes, dns_name):
     if not dns_name or not isinstance(routes, dict):
         return False
-    key = f"{dns_name}:8446"
+    key = f"{dns_name}:{VOICE_TURN_PORT}"
     tcp = routes.get("TCP", {})
     allow_funnel = routes.get("AllowFunnel", {})
     if not isinstance(tcp, dict) or not isinstance(allow_funnel, dict):
@@ -448,13 +449,13 @@ def configure_tailscale(payload):
             results.append(run([
                 exe,
                 "serve",
-                "--tls-terminated-tcp=8446",
+                f"--tls-terminated-tcp={VOICE_TURN_PORT}",
                 "--bg",
                 "--yes",
                 "tcp://127.0.0.1:3478",
             ]))
     elif voice_turn_enabled is False:
-        results.append(run([exe, "serve", "--tls-terminated-tcp=8446", "off"]))
+        results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
     failed = [r for r in results if not r["ok"]]
     return {"ok": not failed, "steps": results, "status": tailscale_status()}
 
