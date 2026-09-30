@@ -73,6 +73,9 @@ def load_manifest(path: Path) -> list[dict]:
         rows.append(item)
     if not rows:
         raise ValueError("manifest contains no recordings")
+    if any(row.get("schema_version") == 2 for row in rows):
+        from .datasets.manifest import validate_manifest
+        validate_manifest(rows, audio_root=root)
     return rows
 
 
