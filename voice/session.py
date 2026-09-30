@@ -9,7 +9,7 @@ from uuid import uuid4
 
 
 @dataclass
-class VoiceSession:
+class RealtimeSession:
     id: str
     principal: str
     traceparent: str | None
@@ -17,6 +17,9 @@ class VoiceSession:
     token_digest: str
     token_expires_at: float
     state: str = "IDLE"
+    conversation_id: str = field(default_factory=lambda: str(uuid4()))
+    transport_type: str = "websocket"
+    provider_type: str = "cascaded"
     history: list[dict[str, str]] = field(default_factory=list)
     current_user_turn: int = 0
     current_assistant_turn: int = 0
@@ -26,6 +29,44 @@ class VoiceSession:
     pending_tool_calls: list[str] = field(default_factory=list)
     audio_input_bytes: int = 0
     audio_output_bytes: int = 0
+    generation_counter: int = 0
+    active_response_id: str | None = None
+    active_response_generation_id: int | None = None
+    active_playback_generation_id: int | None = None
+
+    def begin_generation(self, response_id: str) -> int:
+        self.generation_counter += 1
+        self.active_response_id = response_id
+        self.active_response_generation_id = self.generation_counter
+        self.active_playback_generation_id = self.generation_counter
+        return self.generation_counter
+
+    def invalidate_generation(self) -> int:
+        """Advance the generation before cancellation can yield control."""
+        self.generation_counter += 1
+        self.active_response_id = None
+        self.active_response_generation_id = None
+        self.active_playback_generation_id = None
+        return self.generation_counter
+
+    def generation_is_current(self, generation_id: int, response_id: str | None = None) -> bool:
+        return (
+            self.active_response_generation_id == generation_id
+            and self.active_playback_generation_id == generation_id
+            and (response_id is None or self.active_response_id == response_id)
+        )
+
+    def finish_generation(self, generation_id: int) -> bool:
+        if not self.generation_is_current(generation_id):
+            return False
+        self.active_response_id = None
+        self.active_response_generation_id = None
+        self.active_playback_generation_id = None
+        return True
+
+
+# Backward-compatible name for existing imports and integrations.
+VoiceSession = RealtimeSession
 
 
 class VoiceSessionRegistry:
@@ -36,7 +77,7 @@ class VoiceSessionRegistry:
             raise ValueError("session limits must be positive")
         self.token_ttl_seconds = token_ttl_seconds
         self.max_sessions = max_sessions
-        self._sessions: dict[str, VoiceSession] = {}
+        self._sessions: dict[str, RealtimeSession] = {}
         self._connected: set[str] = set()
 
     def _remove_expired(self, now: float) -> None:
@@ -54,14 +95,14 @@ class VoiceSessionRegistry:
         principal: str,
         traceparent: str | None,
         now: float | None = None,
-    ) -> tuple[VoiceSession, str]:
+    ) -> tuple[RealtimeSession, str]:
         created_at = time.time() if now is None else float(now)
         self._remove_expired(created_at)
         if len(self._sessions) >= self.max_sessions:
             raise OverflowError("voice session capacity reached")
 
         token = secrets.token_urlsafe(32)
-        session = VoiceSession(
+        session = RealtimeSession(
             id=str(uuid4()),
             principal=principal,
             traceparent=traceparent,
@@ -82,7 +123,7 @@ class VoiceSessionRegistry:
         token: str,
         *,
         now: float | None = None,
-    ) -> VoiceSession | None:
+    ) -> RealtimeSession | None:
         current_time = time.time() if now is None else float(now)
         self._remove_expired(current_time)
         session = self._sessions.get(session_id)

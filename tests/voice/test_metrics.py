@@ -6,6 +6,18 @@ from voice.metrics import VoiceMetrics
 
 
 class VoiceMetricsTests(unittest.TestCase):
+    def test_latency_baseline_reports_deterministic_p50_and_p95(self) -> None:
+        metrics = VoiceMetrics()
+        metrics.observe_latency("time_to_first_audio_ms", 100)
+        metrics.observe_latency("time_to_first_audio_ms", 200)
+        metrics.observe_latency("time_to_first_audio_ms", 300)
+
+        baseline = metrics.latency_baseline()
+
+        self.assertEqual(baseline["time_to_first_audio_ms"]["sample_count"], 3)
+        self.assertEqual(baseline["time_to_first_audio_ms"]["p50"], 200)
+        self.assertEqual(baseline["time_to_first_audio_ms"]["p95"], 290)
+
     def test_first_audio_histogram_uses_bounded_counters(self) -> None:
         metrics = VoiceMetrics()
         for _ in range(2_000):
