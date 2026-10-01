@@ -22,6 +22,7 @@ function network(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
     dns_name: 'host.tailnet.example',
     tailscale_ips: ['100.64.0.1'],
     serve_status: '',
+    route_state_available: true,
     dashboard_enabled: true,
     studio_enabled: false,
     studio_routes: { comfyui: false, wangp: false },
@@ -86,6 +87,24 @@ describe('NetworkPanel voice TURN route', () => {
 
     const routeCard = within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement)
     expect(routeCard.getByText('PUBLIC FUNNEL · REMOVAL PENDING')).toBeTruthy()
+  })
+
+  it('shows the route state as unknown and disables TURN control when Serve status is unavailable', () => {
+    render(<NetworkPanel network={network({
+      route_state_available: false,
+      voice_turn_listener_ready: true,
+    })} onNetwork={vi.fn()} />)
+
+    const routeCard = within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement)
+    expect(routeCard.getByText('UNKNOWN · STATUS UNAVAILABLE')).toBeTruthy()
+    const routeCards = Array.from(document.querySelectorAll('.route-card'))
+    expect(routeCards.length).toBeGreaterThan(0)
+    expect(routeCards.every((card) => card.textContent?.includes('UNKNOWN · STATUS UNAVAILABLE'))).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('checkbox', { name: /Private dashboard on :8443/i }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('MCP exposure') as HTMLSelectElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Apply routes' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: /Secure defaults/i }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('preserves a selected TURN route when applying secure defaults', async () => {

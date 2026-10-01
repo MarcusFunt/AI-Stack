@@ -1159,6 +1159,7 @@ export function NetworkPanel(props: {
   const voiceTurnRoutePresent = props.network?.voice_turn_route_present
     ?? props.network?.voice_turn_enabled
     ?? false
+  const routeStateAvailable = props.network?.route_state_available === true
   const voiceTurnRouteEnabled = props.network?.voice_turn_enabled ?? false
   const voiceTurnFunnelEnabled = props.network?.voice_turn_funnel_enabled ?? false
   const effectiveVoiceTurnEnabled = voiceTurnEnabled
@@ -1250,9 +1251,9 @@ export function NetworkPanel(props: {
   }
 
   const serve = props.network?.serve_status || ''
-  const publicMcp = props.network?.mcp_mode !== undefined
+  const publicMcp = routeStateAvailable && (props.network?.mcp_mode !== undefined
     ? props.network.mcp_mode === 'public'
-    : (serve.includes('Funnel on') && serve.includes(':10000'))
+    : (serve.includes('Funnel on') && serve.includes(':10000')))
   const legacy443 = props.network?.legacy_443
     ?? (serve.includes(':443') && serve.includes('127.0.0.1:8000'))
   const routes = [
@@ -1263,58 +1264,71 @@ export function NetworkPanel(props: {
     ['WanGP private', props.network?.wangp_url || 'Unavailable'],
     ['MCP endpoint', props.network?.mcp_url || 'Unavailable'],
   ]
+  const unknownRouteState = 'UNKNOWN · STATUS UNAVAILABLE'
+  const routeExposure = (active: boolean, label = 'TAILNET ONLY') =>
+    routeStateAvailable ? (active ? label : 'OFF') : unknownRouteState
+  const routeBadgeState = (active: boolean) =>
+    routeStateAvailable ? (active ? 'ready' : 'stopped') : 'error'
   const routeCards = [
     {
       port: ':8443',
       title: 'Dashboard',
       target: '127.0.0.1:3000',
-      exposure: props.network?.dashboard_enabled ? 'TAILNET ONLY' : 'OFF',
-      state: props.network?.dashboard_enabled ? 'ready' : 'stopped',
+      exposure: routeExposure(!!props.network?.dashboard_enabled),
+      state: routeBadgeState(!!props.network?.dashboard_enabled),
     },
     {
       port: ':8444',
       title: 'ComfyUI',
       target: '127.0.0.1:8189',
-      exposure: props.network?.studio_routes?.comfyui ? 'TAILNET ONLY' : 'OFF',
-      state: props.network?.studio_routes?.comfyui ? 'ready' : 'stopped',
+      exposure: routeExposure(!!props.network?.studio_routes?.comfyui),
+      state: routeBadgeState(!!props.network?.studio_routes?.comfyui),
     },
     {
       port: ':8445',
       title: 'WanGP',
       target: '127.0.0.1:7870',
-      exposure: props.network?.studio_routes?.wangp ? 'TAILNET ONLY' : 'OFF',
-      state: props.network?.studio_routes?.wangp ? 'ready' : 'stopped',
+      exposure: routeExposure(!!props.network?.studio_routes?.wangp),
+      state: routeBadgeState(!!props.network?.studio_routes?.wangp),
     },
     {
       port: ':8447',
       title: 'Voice TURN relay',
       target: props.network?.voice_turn_target || '127.0.0.1:3478',
-      exposure: voiceTurnFunnelEnabled
+      exposure: !routeStateAvailable
+        ? unknownRouteState
+        : voiceTurnFunnelEnabled
         ? 'PUBLIC FUNNEL · REMOVAL PENDING'
         : voiceTurnRouteEnabled
           ? 'TAILNET ONLY'
           : voiceTurnRoutePresent
             ? 'INVALID · REMOVAL PENDING'
             : voiceTurnListenerReady ? 'READY TO ENABLE' : 'OFF',
-      state: voiceTurnFunnelEnabled || (voiceTurnRoutePresent && !voiceTurnRouteEnabled)
-        ? 'warn'
-        : voiceTurnRouteEnabled
-        ? 'ready'
-        : voiceTurnListenerReady ? 'ready' : 'stopped',
+      state: !routeStateAvailable
+        ? 'error'
+        : voiceTurnFunnelEnabled || (voiceTurnRoutePresent && !voiceTurnRouteEnabled)
+          ? 'warn'
+          : voiceTurnRouteEnabled
+            ? 'ready'
+            : voiceTurnListenerReady ? 'ready' : 'stopped',
     },
     {
       port: ':10000',
       title: 'MCP',
       target: '127.0.0.1:8765',
-      exposure: publicMcp ? 'PUBLIC FUNNEL' : props.network?.mcp_mode === 'private' ? 'TAILNET ONLY' : 'OFF',
-      state: publicMcp ? 'warn' : props.network?.mcp_mode === 'private' ? 'ready' : 'stopped',
+      exposure: !routeStateAvailable
+        ? unknownRouteState
+        : publicMcp ? 'PUBLIC FUNNEL' : props.network?.mcp_mode === 'private' ? 'TAILNET ONLY' : 'OFF',
+      state: !routeStateAvailable
+        ? 'error'
+        : publicMcp ? 'warn' : props.network?.mcp_mode === 'private' ? 'ready' : 'stopped',
     },
     {
       port: ':443',
       title: 'Legacy API route',
       target: '127.0.0.1:8000',
-      exposure: legacy443 ? 'TAILNET ONLY · LEGACY' : 'OFF',
-      state: legacy443 ? 'warn' : 'stopped',
+      exposure: routeExposure(legacy443, 'TAILNET ONLY · LEGACY'),
+      state: !routeStateAvailable ? 'error' : legacy443 ? 'warn' : 'stopped',
     },
   ]
 
@@ -1332,17 +1346,17 @@ export function NetworkPanel(props: {
           <small>{props.network?.dns_name || 'Host agent has not reported a DNS name'}</small></div>
           <StateBadge state={props.network?.online ? 'ready' : 'error'} /></div>
         <div className="health-card"><Router size={20} /><div><span>REMOTE DASHBOARD</span>
-          <strong>{props.network?.dashboard_enabled ? 'Tailnet :8443' : 'Disabled'}</strong>
+          <strong>{!routeStateAvailable ? 'Unknown' : props.network?.dashboard_enabled ? 'Tailnet :8443' : 'Disabled'}</strong>
           <small>{props.network?.tailscale_ips?.[0] || 'No Tailscale IP reported'}</small></div>
-          <StateBadge state={props.network?.dashboard_enabled ? 'ready' : 'stopped'} /></div>
+          <StateBadge state={routeBadgeState(!!props.network?.dashboard_enabled)} /></div>
         <div className="health-card"><Globe2 size={20} /><div><span>STUDIO ROUTES</span>
-          <strong>{props.network?.studio_enabled ? 'Tailnet :8444 / :8445' : 'Disabled'}</strong>
+          <strong>{!routeStateAvailable ? 'Unknown' : props.network?.studio_enabled ? 'Tailnet :8444 / :8445' : 'Disabled'}</strong>
           <small>ComfyUI and WanGP stay private to the tailnet.</small></div>
-          <StateBadge state={props.network?.studio_enabled ? 'ready' : 'stopped'} /></div>
+          <StateBadge state={routeBadgeState(!!props.network?.studio_enabled)} /></div>
         <div className="health-card"><Shield size={20} /><div><span>MCP EXPOSURE</span>
-          <strong className={publicMcp ? 'danger-text' : ''}>{publicMcp ? 'Public Funnel' : props.network?.mcp_mode === 'private' ? 'Tailnet only' : 'Off'}</strong>
-          <small>{publicMcp ? 'Internet reachable; MCP authentication still required.' : 'No public Funnel detected.'}</small></div>
-          <StateBadge state={publicMcp ? 'warn' : props.network?.mcp_mode === 'private' ? 'ready' : 'stopped'} /></div>
+          <strong className={publicMcp ? 'danger-text' : ''}>{!routeStateAvailable ? 'Unknown' : publicMcp ? 'Public Funnel' : props.network?.mcp_mode === 'private' ? 'Tailnet only' : 'Off'}</strong>
+          <small>{!routeStateAvailable ? 'Tailscale Serve state is unavailable.' : publicMcp ? 'Internet reachable; MCP authentication still required.' : 'No public Funnel detected.'}</small></div>
+          <StateBadge state={!routeStateAvailable ? 'error' : publicMcp ? 'warn' : props.network?.mcp_mode === 'private' ? 'ready' : 'stopped'} /></div>
         <div className="health-card"><Settings2 size={20} /><div><span>HOST BRIDGE</span>
           <strong>{props.network ? 'Connected' : 'Unavailable'}</strong>
           <small>{props.network?.host_agent_version ? 'Windows agent v' + props.network.host_agent_version : 'Gateway → Windows integration'}</small></div>
@@ -1354,21 +1368,24 @@ export function NetworkPanel(props: {
           <div className="setup-card-title"><div><Globe2 size={19} /><div>
             <span className="eyebrow">TAILSCALE ROUTES</span><h3>Configure from the GUI</h3></div></div></div>
           <label className="switch-row"><input type="checkbox" checked={effectiveDashboardEnabled}
+            disabled={!routeStateAvailable || !!busy}
             onChange={(e) => setDashboardEnabled(e.target.checked)} />
             <span><strong>Private dashboard on :8443</strong>
               <small>Accessible only to devices in your tailnet.</small></span></label>
           <label className="switch-row"><input type="checkbox" checked={effectiveStudioEnabled}
+            disabled={!routeStateAvailable || !!busy}
             onChange={(e) => setStudioEnabled(e.target.checked)} />
             <span><strong>Private studio routes on :8444 and :8445</strong>
               <small>Routes ComfyUI and WanGP through loopback-only dashboard proxies; never public Funnel.</small></span></label>
           <label className="switch-row"><input type="checkbox" checked={effectiveVoiceTurnEnabled}
-            disabled={!voiceTurnListenerReady || !!busy}
+            disabled={!routeStateAvailable || !voiceTurnListenerReady || !!busy}
             aria-label="Tailnet voice relay on :8447"
             onChange={(e) => setVoiceTurnEnabled(e.target.checked)} />
             <span><strong>Tailnet voice relay on :8447</strong>
               <small>TURN/TLS uses the private Tailnet TCP route. UDP relay stays inside the isolated Docker voice network; the toggle unlocks only after a loopback STUN check.</small></span></label>
           <div className="form-grid single-control">
             <label>MCP exposure<select value={effectiveMcpMode}
+              disabled={!routeStateAvailable || !!busy}
               onChange={(e) => setMcpMode(e.target.value as 'public' | 'private' | 'off')}>
               <option value="public">Public Funnel :10000</option>
               <option value="private">Tailnet only :10000</option>
@@ -1376,6 +1393,7 @@ export function NetworkPanel(props: {
             </select></label>
           </div>
           <label className="switch-row"><input type="checkbox" checked={clearLegacy}
+            disabled={!routeStateAvailable || !!busy}
             onChange={(e) => setClearLegacy(e.target.checked)} />
             <span><strong>Remove legacy HTTPS :443 API route</strong>
               <small>{legacy443 ? 'A legacy route to port 8000 appears to be active.' : 'No known legacy route detected.'}</small></span></label>
@@ -1383,10 +1401,10 @@ export function NetworkPanel(props: {
             <AlertTriangle size={16} /><span><strong>Public internet exposure</strong>
               MCP remains authenticated, but this route is reachable outside your tailnet.</span></div>}
           <div className="network-actions">
-            <button className="primary no-margin" disabled={!!busy} onClick={() => void apply()}>
+            <button className="primary no-margin" disabled={!routeStateAvailable || !!busy} onClick={() => void apply()}>
               {busy === 'apply' ? <RefreshCw className="spin" size={14} /> : <Save size={14} />} Apply routes
             </button>
-            <button className="secondary no-margin" disabled={!!busy} onClick={() => void applySecureDefaults()}
+            <button className="secondary no-margin" disabled={!routeStateAvailable || !!busy} onClick={() => void applySecureDefaults()}
               title="Private dashboard and studios, tailnet-only MCP, and remove the legacy :443 route.">
               {busy === 'secure' ? <RefreshCw className="spin" size={14} /> : <Shield size={14} />} Secure defaults
             </button>

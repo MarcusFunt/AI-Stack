@@ -81,6 +81,23 @@ class FakeTailscale:
 
 
 class VoiceTurnRouteTests(unittest.TestCase):
+    def test_status_requires_a_valid_node_identity_before_route_state_is_available(self):
+        def fake_run(args, **_kwargs):
+            if args[1:3] == ["status", "--json"]:
+                return {"ok": True, "code": 0, "stdout": "{}", "stderr": ""}
+            if args[1:4] == ["serve", "status", "--json"]:
+                return {"ok": True, "code": 0, "stdout": json.dumps(route_config()), "stderr": ""}
+            return {"ok": True, "code": 0, "stdout": "Serve running", "stderr": ""}
+
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=fake_run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
+        ):
+            result = host_agent.tailscale_status()
+
+        self.assertFalse(result["route_state_available"])
+
     def test_turn_enable_fails_closed_when_serve_state_cannot_be_read(self):
         cli = FakeTailscale(serve_status_unavailable=True)
         with (
@@ -175,6 +192,48 @@ class VoiceTurnRouteTests(unittest.TestCase):
             patch.object(host_agent.os, "urandom", return_value=bytes(range(12))),
         ):
             self.assertFalse(host_agent.voice_turn_listener_ready())
+
+    def test_listener_probe_uses_one_deadline_for_incremental_reads(self):
+        response = (
+            struct.pack("!HHI", 0x0101, 12, 0x2112A442)
+            + bytes(range(12))
+            + struct.pack("!HHBBH4s", 0x0020, 8, 0, 1, 3478, b"\x21\x12\xa4\x42")
+        )
+
+        class FakeSocket:
+            def __init__(self):
+                self.timeouts = []
+                self.offset = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, timeout):
+                self.timeouts.append(timeout)
+
+            def sendall(self, _payload):
+                pass
+
+            def recv(self, _size):
+                self.offset += 1
+                now[0] += 0.2
+                return response[self.offset - 1:self.offset]
+
+        now = [0.0]
+        fake_socket = FakeSocket()
+        with (
+            patch.object(host_agent.socket, "create_connection", return_value=fake_socket),
+            patch.object(host_agent.os, "urandom", return_value=bytes(range(12))),
+            patch.object(host_agent.time, "monotonic", side_effect=lambda: now[0]),
+        ):
+            self.assertFalse(host_agent.voice_turn_listener_ready(timeout=0.5))
+
+        self.assertEqual(len(fake_socket.timeouts), 4)
+        self.assertGreater(fake_socket.timeouts[1], fake_socket.timeouts[2])
+        self.assertGreater(fake_socket.timeouts[2], fake_socket.timeouts[3])
 
     def test_listener_probe_rejects_a_non_stun_tcp_service(self):
         class FakeSocket:

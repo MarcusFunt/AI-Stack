@@ -108,6 +108,7 @@ export type NetworkStatus = {
   studio_routes?: { comfyui?: boolean; wangp?: boolean }
   mcp_mode?: 'public' | 'private' | 'off'
   legacy_443?: boolean
+  route_state_available?: boolean
   voice_turn_enabled?: boolean
   voice_turn_route_present?: boolean
   voice_turn_funnel_enabled?: boolean

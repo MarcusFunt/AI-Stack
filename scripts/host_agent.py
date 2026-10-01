@@ -321,17 +321,32 @@ def tailscale_exe():
 
 def voice_turn_listener_ready(timeout=0.5):
     try:
+        deadline = time.monotonic() + timeout
         transaction_id = os.urandom(12)
         request = struct.pack("!HHI", 0x0001, 0, 0x2112A442) + transaction_id
         with socket.create_connection(("127.0.0.1", 3478), timeout=timeout) as conn:
-            conn.settimeout(timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            conn.settimeout(remaining)
             conn.sendall(request)
-            response = bytearray()
-            while len(response) < 20:
-                part = conn.recv(20 - len(response))
-                if not part:
-                    return False
-                response.extend(part)
+
+            def receive_exact(size):
+                payload = bytearray()
+                while len(payload) < size:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    conn.settimeout(remaining)
+                    part = conn.recv(size - len(payload))
+                    if not part:
+                        return None
+                    payload.extend(part)
+                return payload
+
+            response = receive_exact(20)
+            if response is None:
+                return False
             message_type, length, cookie = struct.unpack("!HHI", response[:8])
             if (
                 message_type != 0x0101
@@ -341,12 +356,9 @@ def voice_turn_listener_ready(timeout=0.5):
                 or response[8:20] != transaction_id
             ):
                 return False
-            body = bytearray()
-            while len(body) < length:
-                part = conn.recv(length - len(body))
-                if not part:
-                    return False
-                body.extend(part)
+            body = receive_exact(length)
+            if body is None:
+                return False
 
         # Require at least one complete address attribute so a TCP service that
         # only mimics the STUN header cannot be mistaken for coturn.
@@ -439,6 +451,7 @@ def tailscale_status():
             routes = {}
     self_info = parsed.get("Self", {}) if isinstance(parsed, dict) else {}
     dns_name = str(self_info.get("DNSName", "")).rstrip(".")
+    route_state_available = route_state_available and bool(dns_name)
     ips = self_info.get("TailscaleIPs") or parsed.get("TailscaleIPs", []) if isinstance(parsed, dict) else []
     web = routes.get("Web", {}) if isinstance(routes, dict) else {}
     allow_funnel = routes.get("AllowFunnel", {}) if isinstance(routes, dict) else {}
