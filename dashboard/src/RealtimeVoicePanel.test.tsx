@@ -223,10 +223,17 @@ describe('RealtimeVoicePanel', () => {
         output_text: 'Hello back',
       } as never)
       callbacks()?.onRemoteStream?.(remoteStream as never)
+      callbacks()?.onIcePathChanged?.({
+        localType: 'relay',
+        localProtocol: 'udp',
+        remoteType: 'host',
+        remoteProtocol: 'udp',
+      } as never)
     })
 
     expect(screen.getByText('Hello there')).toBeTruthy()
     expect(screen.getByText('Hello back')).toBeTruthy()
+    expect(screen.getByText('ICE path: local relay over UDP → remote host over UDP')).toBeTruthy()
     expect((screen.getByLabelText('Assistant audio') as HTMLAudioElement).srcObject).toBe(remoteStream)
   })
 

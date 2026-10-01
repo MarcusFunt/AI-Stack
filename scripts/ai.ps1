@@ -5,7 +5,7 @@ param(
   [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","test-proxy","test-agent-lab","test-agent-evaluator","bench-agent-lab","burn-in","bench","logs","down")]
   [string]$Action = "status",
   [Parameter(Position=1)]
-  [ValidateSet("gateway","voice","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
+  [ValidateSet("gateway","voice","coturn","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
   [string]$Service = "gateway",
   [Parameter(Position=2)]
   [string]$Snapshot = ""
@@ -45,8 +45,11 @@ function Wait-Gateway {
 
 function Test-HostAgent {
   try {
+    $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "host_agent.py"))
+    $versionMatch = [regex]::Match($source, 'HOST_AGENT_VERSION\s*=\s*"([^"]+)"')
+    if(-not $versionMatch.Success) { return $false }
     $r = Invoke-RestMethod "http://127.0.0.1:8788/health" -TimeoutSec 2
-    return $r.status -eq "ok"
+    return $r.status -eq "ok" -and $r.version -eq $versionMatch.Groups[1].Value
   } catch { return $false }
 }
 
@@ -134,10 +137,11 @@ switch ($Action) {
   "start" {
     Start-ControlPlane
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
+    elseif ($Service -eq "coturn") { Invoke-Compose -CommandArgs @("up","-d","coturn") }
     elseif ($Service -ne "gateway") { Invoke-Supervisor "POST" "/ensure/$Service" }
   }
   "stop" {
-    if ($Service -in @("gateway","voice")) { Invoke-Compose -CommandArgs @("stop",$Service) }
+    if ($Service -in @("gateway","voice","coturn")) { Invoke-Compose -CommandArgs @("stop",$Service) }
     else {
       Start-ControlPlane
       Invoke-Supervisor "POST" "/stop/$Service" 120

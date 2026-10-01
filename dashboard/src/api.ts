@@ -110,6 +110,8 @@ export type NetworkStatus = {
   legacy_443?: boolean
   voice_turn_enabled?: boolean
   voice_turn_route_present?: boolean
+  voice_turn_funnel_enabled?: boolean
+  voice_turn_listener_ready?: boolean
   voice_turn_target?: string
   route_state?: Record<string, unknown>
   host_agent_version?: string

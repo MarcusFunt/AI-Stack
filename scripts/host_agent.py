@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -19,7 +20,7 @@ from env_utils import load_env_file
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 STATE_DIR = ROOT / "data" / "state"
-HOST_AGENT_VERSION = "1.4"
+HOST_AGENT_VERSION = "1.5"
 VOICE_TURN_PORT = 8447
 INSTALL_JOBS = {}
 INSTALL_LOCK = threading.Lock()
@@ -320,8 +321,24 @@ def tailscale_exe():
 
 def voice_turn_listener_ready(timeout=0.5):
     try:
-        with socket.create_connection(("127.0.0.1", 3478), timeout=timeout):
-            return True
+        transaction_id = os.urandom(12)
+        request = struct.pack("!HHI", 0x0001, 0, 0x2112A442) + transaction_id
+        with socket.create_connection(("127.0.0.1", 3478), timeout=timeout) as conn:
+            conn.settimeout(timeout)
+            conn.sendall(request)
+            response = bytearray()
+            while len(response) < 20:
+                part = conn.recv(20 - len(response))
+                if not part:
+                    return False
+                response.extend(part)
+        message_type, length, cookie = struct.unpack("!HHI", response[:8])
+        return (
+            message_type == 0x0101
+            and length % 4 == 0
+            and cookie == 0x2112A442
+            and response[8:20] == transaction_id
+        )
     except OSError:
         return False
 
@@ -331,10 +348,23 @@ def voice_turn_route_present(routes, dns_name):
         return False
     key = f"{dns_name}:{VOICE_TURN_PORT}"
     tcp = routes.get("TCP", {})
-    return isinstance(tcp, dict) and key in tcp
+    web = routes.get("Web", {})
+    allow_funnel = routes.get("AllowFunnel", {})
+    return any(
+        isinstance(section, dict) and key in section
+        for section in (tcp, web, allow_funnel)
+    )
 
 
-def voice_turn_route_enabled(routes, dns_name):
+def voice_turn_funnel_enabled(routes, dns_name):
+    if not dns_name or not isinstance(routes, dict):
+        return False
+    allow_funnel = routes.get("AllowFunnel", {})
+    key = f"{dns_name}:{VOICE_TURN_PORT}"
+    return isinstance(allow_funnel, dict) and bool(allow_funnel.get(key))
+
+
+def voice_turn_route_enabled(routes, dns_name, listener_ready=None):
     if not voice_turn_route_present(routes, dns_name):
         return False
     key = f"{dns_name}:{VOICE_TURN_PORT}"
@@ -343,12 +373,14 @@ def voice_turn_route_enabled(routes, dns_name):
     if not isinstance(tcp, dict) or not isinstance(allow_funnel, dict):
         return False
     endpoint = tcp.get(key)
+    if listener_ready is None:
+        listener_ready = voice_turn_listener_ready()
     return bool(
         isinstance(endpoint, dict)
         and endpoint.get("TCPForward") == "127.0.0.1:3478"
         and endpoint.get("TerminateTLS") == dns_name
         and not allow_funnel.get(key)
-        and voice_turn_listener_ready()
+        and listener_ready
     )
 
 
@@ -385,6 +417,7 @@ def tailscale_status():
     mcp_enabled = mcp_key in web
     mcp_public = bool(allow_funnel.get(mcp_key))
     legacy_443 = legacy_key in web
+    turn_listener_ready = voice_turn_listener_ready()
     return {
         "installed": status["code"] != 9009,
         "online": bool(self_info.get("Online", status["ok"])),
@@ -401,8 +434,10 @@ def tailscale_status():
         "studio_routes": {"comfyui": comfyui_enabled, "wangp": wangp_enabled},
         "mcp_mode": "public" if mcp_public else ("private" if mcp_enabled else "off"),
         "legacy_443": legacy_443,
-        "voice_turn_enabled": voice_turn_route_enabled(routes, dns_name),
+        "voice_turn_enabled": voice_turn_route_enabled(routes, dns_name, turn_listener_ready),
         "voice_turn_route_present": voice_turn_route_present(routes, dns_name),
+        "voice_turn_funnel_enabled": voice_turn_funnel_enabled(routes, dns_name),
+        "voice_turn_listener_ready": turn_listener_ready,
         "voice_turn_target": "127.0.0.1:3478",
         "route_state": routes,
         "host_agent_version": HOST_AGENT_VERSION,
@@ -437,18 +472,60 @@ def configure_tailscale(payload):
             results.append(run([exe, "serve", "--https=8445", "off"]))
     if payload.get("clear_legacy_443"):
         results.append(run([exe, "serve", "--https=443", "off"]))
-    if payload.get("voice_turn_enabled") is True:
-        results.append({
-            "ok": False,
-            "code": 409,
-            "stdout": "",
-            "stderr": "TURN route is disabled until a tailnet-only UDP relay path is available",
-        })
-    # TCP-only Serve cannot carry coturn's UDP media relay. Always remove a
-    # previously configured route, including when callers omit this field.
-    results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
+
+    def disable_turn_funnel_if_present():
+        current = tailscale_status()
+        if not voice_turn_funnel_enabled(
+            current.get("route_state", {}), current.get("dns_name", "")
+        ):
+            return True
+        result = run([
+            exe,
+            "funnel",
+            f"--tls-terminated-tcp={VOICE_TURN_PORT}",
+            "off",
+        ])
+        results.append(result)
+        return result["ok"]
+
+    turn_requested = payload.get("voice_turn_enabled") is True
+    if turn_requested and voice_turn_listener_ready():
+        if disable_turn_funnel_if_present():
+            enable = run([
+                exe,
+                "serve",
+                f"--tls-terminated-tcp={VOICE_TURN_PORT}",
+                "--bg",
+                "--yes",
+                "tcp://127.0.0.1:3478",
+            ])
+            results.append(enable)
+            if not enable["ok"]:
+                results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
+        else:
+            results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
+    else:
+        disable_turn_funnel_if_present()
+        if turn_requested:
+            results.append({
+                "ok": False,
+                "code": 409,
+                "stdout": "",
+                "stderr": "coturn did not pass the loopback STUN check on 127.0.0.1:3478",
+            })
+        # A missing listener invalidates an existing route; disable it even if
+        # callers omit the setting so a stale endpoint cannot linger.
+        results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
     failed = [r for r in results if not r["ok"]]
-    return {"ok": not failed, "steps": results, "status": tailscale_status()}
+    status = tailscale_status()
+    if turn_requested and not status.get("voice_turn_enabled") and not any(
+        step.get("code") == 409 for step in results
+    ):
+        cleanup = run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"])
+        results.append(cleanup)
+        failed = [r for r in results if not r["ok"]]
+        status = tailscale_status()
+    return {"ok": not failed and (not turn_requested or status.get("voice_turn_enabled")), "steps": results, "status": status}
 
 MODEL_KEYS = {
     "llm": ["LLM_MODEL", "LLM_CONTEXT", "LLM_GPU_LAYERS"],

@@ -17,10 +17,18 @@ class ComposeTurnServiceTests(unittest.TestCase):
         self.assertIn('|| [ -z "$${VOICE_TURN_HOSTNAME}" ]', command)
         self.assertIn("exit 0", command)
         self.assertLess(command.index("exit 0"), command.index("exec turnserver"))
+        self.assertIn("--no-udp", command)
+        self.assertIn("--no-tcp-relay", command)
         self.assertIn('      - "127.0.0.1:3478:3478/tcp"', service)
         ports = service.split("    ports:\n", 1)[1].split("\n    networks:", 1)[0]
-        self.assertNotIn("49160", ports)
-        self.assertNotIn("/udp", ports)
+        published_ports = [
+            line.strip()[2:].strip().strip('"')
+            for line in ports.splitlines()
+            if line.lstrip().startswith("-")
+        ]
+        self.assertEqual(published_ports, ["127.0.0.1:3478:3478/tcp"])
+        self.assertIn("networks: [voice]", service)
+        self.assertIn("voice:\n    name: ai-stack-voice-net\n    internal: true", compose)
 
 
 if __name__ == "__main__":

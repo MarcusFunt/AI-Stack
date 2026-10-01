@@ -214,13 +214,14 @@ services:
           echo "coturn disabled: optional TURN configuration is incomplete"
           exit 0
         fi
-        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-tls --no-dtls --min-port=49160 --max-port=49200
+        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --no-dtls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
       VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
     ports:
       - "127.0.0.1:3478:3478/tcp"
-    # TURN relay UDP ports are intentionally unpublished until a tailnet-only data path is designed.
+    # Only TCP control is published on loopback. UDP relay endpoints stay on
+    # the isolated voice network and are exchanged between coturn allocations.
     networks: [voice]
 
   eval-router:

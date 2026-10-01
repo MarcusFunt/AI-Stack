@@ -1133,6 +1133,7 @@ export function NetworkPanel(props: {
   const [dashboardEnabled, setDashboardEnabled] = useState<boolean | null>(null)
   const [studioEnabled, setStudioEnabled] = useState<boolean | null>(null)
   const [mcpMode, setMcpMode] = useState<'public' | 'private' | 'off' | null>(null)
+  const [voiceTurnEnabled, setVoiceTurnEnabled] = useState<boolean | null>(null)
   const [clearLegacy, setClearLegacy] = useState(false)
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
@@ -1158,6 +1159,11 @@ export function NetworkPanel(props: {
   const voiceTurnRoutePresent = props.network?.voice_turn_route_present
     ?? props.network?.voice_turn_enabled
     ?? false
+  const voiceTurnRouteEnabled = props.network?.voice_turn_enabled ?? false
+  const voiceTurnFunnelEnabled = props.network?.voice_turn_funnel_enabled ?? false
+  const effectiveVoiceTurnEnabled = voiceTurnEnabled
+    ?? voiceTurnRouteEnabled
+  const voiceTurnListenerReady = props.network?.voice_turn_listener_ready ?? false
   const effectiveMcpMode: 'public' | 'private' | 'off' = mcpMode
     ?? (props.network?.mcp_mode || (props.network?.mcp_url ? 'private' : 'off'))
 
@@ -1170,6 +1176,7 @@ export function NetworkPanel(props: {
       setDashboardEnabled(null)
       setStudioEnabled(null)
       setMcpMode(null)
+      setVoiceTurnEnabled(null)
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err))
       props.onNetwork(null)
@@ -1193,12 +1200,13 @@ export function NetworkPanel(props: {
         studio_enabled: effectiveStudioEnabled,
         mcp_mode: effectiveMcpMode,
         clear_legacy_443: clearLegacy,
-        voice_turn_enabled: false,
+        voice_turn_enabled: effectiveVoiceTurnEnabled,
       })
       props.onNetwork(result.status)
       setDashboardEnabled(null)
       setStudioEnabled(null)
       setMcpMode(null)
+      setVoiceTurnEnabled(null)
       setClearLegacy(false)
       setMessage(result.ok ? 'Tailscale routes updated and verified.' : 'One or more Tailscale commands failed.')
     } catch (err) {
@@ -1217,12 +1225,13 @@ export function NetworkPanel(props: {
         studio_enabled: true,
         mcp_mode: 'private',
         clear_legacy_443: true,
-        voice_turn_enabled: false,
+        voice_turn_enabled: effectiveVoiceTurnEnabled,
       })
       props.onNetwork(result.status)
       setDashboardEnabled(null)
       setStudioEnabled(null)
       setMcpMode(null)
+      setVoiceTurnEnabled(null)
       setClearLegacy(false)
       setMessage(result.ok
         ? 'Secure defaults applied: private dashboard and studios, tailnet-only MCP, legacy :443 removed.'
@@ -1280,8 +1289,18 @@ export function NetworkPanel(props: {
       port: ':8447',
       title: 'Voice TURN relay',
       target: props.network?.voice_turn_target || '127.0.0.1:3478',
-      exposure: voiceTurnRoutePresent ? 'BLOCKED · REMOVAL PENDING' : 'OFF',
-      state: voiceTurnRoutePresent ? 'warn' : 'stopped',
+      exposure: voiceTurnFunnelEnabled
+        ? 'PUBLIC FUNNEL · REMOVAL PENDING'
+        : voiceTurnRouteEnabled
+          ? 'TAILNET ONLY'
+          : voiceTurnRoutePresent
+            ? 'INVALID · REMOVAL PENDING'
+            : voiceTurnListenerReady ? 'READY TO ENABLE' : 'OFF',
+      state: voiceTurnFunnelEnabled || (voiceTurnRoutePresent && !voiceTurnRouteEnabled)
+        ? 'warn'
+        : voiceTurnRouteEnabled
+        ? 'ready'
+        : voiceTurnListenerReady ? 'ready' : 'stopped',
     },
     {
       port: ':10000',
@@ -1342,10 +1361,12 @@ export function NetworkPanel(props: {
             onChange={(e) => setStudioEnabled(e.target.checked)} />
             <span><strong>Private studio routes on :8444 and :8445</strong>
               <small>Routes ComfyUI and WanGP through loopback-only dashboard proxies; never public Funnel.</small></span></label>
-          <label className="switch-row"><input type="checkbox" checked={false} disabled
-            aria-label="Tailnet voice relay disabled on :8447" />
+          <label className="switch-row"><input type="checkbox" checked={effectiveVoiceTurnEnabled}
+            disabled={!voiceTurnListenerReady || !!busy}
+            aria-label="Tailnet voice relay on :8447"
+            onChange={(e) => setVoiceTurnEnabled(e.target.checked)} />
             <span><strong>Tailnet voice relay on :8447</strong>
-              <small>UDP relay path is unavailable, so this route remains disabled. Applying routes removes any existing :8447 route.</small></span></label>
+              <small>TURN/TLS uses the private Tailnet TCP route. UDP relay stays inside the isolated Docker voice network; the toggle unlocks only after a loopback STUN check.</small></span></label>
           <div className="form-grid single-control">
             <label>MCP exposure<select value={effectiveMcpMode}
               onChange={(e) => setMcpMode(e.target.value as 'public' | 'private' | 'off')}>

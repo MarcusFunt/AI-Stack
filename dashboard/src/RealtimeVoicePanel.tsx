@@ -6,6 +6,7 @@ import {
   requestVoiceMicrophone,
   type RealtimeVoiceCallbacks,
   type RealtimeVoiceClient,
+  type RealtimeIcePath,
 } from './realtimeVoice'
 import './App.css'
 
@@ -35,6 +36,7 @@ export default function RealtimeVoicePanel() {
   const [micSettings, setMicSettings] = useState<MediaTrackSettings | null>(null)
   const [userTranscript, setUserTranscript] = useState('')
   const [assistantTranscript, setAssistantTranscript] = useState('')
+  const [icePath, setIcePath] = useState<RealtimeIcePath | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const clientRef = useRef<RealtimeVoiceClient | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -72,6 +74,7 @@ export default function RealtimeVoicePanel() {
     clientRef.current = null
     streamRef.current = null
     setRemoteStream(null)
+    setIcePath(null)
     setErrorMessage('')
     try {
       await client?.disconnect()
@@ -91,6 +94,7 @@ export default function RealtimeVoicePanel() {
     setUserTranscript('')
     setAssistantTranscript('')
     setRemoteStream(null)
+    setIcePath(null)
     updateState('permission')
 
     let stream: MediaStream | null = null
@@ -132,6 +136,7 @@ export default function RealtimeVoicePanel() {
             clientRef.current = null
             streamRef.current = null
             setRemoteStream(null)
+            setIcePath(null)
             const cleanup = (async () => {
               try {
                 await activeClient?.disconnect()
@@ -157,12 +162,16 @@ export default function RealtimeVoicePanel() {
           stopTracks(streamRef.current)
           streamRef.current = null
           setRemoteStream(null)
+          setIcePath(null)
           updateState('disconnected')
           setErrorMessage('The voice connection ended.')
         },
         onServerMessage: handleServerMessage,
         onRemoteStream: (next) => {
           if (attempt === attemptRef.current) setRemoteStream(next)
+        },
+        onIcePathChanged: (path) => {
+          if (attempt === attemptRef.current) setIcePath(path)
         },
       }
       client = createRealtimeVoiceClient(stream, callbacks)
@@ -271,6 +280,11 @@ export default function RealtimeVoicePanel() {
           </div>
           <audio ref={audioRef} aria-label="Assistant audio" autoPlay controls playsInline />
           <div className="voice-audio-state"><Volume2 size={14} /> Assistant speech plays through this browser.</div>
+          <div className="voice-audio-state" aria-live="polite">
+            ICE path: {icePath
+              ? `local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
+              : 'waiting for selected candidate pair'}
+          </div>
         </div>
       </div>
       <p className="voice-privacy-note">A short-lived session ticket stays in the signaling request header. The test page does not expose the gateway key or TURN secret.</p>
