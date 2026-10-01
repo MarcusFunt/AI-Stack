@@ -207,6 +207,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -214,7 +216,7 @@ services:
           echo "coturn disabled: optional TURN configuration is incomplete"
           exit 0
         fi
-        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --no-dtls --min-port=49160 --max-port=49200
+        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
       VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}

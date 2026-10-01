@@ -30,6 +30,25 @@ class ComposeTurnServiceTests(unittest.TestCase):
         self.assertIn("networks: [voice]", service)
         self.assertIn("voice:\n    name: ai-stack-voice-net\n    internal: true", compose)
 
+    def test_coturn_keeps_all_capabilities_dropped_except_bind_service(self):
+        compose_path = Path(__file__).resolve().parents[2] / "compose.yaml"
+        compose = compose_path.read_text(encoding="utf-8")
+        service = compose.split("  coturn:\n", 1)[1].split("\n  eval-router:\n", 1)[0]
+
+        self.assertIn("    security_opt:\n      - no-new-privileges:true", service)
+        self.assertIn("    cap_drop:\n      - ALL", service)
+        self.assertIn("    cap_add:\n      - NET_BIND_SERVICE", service)
+
+    def test_coturn_command_omits_unsupported_dtls_option(self):
+        compose_path = Path(__file__).resolve().parents[2] / "compose.yaml"
+        compose = compose_path.read_text(encoding="utf-8")
+        service = compose.split("  coturn:\n", 1)[1].split("\n  eval-router:\n", 1)[0]
+        command_marker = "    command:\n      - |\n"
+        command = service.split(command_marker, 1)[1].split("\n    environment:", 1)[0]
+
+        self.assertIn("--no-tls", command)
+        self.assertNotIn("--no-dtls", command)
+
 
 if __name__ == "__main__":
     unittest.main()
