@@ -216,15 +216,34 @@ services:
           echo "coturn disabled: optional TURN configuration is incomplete"
           exit 0
         fi
-        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --min-port=49160 --max-port=49200
+        exec turnserver --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
       VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
+    networks: [voice]
+
+  turn-proxy:
+    build:
+      context: ./voice/turn_proxy
+      dockerfile: Dockerfile
+    container_name: ai-stack-turn-proxy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - SETPCAP
+    environment:
+      TURN_PROXY_ENABLED: ${TURN_PROXY_ENABLED:-0}
+      PYTHONDONTWRITEBYTECODE: "1"
     ports:
       - "127.0.0.1:3478:3478/tcp"
-    # Only TCP control is published on loopback. UDP relay endpoints stay on
-    # the isolated voice network and are exchanged between coturn allocations.
-    networks: [voice]
+    networks: [turn-publish, voice]
 
   eval-router:
     build:
@@ -625,6 +644,10 @@ networks:
   voice:
     name: ai-stack-voice-net
     internal: true
+  turn-publish:
+    name: ai-stack-turn-publish-net
+    driver: bridge
+    enable_ipv6: false
   docker-control:
     name: ai-stack-docker-control-net
     internal: true

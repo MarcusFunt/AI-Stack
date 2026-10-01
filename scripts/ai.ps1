@@ -137,11 +137,22 @@ switch ($Action) {
   "start" {
     Start-ControlPlane
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
-    elseif ($Service -eq "coturn") { Invoke-Compose -CommandArgs @("up","-d","coturn") }
+    elseif ($Service -eq "coturn") {
+      $turnProxyEnabled = "0"
+      if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) { $turnProxyEnabled = "1" }
+      [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $turnProxyEnabled, "Process")
+      try {
+        Invoke-Compose -CommandArgs @("up","-d","coturn","turn-proxy")
+      }
+      finally {
+        [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")
+      }
+    }
     elseif ($Service -ne "gateway") { Invoke-Supervisor "POST" "/ensure/$Service" }
   }
   "stop" {
-    if ($Service -in @("gateway","voice","coturn")) { Invoke-Compose -CommandArgs @("stop",$Service) }
+    if ($Service -eq "coturn") { Invoke-Compose -CommandArgs @("stop","coturn","turn-proxy") }
+    elseif ($Service -in @("gateway","voice")) { Invoke-Compose -CommandArgs @("stop",$Service) }
     else {
       Start-ControlPlane
       Invoke-Supervisor "POST" "/stop/$Service" 120
