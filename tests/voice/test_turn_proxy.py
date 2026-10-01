@@ -4,12 +4,28 @@ import asyncio
 import ipaddress
 import socket
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from voice.turn_proxy import proxy
 
 
 class TurnProxyTests(unittest.TestCase):
+    def test_turn_proxy_acceptance_script_checks_security_and_stun(self):
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "test-turn-proxy.ps1"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn("voice_turn_listener_ready", script)
+        self.assertIn("NetworkSettings.Ports", script)
+        self.assertIn("3478/tcp", script)
+        self.assertIn("CapEff", script)
+        self.assertIn("CapBnd", script)
+        self.assertIn("1.1.1.1", script)
+        self.assertIn("443", script)
+        self.assertNotIn(".Config.Env", script)
+        self.assertNotIn(".env", script.lower())
+        self.assertNotIn("tailscale serve", script.lower())
+
     def test_resolve_upstream_accepts_one_private_ipv4(self):
         answer = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.23.0.4", 3478))
         with patch("voice.turn_proxy.proxy.socket.getaddrinfo", return_value=[answer]):

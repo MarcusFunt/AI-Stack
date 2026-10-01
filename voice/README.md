@@ -69,18 +69,29 @@ TURN credentials are returned only when both `VOICE_TURN_SHARED_SECRET` and
 put their values in browser configuration or logs. The host-agent
 `voice_turn_enabled` setting defaults to false and is changed from the
 Dashboard Network panel. It maps private Tailscale Serve TLS-terminated TCP
-port 8447 to the coturn TCP listener on `127.0.0.1:3478`; Funnel and host UDP
-port publishing are not part of this route.
+port 8447 to the TCP listener on `127.0.0.1:3478`; Funnel and host UDP port
+publishing are not part of this route. Coturn has no host port mapping and
+remains only on the internal `ai-stack-voice-net`. The `turn-proxy` service is
+the only member of a separate publish bridge and also joins the internal voice
+network. It forwards TCP bytes to coturn without terminating TURN or TLS.
 
 The route uses TURN over TLS/TCP from the browser to Tailscale Serve on port
 8447. Serve terminates TLS and forwards the TURN TCP stream to
 `127.0.0.1:3478`; coturn accepts no UDP client listener and no TCP peer relay.
-Its UDP relay endpoints remain inside the isolated `ai-stack-voice-net` Docker
-network, where the voice service's TURN allocation can reach the browser's
-allocation. TURN explicitly supports TLS/TCP from client to server with UDP
-between TURN and peer, so this path does not require publishing UDP ports on
-the Windows host ([RFC 8656 §3.1](https://www.rfc-editor.org/rfc/rfc8656.html)).
-Funnel is not used. Port 8446 remains untouched; voice uses 8447.
+Its UDP relay endpoints remain inside the isolated `ai-stack-voice-net`, where
+the voice service can reach the browser's allocation. TURN supports TLS/TCP
+between client and server while relaying UDP between server and peer; this
+path does not require publishing UDP ports on Windows ([RFC 8656 §3.1](https://www.rfc-editor.org/rfc/rfc8656.html)).
+The proxy installs default-drop IPv4 and IPv6 firewall rules before binding,
+allows new TCP only from its publish-side interface to port 3478, and allows
+new outbound TCP only to coturn's resolved private IPv4 address on port 3478.
+It then drops all effective and bounding capabilities before accepting
+connections. Funnel is not used. Port 8446 remains untouched; voice uses 8447.
+
+After starting coturn, run `scripts\test-turn-proxy.ps1`. It checks the exact
+loopback TCP publication, a successful STUN transaction, zero effective and
+bounding capabilities on proxy PID 1, and blocked external TCP egress. It does
+not enable or modify the Tailnet route.
 
 The host agent enables this route only after a STUN Binding request succeeds on
 the loopback coturn listener. Status also requires an exact `127.0.0.1:3478`
