@@ -31,6 +31,29 @@ class TurnProxyTests(unittest.TestCase):
         with patch("voice.turn_proxy.proxy.socket.getaddrinfo", return_value=[answer]):
             self.assertEqual(proxy.resolve_upstream("coturn", 3478), ipaddress.IPv4Address("10.23.0.4"))
 
+    def test_resolve_upstream_retries_temporary_dns_failure(self):
+        answer = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.23.0.4", 3478))
+        with (
+            patch("voice.turn_proxy.proxy.socket.getaddrinfo", side_effect=[socket.gaierror("not ready"), [answer]]) as lookup,
+            patch("voice.turn_proxy.proxy.time.sleep") as sleep,
+        ):
+            resolved = proxy.resolve_upstream("coturn", 3478)
+
+        self.assertEqual(resolved, ipaddress.IPv4Address("10.23.0.4"))
+        self.assertEqual(lookup.call_count, 2)
+        sleep.assert_called_once_with(proxy._DNS_RETRY_INTERVAL_SECONDS)
+
+    def test_resolve_upstream_fails_after_bounded_dns_retries(self):
+        with (
+            patch("voice.turn_proxy.proxy.socket.getaddrinfo", side_effect=socket.gaierror("not ready")) as lookup,
+            patch("voice.turn_proxy.proxy.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "could not resolve upstream"):
+                proxy.resolve_upstream("coturn", 3478)
+
+        self.assertEqual(lookup.call_count, proxy._DNS_RESOLUTION_ATTEMPTS)
+        self.assertEqual(sleep.call_count, proxy._DNS_RESOLUTION_ATTEMPTS - 1)
+
     def test_resolve_upstream_rejects_public_loopback_unspecified_and_ambiguous_answers(self):
         answers = [
             [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 3478))],
@@ -116,14 +139,16 @@ eth1 00000000 0160A8C0 0003 0 0 0 00000000 0 0 0
         exec_process.assert_not_called()
 
     def test_serve_refuses_to_bind_when_capabilities_remain(self):
-        with (
-            patch.dict("os.environ", {"TURN_PROXY_ENABLED": "1"}),
-            patch("voice.turn_proxy.proxy.read_capability_masks", return_value=(1, 0)),
-            patch("voice.turn_proxy.proxy.asyncio.run") as run_server,
-        ):
-            with self.assertRaises(RuntimeError):
-                proxy.main(["--serve-ip", "172.24.0.6"])
-        run_server.assert_not_called()
+        for capability_masks in ((1, 0), (0, 1)):
+            with self.subTest(capability_masks=capability_masks):
+                with (
+                    patch.dict("os.environ", {"TURN_PROXY_ENABLED": "1"}),
+                    patch("voice.turn_proxy.proxy.read_capability_masks", return_value=capability_masks),
+                    patch("voice.turn_proxy.proxy.asyncio.run") as run_server,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        proxy.main(["--serve-ip", "172.24.0.6"])
+            run_server.assert_not_called()
 
     def test_proxy_connection_forwards_bytes_and_closes_on_upstream_failure(self):
         async def exercise():

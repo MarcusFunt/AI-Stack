@@ -57,6 +57,17 @@ class ComposeTurnServiceTests(unittest.TestCase):
         self.assertIn("networks: [turn-publish, voice]", service)
         self.assertIn("turn-publish:\n    name: ai-stack-turn-publish-net", compose)
 
+    def test_turn_proxy_starts_after_coturn_and_retries_service_dns(self):
+        compose_path = Path(__file__).resolve().parents[2] / "compose.yaml"
+        compose = compose_path.read_text(encoding="utf-8")
+        service = self._service(compose, "turn-proxy")
+
+        self.assertIn("depends_on:\n      coturn:\n        condition: service_started", service)
+        proxy_path = Path(__file__).resolve().parents[2] / "voice" / "turn_proxy" / "proxy.py"
+        proxy_source = proxy_path.read_text(encoding="utf-8")
+        self.assertIn("_DNS_RESOLUTION_ATTEMPTS = 8", proxy_source)
+        self.assertIn("time.sleep(_DNS_RETRY_INTERVAL_SECONDS)", proxy_source)
+
     def test_turn_proxy_receives_no_shared_secret(self):
         compose_path = Path(__file__).resolve().parents[2] / "compose.yaml"
         compose = compose_path.read_text(encoding="utf-8")

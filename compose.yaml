@@ -241,6 +241,9 @@ services:
     environment:
       TURN_PROXY_ENABLED: ${TURN_PROXY_ENABLED:-0}
       PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      coturn:
+        condition: service_started
     ports:
       - "127.0.0.1:3478:3478/tcp"
     networks: [turn-publish, voice]

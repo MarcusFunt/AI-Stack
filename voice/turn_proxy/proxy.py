@@ -9,6 +9,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 
 
@@ -20,6 +21,8 @@ _LISTEN_PORT = 3478
 _UPSTREAM_PORT = 3478
 _BUFFER_SIZE = 64 * 1024
 _UPSTREAM_CONNECT_TIMEOUT_SECONDS = 8
+_DNS_RESOLUTION_ATTEMPTS = 8
+_DNS_RETRY_INTERVAL_SECONDS = 0.25
 
 
 def _is_rfc1918(address: ipaddress.IPv4Address) -> bool:
@@ -61,10 +64,14 @@ def resolve_upstream(host: str, port: int) -> ipaddress.IPv4Address:
         raise ValueError("upstream hostname is empty")
     if not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError("upstream port must be between 1 and 65535")
-    try:
-        answers = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-    except OSError as exc:
-        raise RuntimeError(f"could not resolve upstream {host!r}") from exc
+    for attempt in range(_DNS_RESOLUTION_ATTEMPTS):
+        try:
+            answers = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            break
+        except OSError as exc:
+            if attempt == _DNS_RESOLUTION_ATTEMPTS - 1:
+                raise RuntimeError(f"could not resolve upstream {host!r}") from exc
+            time.sleep(_DNS_RETRY_INTERVAL_SECONDS)
 
     addresses: set[ipaddress.IPv4Address] = set()
     for answer in answers:
