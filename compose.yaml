@@ -208,17 +208,19 @@ services:
     cap_drop:
       - ALL
     entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      if [ -z "$${VOICE_TURN_SHARED_SECRET}" ] || [ -z "$${VOICE_TURN_HOSTNAME}" ]; then
-        echo "coturn disabled: optional TURN configuration is incomplete"
-        exit 0
-      fi
-      exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-tls --no-dtls --min-port=49160 --max-port=49200
+    command:
+      - |
+        if [ -z "$${VOICE_TURN_SHARED_SECRET}" ] || [ -z "$${VOICE_TURN_HOSTNAME}" ]; then
+          echo "coturn disabled: optional TURN configuration is incomplete"
+          exit 0
+        fi
+        exec turnserver --no-cli --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-tls --no-dtls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
       VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
     ports:
       - "127.0.0.1:3478:3478/tcp"
+    # TURN relay UDP ports are intentionally unpublished until a tailnet-only data path is designed.
     networks: [voice]
 
   eval-router:

@@ -37,26 +37,30 @@ describe('NetworkPanel voice TURN route', () => {
       name: 'AI-Stack', version: 'test', transport: 'HTTP', authentication: 'Bearer',
       models: [], endpoints: {},
     })
-    mocks.configureTailscale.mockReset().mockResolvedValue({ ok: true, status: network({ voice_turn_enabled: true }) })
+    mocks.configureTailscale.mockReset().mockResolvedValue({ ok: true, status: network() })
   })
 
-  it('exposes an off-by-default toggle and displays the verified host-agent route state', async () => {
+  it('locks voice TURN off and marks an existing route for removal', () => {
     const onNetwork = vi.fn()
-    const { rerender } = render(<NetworkPanel network={network()} onNetwork={onNetwork} />)
+    render(<NetworkPanel network={network({
+      voice_turn_enabled: false,
+      voice_turn_route_present: true,
+    })} onNetwork={onNetwork} />)
 
-    const toggle = screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i })
+    const toggle = screen.getByRole('checkbox', { name: /Tailnet voice relay disabled on :8447/i })
     expect((toggle as HTMLInputElement).checked).toBe(false)
-    expect(within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement).getByText('OFF')).toBeTruthy()
-
-    rerender(<NetworkPanel network={network({ voice_turn_enabled: true })} onNetwork={onNetwork} />)
-    expect((screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i }) as HTMLInputElement).checked).toBe(true)
-    expect(within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement).getByText('TAILNET ONLY')).toBeTruthy()
+    expect((toggle as HTMLInputElement).disabled).toBe(true)
+    const routeCard = within(screen.getByText('Voice TURN relay').closest('.route-card') as HTMLElement)
+    expect(routeCard.getByText('BLOCKED · REMOVAL PENDING')).toBeTruthy()
+    expect(screen.getByText(/UDP relay path is unavailable/i)).toBeTruthy()
   })
 
-  it('sends the opt-in relay setting through the existing authenticated host-agent route', async () => {
+  it('forces voice TURN off when applying other network settings', async () => {
     const onNetwork = vi.fn()
-    render(<NetworkPanel network={network()} onNetwork={onNetwork} />)
-    fireEvent.click(screen.getByRole('checkbox', { name: /Tailnet voice relay on :8447/i }))
+    render(<NetworkPanel network={network({
+      voice_turn_enabled: false,
+      voice_turn_route_present: true,
+    })} onNetwork={onNetwork} />)
     fireEvent.click(screen.getByRole('button', { name: 'Apply routes' }))
 
     await waitFor(() => expect(mocks.configureTailscale).toHaveBeenCalledWith({
@@ -64,7 +68,7 @@ describe('NetworkPanel voice TURN route', () => {
       studio_enabled: false,
       mcp_mode: 'off',
       clear_legacy_443: false,
-      voice_turn_enabled: true,
+      voice_turn_enabled: false,
     }))
   })
 })

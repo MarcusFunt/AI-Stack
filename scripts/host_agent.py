@@ -326,8 +326,16 @@ def voice_turn_listener_ready(timeout=0.5):
         return False
 
 
-def voice_turn_route_enabled(routes, dns_name):
+def voice_turn_route_present(routes, dns_name):
     if not dns_name or not isinstance(routes, dict):
+        return False
+    key = f"{dns_name}:{VOICE_TURN_PORT}"
+    tcp = routes.get("TCP", {})
+    return isinstance(tcp, dict) and key in tcp
+
+
+def voice_turn_route_enabled(routes, dns_name):
+    if not voice_turn_route_present(routes, dns_name):
         return False
     key = f"{dns_name}:{VOICE_TURN_PORT}"
     tcp = routes.get("TCP", {})
@@ -394,6 +402,7 @@ def tailscale_status():
         "mcp_mode": "public" if mcp_public else ("private" if mcp_enabled else "off"),
         "legacy_443": legacy_443,
         "voice_turn_enabled": voice_turn_route_enabled(routes, dns_name),
+        "voice_turn_route_present": voice_turn_route_present(routes, dns_name),
         "voice_turn_target": "127.0.0.1:3478",
         "route_state": routes,
         "host_agent_version": HOST_AGENT_VERSION,
@@ -428,34 +437,16 @@ def configure_tailscale(payload):
             results.append(run([exe, "serve", "--https=8445", "off"]))
     if payload.get("clear_legacy_443"):
         results.append(run([exe, "serve", "--https=443", "off"]))
-    voice_turn_enabled = payload.get("voice_turn_enabled")
-    if voice_turn_enabled is True:
-        current = tailscale_status()
-        if not current.get("dns_name"):
-            results.append({
-                "ok": False,
-                "code": 503,
-                "stdout": "",
-                "stderr": "Tailscale DNS name is unavailable; TURN route remains disabled",
-            })
-        elif not voice_turn_listener_ready():
-            results.append({
-                "ok": False,
-                "code": 503,
-                "stdout": "",
-                "stderr": "voice TURN loopback listener is unavailable; route remains disabled",
-            })
-        else:
-            results.append(run([
-                exe,
-                "serve",
-                f"--tls-terminated-tcp={VOICE_TURN_PORT}",
-                "--bg",
-                "--yes",
-                "tcp://127.0.0.1:3478",
-            ]))
-    elif voice_turn_enabled is False:
-        results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
+    if payload.get("voice_turn_enabled") is True:
+        results.append({
+            "ok": False,
+            "code": 409,
+            "stdout": "",
+            "stderr": "TURN route is disabled until a tailnet-only UDP relay path is available",
+        })
+    # TCP-only Serve cannot carry coturn's UDP media relay. Always remove a
+    # previously configured route, including when callers omit this field.
+    results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
     failed = [r for r in results if not r["ok"]]
     return {"ok": not failed, "steps": results, "status": tailscale_status()}
 

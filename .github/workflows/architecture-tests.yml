@@ -17,6 +17,10 @@ on:
       - "tests/supervisor/**"
       - "tests/eval_router/**"
       - "tests/mcp/**"
+      - "tests/host_agent/**"
+      - "scripts/host_agent.py"
+      - "scripts/env_utils.py"
+      - "dashboard/**"
       - "config/models.json"
       - "compose.yaml"
       - ".github/workflows/architecture-tests.yml"
@@ -37,6 +41,11 @@ on:
       - "tests/supervisor/**"
       - "tests/eval_router/**"
       - "tests/mcp/**"
+      - "tests/host_agent/**"
+      - "scripts/host_agent.py"
+      - "scripts/env_utils.py"
+      - "dashboard/**"
+      - ".github/workflows/architecture-tests.yml"
 
 jobs:
   unit:
@@ -60,7 +69,7 @@ jobs:
           pip install             -r gateway/requirements.txt             -r voice/requirements.txt             -r supervisor/requirements.txt             -r eval_router/requirements.txt             -r mcp/requirements.txt
 
       - name: Compile architecture packages
-        run: python -m compileall -q core observability gateway voice supervisor eval_router mcp
+        run: python -m compileall -q core observability gateway voice supervisor eval_router mcp scripts/host_agent.py tests/host_agent
 
       - name: Validate Compose
         run: docker compose config --quiet
@@ -87,3 +96,28 @@ jobs:
 
       - name: MCP tests
         run: python -m unittest discover -s tests/mcp -v
+
+      - name: Host-agent tests
+        run: python -m unittest discover -s tests/host_agent -v
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install Dashboard dependencies
+        run: npm ci --prefix dashboard
+
+      - name: Dashboard Vitest
+        run: npm --prefix dashboard run test -- --run
+
+      - name: Dashboard lint
+        run: npm --prefix dashboard run lint
+
+      - name: Dashboard build
+        run: npm --prefix dashboard run build

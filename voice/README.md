@@ -68,12 +68,18 @@ Dashboard Network panel. It maps private Tailscale Serve TLS-terminated TCP
 port 8447 to the coturn TCP listener on `127.0.0.1:3478`; Funnel and host UDP
 port publishing are not part of this route.
 
-Remote TURN is **not verified** as of 2026-09-30. Tailscale CLI 1.102.2 accepts
-`--tls-terminated-tcp`, but the current local check found no TCP or UDP
-listener on port 3478, so the route remains disabled. Port 8446 already serves
-an unrelated local endpoint on `127.0.0.1:8087`; voice uses port 8447 to avoid
-changing that route. No second tailnet device completed a relay call in this
-verification. Enable the route only after the loopback listener is healthy,
-then verify a selected `relay` candidate pair and two-way audio from a second
-tailnet device. A direct candidate connection does not count as TURN
-verification.
+Remote TURN is **not verified**. Port 8446 already serves an unrelated local
+endpoint on `127.0.0.1:8087`; voice uses port 8447 to avoid changing that
+route. The coturn command must be passed to its shell as one argument; otherwise
+it exits before opening the listener. After that startup issue is fixed, the
+current Compose service still publishes only loopback TCP port 3478. Coturn's
+49160-49200 range is used for UDP relay endpoints, while Tailscale Serve only
+forwards TCP. Port 8447 alone therefore cannot carry the relayed media path
+from another tailnet device.
+
+Keep `voice_turn_enabled` off until the relay data plane is redesigned and
+tested without unrestricted host UDP publishing or Funnel. A successful
+verification must use a second tailnet device, show a selected `relay`
+candidate pair, and complete two-way audio; a direct candidate connection does
+not count. See the upstream [coturn relay port options](https://github.com/coturn/coturn/wiki/turnserver)
+and [Tailscale Serve TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).
