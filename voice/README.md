@@ -54,7 +54,11 @@ reaches `VOICE_SESSION_MAX_SECONDS`.
 
 Use the existing Dashboard HTTPS URL from a device enrolled in the Tailscale
 network. This includes a tailnet device on the same physical LAN; being on the
-LAN without Tailscale is not sufficient. The browser sends audio through
+LAN without Tailscale is not sufficient. Start the local relay with
+`scripts\ai.ps1 start coturn` and stop it with `scripts\ai.ps1 stop coturn`.
+TURN credentials are provided to the voice service only through the existing
+`VOICE_TURN_SHARED_SECRET` and `VOICE_TURN_HOSTNAME` process environment
+variables; do not persist or log the secret. The browser sends audio through
 WebRTC, while the existing Dashboard Nginx route keeps the gateway API key on
 the server.
 
@@ -68,18 +72,21 @@ Dashboard Network panel. It maps private Tailscale Serve TLS-terminated TCP
 port 8447 to the coturn TCP listener on `127.0.0.1:3478`; Funnel and host UDP
 port publishing are not part of this route.
 
-Remote TURN is **not verified**. Port 8446 already serves an unrelated local
-endpoint on `127.0.0.1:8087`; voice uses port 8447 to avoid changing that
-route. The coturn command must be passed to its shell as one argument; otherwise
-it exits before opening the listener. After that startup issue is fixed, the
-current Compose service still publishes only loopback TCP port 3478. Coturn's
-49160-49200 range is used for UDP relay endpoints, while Tailscale Serve only
-forwards TCP. Port 8447 alone therefore cannot carry the relayed media path
-from another tailnet device.
+The route uses TURN over TLS/TCP from the browser to Tailscale Serve on port
+8447. Serve terminates TLS and forwards the TURN TCP stream to
+`127.0.0.1:3478`; coturn accepts no UDP client listener and no TCP peer relay.
+Its UDP relay endpoints remain inside the isolated `ai-stack-voice-net` Docker
+network, where the voice service's TURN allocation can reach the browser's
+allocation. TURN explicitly supports TLS/TCP from client to server with UDP
+between TURN and peer, so this path does not require publishing UDP ports on
+the Windows host ([RFC 8656 §3.1](https://www.rfc-editor.org/rfc/rfc8656.html)).
+Funnel is not used. Port 8446 remains untouched; voice uses 8447.
 
-Keep `voice_turn_enabled` off until the relay data plane is redesigned and
-tested without unrestricted host UDP publishing or Funnel. A successful
-verification must use a second tailnet device, show a selected `relay`
-candidate pair, and complete two-way audio; a direct candidate connection does
-not count. See the upstream [coturn relay port options](https://github.com/coturn/coturn/wiki/turnserver)
-and [Tailscale Serve TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).
+The host agent enables this route only after a STUN Binding request succeeds on
+the loopback coturn listener. Status also requires an exact `127.0.0.1:3478`
+target, no Funnel permission, and a live listener; applying network settings
+removes a stale route when the listener is unavailable. Remote call acceptance
+still requires a second Tailnet device, a selected `relay` candidate pair, and
+two-way audio. A direct candidate path does not count. See [coturn's relay
+options](https://github.com/coturn/coturn/wiki/turnserver) and [Tailscale Serve
+TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).

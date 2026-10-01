@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createRealtimeVoiceClient, dispatchVoiceControlMessage } from './realtimeVoice'
+import { createRealtimeVoiceClient, dispatchVoiceControlMessage, readSelectedIceCandidatePath } from './realtimeVoice'
 
 const mocks = vi.hoisted(() => ({
   clientConnect: vi.fn(),
@@ -22,6 +22,7 @@ describe('createRealtimeVoiceClient', () => {
     onDisconnected: vi.fn(),
     onServerMessage: vi.fn(),
     onRemoteStream: vi.fn(),
+    onIcePathChanged: vi.fn(),
   }
 
   beforeEach(() => {
@@ -32,6 +33,114 @@ describe('createRealtimeVoiceClient', () => {
       disconnect: mocks.clientDisconnect,
     } })
     mocks.SmallWebRTCTransport.mockReset().mockImplementation(function (options) { return options })
+  })
+
+  it('reports the selected local and remote ICE candidate types', async () => {
+    const reports = new Map([
+      ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', {
+        type: 'candidate-pair',
+        localCandidateId: 'local-1',
+        remoteCandidateId: 'remote-1',
+      }],
+      ['local-1', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls' }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ])
+    const peer = { getStats: vi.fn().mockResolvedValue(reports) } as unknown as RTCPeerConnection
+
+    await expect(readSelectedIceCandidatePath(peer)).resolves.toEqual({
+      localType: 'relay',
+      localProtocol: 'udp',
+      localRelayProtocol: 'tls',
+      remoteType: 'host',
+      remoteProtocol: 'udp',
+    })
+  })
+
+  it('does not treat an unselected nominated candidate pair as the active path', async () => {
+    const reports = new Map([
+      ['pair-1', {
+        type: 'candidate-pair',
+        state: 'succeeded',
+        nominated: true,
+        localCandidateId: 'local-1',
+        remoteCandidateId: 'remote-1',
+      }],
+      ['local-1', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp' }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ])
+    const peer = { getStats: vi.fn().mockResolvedValue(reports) } as unknown as RTCPeerConnection
+
+    await expect(readSelectedIceCandidatePath(peer)).resolves.toBeNull()
+  })
+
+  it('publishes the selected candidate path while connected and clears it on disconnect', async () => {
+    const expected = {
+      localType: 'relay',
+      localProtocol: 'udp',
+      localRelayProtocol: 'tls',
+      remoteType: 'host',
+      remoteProtocol: 'udp',
+    }
+    const reports = new Map([
+      ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', { type: 'candidate-pair', localCandidateId: 'local-1', remoteCandidateId: 'remote-1' }],
+      ['local-1', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls' }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ])
+    let transportCallbacks: Record<string, (state?: string) => void> = {}
+    mocks.SmallWebRTCTransport.mockImplementation(function (options) {
+      return { ...options, pc: { getStats: vi.fn().mockResolvedValue(reports) } }
+    })
+    mocks.PipecatClient.mockImplementation(function (options) {
+      transportCallbacks = options.callbacks
+      return { connect: mocks.clientConnect, disconnect: mocks.clientDisconnect }
+    })
+    const onIcePathChanged = vi.fn()
+    const client = createRealtimeVoiceClient(
+      { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream,
+      { ...callbacks, onIcePathChanged },
+    )
+
+    transportCallbacks.onTransportStateChanged('connected')
+    await vi.waitFor(() => expect(onIcePathChanged).toHaveBeenCalledWith(expected))
+    await client.disconnect()
+
+    expect(onIcePathChanged).toHaveBeenLastCalledWith(null)
+  })
+
+  it('discards an in-flight stats response after transport disconnects', async () => {
+    const reports = new Map([
+      ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', { type: 'candidate-pair', localCandidateId: 'local-1', remoteCandidateId: 'remote-1' }],
+      ['local-1', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls' }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ])
+    let resolveStats: ((value: Map<string, Record<string, unknown>>) => void) | undefined
+    let transportCallbacks: Record<string, (state?: string) => void> = {}
+    mocks.SmallWebRTCTransport.mockImplementation(function (options) {
+      return {
+        ...options,
+        pc: { getStats: vi.fn(() => new Promise((resolve) => { resolveStats = resolve })) },
+      }
+    })
+    mocks.PipecatClient.mockImplementation(function (options) {
+      transportCallbacks = options.callbacks
+      return { connect: mocks.clientConnect, disconnect: mocks.clientDisconnect }
+    })
+    const onIcePathChanged = vi.fn()
+    createRealtimeVoiceClient(
+      { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream,
+      { ...callbacks, onIcePathChanged },
+    )
+
+    transportCallbacks.onTransportStateChanged('connected')
+    transportCallbacks.onTransportStateChanged('disconnected')
+    resolveStats?.(reports)
+    await vi.waitFor(() => expect(onIcePathChanged).toHaveBeenCalledWith(null))
+    await Promise.resolve()
+
+    expect(onIcePathChanged).toHaveBeenLastCalledWith(null)
   })
 
   it('uses the already-captured microphone track without requesting another one', async () => {
