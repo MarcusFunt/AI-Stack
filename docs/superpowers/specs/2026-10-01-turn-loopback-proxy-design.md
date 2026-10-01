@@ -1,8 +1,8 @@
 # Private TURN Loopback Ingress Redesign
 
-**Status:** Proposed; awaiting user review  
-**Date:** 2026-10-01  
-**Supersedes:** The TURN ingress portion of 2026-09-30-realtime-voice-phase2-design.md for Windows Docker Desktop  
+**Status:** Proposed; awaiting user review
+**Date:** 2026-10-01
+**Supersedes:** The TURN ingress portion of 2026-09-30-realtime-voice-phase2-design.md for Windows Docker Desktop
 **Reason:** The approved path assumes Docker Desktop can publish coturn from the private voice network to host loopback. That assumption failed on the target host.
 
 ## Observed behavior
