@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import ipaddress
 import os
+from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -22,6 +24,35 @@ _UPSTREAM_CONNECT_TIMEOUT_SECONDS = 8
 
 def _is_rfc1918(address: ipaddress.IPv4Address) -> bool:
     return any(address in network for network in _PRIVATE_NETWORKS)
+
+
+def default_route_interface(route_table: str | None = None) -> str:
+    """Return the single interface with the IPv4 default gateway."""
+    if route_table is None:
+        try:
+            route_table = Path("/proc/net/route").read_text(encoding="ascii")
+        except OSError as exc:
+            raise RuntimeError("could not read the proxy IPv4 route table") from exc
+
+    interfaces: set[str] = set()
+    for line in route_table.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 8 or fields[1] != "00000000":
+            continue
+        try:
+            flags = int(fields[3], 16)
+        except ValueError as exc:
+            raise RuntimeError("proxy IPv4 route table contains malformed flags") from exc
+        if flags & 0x3 != 0x3:
+            continue
+        interface = fields[0]
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", interface):
+            raise RuntimeError("proxy default route has an invalid interface name")
+        interfaces.add(interface)
+
+    if len(interfaces) != 1:
+        raise RuntimeError(f"expected exactly one default-route interface, got {len(interfaces)}")
+    return next(iter(interfaces))
 
 
 def resolve_upstream(host: str, port: int) -> ipaddress.IPv4Address:
@@ -60,6 +91,7 @@ def build_firewall_rules(
     address = ipaddress.IPv4Address(upstream_ip)
     if not _is_rfc1918(address):
         raise ValueError("firewall upstream must be an RFC1918 private IPv4 address")
+    listen_interface = default_route_interface()
     for port in (listen_port, upstream_port):
         if not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError("firewall ports must be between 1 and 65535")
@@ -110,7 +142,7 @@ def build_firewall_rules(
                 "-A",
                 "INPUT",
                 "-i",
-                "eth0",
+                listen_interface,
                 "-p",
                 "tcp",
                 "--dport",

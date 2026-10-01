@@ -48,7 +48,8 @@ class TurnProxyTests(unittest.TestCase):
                     proxy.resolve_upstream("coturn", 3478)
 
     def test_firewall_defaults_to_drop_and_allows_only_coturn_tcp(self):
-        commands = proxy.build_firewall_rules(ipaddress.IPv4Address("172.24.0.6"))
+        with patch("voice.turn_proxy.proxy.default_route_interface", return_value="eth1"):
+            commands = proxy.build_firewall_rules(ipaddress.IPv4Address("172.24.0.6"))
         rendered = [" ".join(command) for command in commands]
 
         for family in ("iptables", "ip6tables"):
@@ -71,7 +72,27 @@ class TurnProxyTests(unittest.TestCase):
             if "-A INPUT" in command and "--ctstate NEW" in command
         ]
         self.assertEqual(len(inbound_new), 1)
-        self.assertIn("-i eth0", inbound_new[0])
+        self.assertIn("-i eth1", inbound_new[0])
+
+    def test_default_route_interface_selects_the_publish_bridge(self):
+        route_table = """Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+eth0 0050A8C0 00000000 0001 0 0 0 00F0FFFF 0 0 0
+eth1 00000000 0160A8C0 0003 0 0 0 00000000 0 0 0
+"""
+
+        self.assertEqual(proxy.default_route_interface(route_table), "eth1")
+
+    def test_default_route_interface_rejects_missing_or_ambiguous_routes(self):
+        for route_table in (
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n",
+            """Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+eth0 00000000 0100000A 0003 0 0 0 00000000 0 0 0
+eth1 00000000 0160A8C0 0003 0 0 0 00000000 0 0 0
+""",
+        ):
+            with self.subTest(route_table=route_table):
+                with self.assertRaises(RuntimeError):
+                    proxy.default_route_interface(route_table)
 
     def test_drop_privilege_command_clears_all_capability_sets(self):
         command = proxy.drop_privilege_argv("/app/turn_proxy/proxy.py")
