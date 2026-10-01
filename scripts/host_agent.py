@@ -332,14 +332,46 @@ def voice_turn_listener_ready(timeout=0.5):
                 if not part:
                     return False
                 response.extend(part)
-        message_type, length, cookie = struct.unpack("!HHI", response[:8])
-        return (
-            message_type == 0x0101
-            and length % 4 == 0
-            and cookie == 0x2112A442
-            and response[8:20] == transaction_id
-        )
-    except OSError:
+            message_type, length, cookie = struct.unpack("!HHI", response[:8])
+            if (
+                message_type != 0x0101
+                or length > 4096
+                or length % 4 != 0
+                or cookie != 0x2112A442
+                or response[8:20] != transaction_id
+            ):
+                return False
+            body = bytearray()
+            while len(body) < length:
+                part = conn.recv(length - len(body))
+                if not part:
+                    return False
+                body.extend(part)
+
+        # Require at least one complete address attribute so a TCP service that
+        # only mimics the STUN header cannot be mistaken for coturn.
+        offset = 0
+        has_mapped_address = False
+        while offset < len(body):
+            if len(body) - offset < 4:
+                return False
+            attribute_type, attribute_length = struct.unpack("!HH", body[offset:offset + 4])
+            value_start = offset + 4
+            value_end = value_start + attribute_length
+            padded_end = value_start + ((attribute_length + 3) & ~3)
+            if value_end > len(body) or padded_end > len(body):
+                return False
+            value = body[value_start:value_end]
+            if attribute_type in (0x0001, 0x0020):
+                if len(value) < 4 or value[0] != 0:
+                    return False
+                expected_length = {1: 8, 2: 20}.get(value[1])
+                if expected_length is None or attribute_length != expected_length:
+                    return False
+                has_mapped_address = True
+            offset = padded_end
+        return has_mapped_address
+    except (OSError, struct.error):
         return False
 
 
@@ -391,6 +423,7 @@ def tailscale_status():
     serve_json = run([exe, "serve", "status", "--json"], max_output=200_000)
     parsed = {}
     routes = {}
+    route_state_available = False
     if status["ok"]:
         try:
             parsed = json.loads(status["stdout"])
@@ -398,7 +431,10 @@ def tailscale_status():
             parsed = {}
     if serve_json["ok"]:
         try:
-            routes = json.loads(serve_json["stdout"])
+            decoded_routes = json.loads(serve_json["stdout"])
+            if isinstance(decoded_routes, dict):
+                routes = decoded_routes
+                route_state_available = True
         except json.JSONDecodeError:
             routes = {}
     self_info = parsed.get("Self", {}) if isinstance(parsed, dict) else {}
@@ -438,6 +474,7 @@ def tailscale_status():
         "voice_turn_route_present": voice_turn_route_present(routes, dns_name),
         "voice_turn_funnel_enabled": voice_turn_funnel_enabled(routes, dns_name),
         "voice_turn_listener_ready": turn_listener_ready,
+        "route_state_available": route_state_available,
         "voice_turn_target": "127.0.0.1:3478",
         "route_state": routes,
         "host_agent_version": HOST_AGENT_VERSION,
@@ -473,12 +510,7 @@ def configure_tailscale(payload):
     if payload.get("clear_legacy_443"):
         results.append(run([exe, "serve", "--https=443", "off"]))
 
-    def disable_turn_funnel_if_present():
-        current = tailscale_status()
-        if not voice_turn_funnel_enabled(
-            current.get("route_state", {}), current.get("dns_name", "")
-        ):
-            return True
+    def disable_turn_funnel_and_verify():
         result = run([
             exe,
             "funnel",
@@ -486,11 +518,23 @@ def configure_tailscale(payload):
             "off",
         ])
         results.append(result)
-        return result["ok"]
+        current = tailscale_status()
+        route_state_available = current.get("route_state_available") is True
+        funnel_disabled = route_state_available and not voice_turn_funnel_enabled(
+            current.get("route_state", {}), current.get("dns_name", "")
+        )
+        if not route_state_available or not funnel_disabled:
+            results.append({
+                "ok": False,
+                "code": 503,
+                "stdout": "",
+                "stderr": "could not verify that the TURN Funnel route is disabled",
+            })
+        return result["ok"] and funnel_disabled
 
     turn_requested = payload.get("voice_turn_enabled") is True
     if turn_requested and voice_turn_listener_ready():
-        if disable_turn_funnel_if_present():
+        if disable_turn_funnel_and_verify():
             enable = run([
                 exe,
                 "serve",
@@ -505,7 +549,7 @@ def configure_tailscale(payload):
         else:
             results.append(run([exe, "serve", f"--tls-terminated-tcp={VOICE_TURN_PORT}", "off"]))
     else:
-        disable_turn_funnel_if_present()
+        disable_turn_funnel_and_verify()
         if turn_requested:
             results.append({
                 "ok": False,

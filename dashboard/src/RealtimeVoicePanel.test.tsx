@@ -226,6 +226,7 @@ describe('RealtimeVoicePanel', () => {
       callbacks()?.onIcePathChanged?.({
         localType: 'relay',
         localProtocol: 'udp',
+        localRelayProtocol: 'tls',
         remoteType: 'host',
         remoteProtocol: 'udp',
       } as never)
@@ -233,7 +234,7 @@ describe('RealtimeVoicePanel', () => {
 
     expect(screen.getByText('Hello there')).toBeTruthy()
     expect(screen.getByText('Hello back')).toBeTruthy()
-    expect(screen.getByText('ICE path: local relay over UDP → remote host over UDP')).toBeTruthy()
+    expect(screen.getByText('ICE path: local relay over UDP via TURN TLS → remote host over UDP')).toBeTruthy()
     expect((screen.getByLabelText('Assistant audio') as HTMLAudioElement).srcObject).toBe(remoteStream)
   })
 

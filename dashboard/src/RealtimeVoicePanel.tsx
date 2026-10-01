@@ -282,7 +282,7 @@ export default function RealtimeVoicePanel() {
           <div className="voice-audio-state"><Volume2 size={14} /> Assistant speech plays through this browser.</div>
           <div className="voice-audio-state" aria-live="polite">
             ICE path: {icePath
-              ? `local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
+              ? `local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()}${icePath.localRelayProtocol ? ` via TURN ${icePath.localRelayProtocol.toUpperCase()}` : ''} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
               : 'waiting for selected candidate pair'}
           </div>
         </div>

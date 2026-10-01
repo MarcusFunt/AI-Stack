@@ -54,7 +54,11 @@ reaches `VOICE_SESSION_MAX_SECONDS`.
 
 Use the existing Dashboard HTTPS URL from a device enrolled in the Tailscale
 network. This includes a tailnet device on the same physical LAN; being on the
-LAN without Tailscale is not sufficient. The browser sends audio through
+LAN without Tailscale is not sufficient. Start the local relay with
+`scripts\ai.ps1 start coturn` and stop it with `scripts\ai.ps1 stop coturn`.
+TURN credentials are provided to the voice service only through the existing
+`VOICE_TURN_SHARED_SECRET` and `VOICE_TURN_HOSTNAME` process environment
+variables; do not persist or log the secret. The browser sends audio through
 WebRTC, while the existing Dashboard Nginx route keeps the gateway API key on
 the server.
 

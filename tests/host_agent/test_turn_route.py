@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -41,9 +42,10 @@ def route_config(*, dashboard=False, turn=False, funnel=False):
 
 
 class FakeTailscale:
-    def __init__(self, *, dashboard=False, turn=False, unsupported=False):
-        self.config = route_config(dashboard=dashboard, turn=turn)
+    def __init__(self, *, dashboard=False, turn=False, funnel=False, unsupported=False, serve_status_unavailable=False):
+        self.config = route_config(dashboard=dashboard, turn=turn, funnel=funnel)
         self.unsupported = unsupported
+        self.serve_status_unavailable = serve_status_unavailable
         self.calls = []
 
     def run(self, args, **_kwargs):
@@ -51,6 +53,8 @@ class FakeTailscale:
         if args[1:3] == ["status", "--json"]:
             return {"ok": True, "code": 0, "stdout": status_json(), "stderr": ""}
         if args[1:4] == ["serve", "status", "--json"]:
+            if self.serve_status_unavailable:
+                return {"ok": False, "code": 1, "stdout": "", "stderr": "Serve status unavailable"}
             return {"ok": True, "code": 0, "stdout": json.dumps(self.config), "stderr": ""}
         if args[1:3] == ["funnel", "--tls-terminated-tcp=8447"] and "off" in args:
             self.config["AllowFunnel"].pop(TURN_KEY, None)
@@ -77,11 +81,48 @@ class FakeTailscale:
 
 
 class VoiceTurnRouteTests(unittest.TestCase):
+    def test_turn_enable_fails_closed_when_serve_state_cannot_be_read(self):
+        cli = FakeTailscale(serve_status_unavailable=True)
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
+        ):
+            result = host_agent.configure_tailscale({
+                "dashboard_enabled": False,
+                "mcp_mode": "off",
+                "voice_turn_enabled": True,
+            })
+
+        enable = ["tailscale.exe", "serve", "--tls-terminated-tcp=8447", "--bg", "--yes", "tcp://127.0.0.1:3478"]
+        self.assertNotIn(enable, cli.calls)
+        self.assertFalse(result["ok"])
+
+    def test_turn_disable_does_not_report_success_when_serve_state_is_unknown(self):
+        cli = FakeTailscale(funnel=True, serve_status_unavailable=True)
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
+        ):
+            result = host_agent.configure_tailscale({
+                "dashboard_enabled": False,
+                "mcp_mode": "off",
+                "voice_turn_enabled": False,
+            })
+
+        self.assertIn(["tailscale.exe", "funnel", "--tls-terminated-tcp=8447", "off"], cli.calls)
+        self.assertFalse(result["ok"])
+
     def test_listener_probe_requires_a_valid_stun_binding_response(self):
         request = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + bytes(range(12))
-        response = b"\x01\x01\x00\x00\x21\x12\xa4\x42" + bytes(range(12))
+        mapped_address = struct.pack("!HHBBH4s", 0x0020, 8, 0, 1, 3478, b"\x21\x12\xa4\x42")
+        response = struct.pack("!HHI", 0x0101, len(mapped_address), 0x2112A442) + bytes(range(12)) + mapped_address
 
         class FakeSocket:
+            def __init__(self):
+                self.remaining = bytearray(response)
+
             def __enter__(self):
                 return self
 
@@ -94,14 +135,46 @@ class VoiceTurnRouteTests(unittest.TestCase):
             def sendall(self, payload):
                 self.sent = payload
 
-            def recv(self, _size):
-                return response if self.sent == request else b"bad response"
+            def recv(self, size):
+                if self.sent != request:
+                    return b"bad response"
+                part = self.remaining[:size]
+                del self.remaining[:size]
+                return bytes(part)
 
         with (
             patch.object(host_agent.socket, "create_connection", return_value=FakeSocket()),
             patch.object(host_agent.os, "urandom", return_value=bytes(range(12))),
         ):
             self.assertTrue(host_agent.voice_turn_listener_ready())
+
+    def test_listener_probe_rejects_a_truncated_stun_body(self):
+        request = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + bytes(range(12))
+        response = struct.pack("!HHI", 0x0101, 12, 0x2112A442) + bytes(range(12))
+
+        class FakeSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def sendall(self, _payload):
+                self.remaining = bytearray(response)
+
+            def recv(self, size):
+                part = self.remaining[:size]
+                del self.remaining[:size]
+                return bytes(part)
+
+        with (
+            patch.object(host_agent.socket, "create_connection", return_value=FakeSocket()),
+            patch.object(host_agent.os, "urandom", return_value=bytes(range(12))),
+        ):
+            self.assertFalse(host_agent.voice_turn_listener_ready())
 
     def test_listener_probe_rejects_a_non_stun_tcp_service(self):
         class FakeSocket:

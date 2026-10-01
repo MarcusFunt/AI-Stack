@@ -29,6 +29,7 @@ export type RealtimeVoiceCallbacks = {
 export type RealtimeIcePath = {
   localType: string
   localProtocol: string
+  localRelayProtocol: string | null
   remoteType: string
   remoteProtocol: string
 }
@@ -55,8 +56,6 @@ export async function readSelectedIceCandidatePath(
   const selectedId = transport?.selectedCandidatePairId
   const pair = (typeof selectedId === 'string' ? report.get(selectedId) : undefined)
     ?? entries.find((entry) => entry.type === 'candidate-pair' && entry.selected === true)
-    ?? entries.find((entry) => entry.type === 'candidate-pair'
-      && entry.state === 'succeeded' && entry.nominated === true)
   if (!pair || typeof pair.localCandidateId !== 'string' || typeof pair.remoteCandidateId !== 'string') {
     return null
   }
@@ -73,6 +72,7 @@ export async function readSelectedIceCandidatePath(
   return {
     localType: local.candidateType,
     localProtocol: local.protocol,
+    localRelayProtocol: typeof local.relayProtocol === 'string' ? local.relayProtocol : null,
     remoteType: remote.candidateType,
     remoteProtocol: remote.protocol,
   }
@@ -157,15 +157,19 @@ export function createRealtimeVoiceClient(
     mediaManager: createCapturedStreamMediaManager(stream),
   })
   let candidatePoll: ReturnType<typeof setInterval> | undefined
+  let candidateMonitorGeneration = 0
   const updateIcePath = async () => {
+    const generation = candidateMonitorGeneration
     try {
       const peer = (transport as unknown as { pc?: RTCPeerConnection | null }).pc
-      callbacks.onIcePathChanged(await readSelectedIceCandidatePath(peer))
+      const path = await readSelectedIceCandidatePath(peer)
+      if (generation === candidateMonitorGeneration) callbacks.onIcePathChanged(path)
     } catch {
-      callbacks.onIcePathChanged(null)
+      if (generation === candidateMonitorGeneration) callbacks.onIcePathChanged(null)
     }
   }
   const stopIcePathMonitor = () => {
+    candidateMonitorGeneration += 1
     if (candidatePoll !== undefined) clearInterval(candidatePoll)
     candidatePoll = undefined
     callbacks.onIcePathChanged(null)
