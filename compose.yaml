@@ -196,9 +196,13 @@ services:
       retries: 6
 
   coturn:
-    image: coturn/coturn:4.18.0
+    image: ai-stack-coturn:4.18.0
+    build:
+      context: ./voice/turn_proxy
+      dockerfile: Dockerfile.coturn
     container_name: ai-stack-coturn
-    restart: "no"
+    restart: unless-stopped
+    stop_grace_period: 20s
     init: true
     read_only: true
     tmpfs:
@@ -216,18 +220,24 @@ services:
           echo "coturn disabled: optional TURN configuration is incomplete"
           exit 0
         fi
-        exec turnserver --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --min-port=49160 --max-port=49200
+        exec python3 /usr/local/bin/coturn_supervisor.py -- turnserver --fingerprint --use-auth-secret --static-auth-secret="$${VOICE_TURN_SHARED_SECRET}" --realm="$${VOICE_TURN_HOSTNAME}" --listening-port=3478 --listening-ip=0.0.0.0 --no-udp --no-tcp-relay --no-tls --min-port=49160 --max-port=49200
     environment:
       VOICE_TURN_SHARED_SECRET: ${VOICE_TURN_SHARED_SECRET:-}
       VOICE_TURN_HOSTNAME: ${VOICE_TURN_HOSTNAME:-}
     networks: [voice]
+    healthcheck:
+      test: ["CMD","python3","/usr/local/bin/turn_proxy_health.py","--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   turn-proxy:
     build:
       context: ./voice/turn_proxy
       dockerfile: Dockerfile
     container_name: ai-stack-turn-proxy
-    restart: "no"
+    restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp
@@ -243,10 +253,17 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
     depends_on:
       coturn:
-        condition: service_started
+        condition: service_healthy
+        restart: true
     ports:
       - "127.0.0.1:3478:3478/tcp"
     networks: [turn-publish, voice]
+    healthcheck:
+      test: ["CMD","python","/app/turn_proxy/proxy.py","--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   eval-router:
     build:

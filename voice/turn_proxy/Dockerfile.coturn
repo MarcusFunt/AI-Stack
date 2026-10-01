@@ -1,0 +1,11 @@
+FROM coturn/coturn:4.18.0
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY proxy.py /usr/local/bin/turn_proxy_health.py
+COPY coturn_supervisor.py /usr/local/bin/coturn_supervisor.py
+
+USER nobody:nogroup

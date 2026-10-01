@@ -1,6 +1,6 @@
 # Private TURN Loopback Ingress Redesign
 
-**Status:** Proposed; awaiting user review
+**Status:** Implemented for PR #13; local automated acceptance complete; remote Tailnet/WebRTC acceptance is deferred until after merge
 **Date:** 2026-10-01
 **Supersedes:** The TURN ingress portion of 2026-09-30-realtime-voice-phase2-design.md for Windows Docker Desktop
 **Reason:** The approved path assumes Docker Desktop can publish coturn from the private voice network to host loopback. That assumption failed on the target host.
@@ -30,17 +30,21 @@ The normal bridge workaround is rejected because it does not preserve egress iso
 
 Coturn remains on ai-stack-voice-net and has no host-published ports. A small asyncio TCP byte-stream proxy attaches to two networks: a dedicated regular bridge used only for host-loopback port publication, followed by the internal voice network used to reach coturn. The proxy publishes 127.0.0.1:3478:3478/tcp; it does not parse or terminate TURN/TLS.
 
-At startup, the proxy resolves the coturn service to one private IPv4 address before installing firewall rules. It rejects invalid, non-private, or ambiguous upstream addresses. It installs default-DROP INPUT, OUTPUT, and FORWARD policies in its own network namespace, then allows loopback, established/related traffic, new inbound TCP on 3478, and new outbound TCP only to the resolved coturn address on 3478. DNS resolution is not allowed after this setup.
+At startup, the proxy resolves the coturn service to one private IPv4 address before installing firewall rules. It rejects invalid, non-private, or ambiguous upstream addresses. It installs default-DROP INPUT, OUTPUT, and FORWARD policies in its own network namespace, then allows loopback, established/related traffic, new inbound TCP on 3478, and new outbound TCP only to the resolved coturn address on 3478. DNS resolution is not allowed after this setup. Before binding, it requires a valid TCP STUN Binding Success from coturn. Its healthcheck probes STUN through the loopback listener, and a watchdog exits after three consecutive upstream probe failures so Docker restarts the proxy and it resolves coturn again.
 
 The proxy container starts with only NET_ADMIN and SETPCAP added to its dropped capability set so it can install those namespace-local rules and clear its capability bounding set. It then uses setpriv with no-new-privs to exec the proxy. The serving process must verify both effective and bounding capabilities are zero before binding. The container remains read-only with a /tmp tmpfs and no-new-privileges.
 
-scripts/ai.ps1 sets the non-secret TURN_PROXY_ENABLED flag only when both process-scoped TURN inputs are present, then removes that flag after Compose has created the services. Compose passes only this boolean to the proxy. Coturn and the voice service continue to receive the shared secret and hostname through the existing process environment injection. scripts/ai.ps1 start coturn starts coturn and the proxy; stop stops both. The host agent still controls Tailscale Serve and must verify the STUN listener before enabling 8447.
+The coturn image remains based on coturn 4.18.0 and adds only a small Python TCP STUN readiness/recovery helper. Coturn has its own STUN healthcheck and watchdog; when STUN stays unavailable, the watchdog stops coturn and exits so Docker's `unless-stopped` policy recreates it. The proxy uses `unless-stopped` as well. Compose waits for healthy coturn, and an explicit Compose coturn restart also restarts the proxy. If coturn is recreated outside that Compose operation and receives a new IP, the proxy watchdog detects its pinned address is dead and exits; the restart resolves the service name again.
+
+scripts/ai.ps1 sets the non-secret TURN_PROXY_ENABLED flag only when both process-scoped TURN inputs are present, then removes that flag after Compose has created the services. Compose passes only this boolean to the proxy. Coturn and the voice service continue to receive the shared secret and hostname through the existing process environment injection. scripts/ai.ps1 start coturn starts and builds only coturn and the proxy; stop stops both. The host agent still controls Tailscale Serve and must verify the STUN listener before enabling 8447.
 
 ## Failure behavior
 
 - Missing TURN configuration makes coturn and the proxy exit cleanly without an active TURN listener.
-- Invalid coturn DNS results, firewall errors, or setpriv failures stop proxy startup before listen.
-- An unavailable coturn upstream closes the individual client connection and does not change firewall policy.
+- Invalid coturn DNS results, firewall errors, failed upstream STUN, or setpriv failures stop proxy startup before listen; Docker restarts failed containers unless an operator stopped them.
+- Coturn's healthcheck requires a valid TCP STUN Binding Success. Coturn's watchdog exits nonzero after startup readiness never succeeds or three consecutive checks fail after readiness.
+- The proxy's healthcheck requires STUN through the published listener. Its upstream watchdog exits after three consecutive failures, causing Docker to restart it and refresh coturn DNS.
+- An unavailable coturn upstream closes the individual client connection. Sustained failure restarts coturn and/or the proxy through their watchdogs and restart policies.
 - The private 8447 route stays off until the host-agent loopback STUN check succeeds. Funnel stays off.
 - The normal bridge is not accepted as a standalone coturn network.
 
@@ -53,11 +57,13 @@ Automated verification must cover:
 3. Firewall construction is default-deny and permits only the documented flows; invalid upstream addresses fail closed.
 4. Firewall or privilege-drop failure prevents the listening socket from opening.
 5. The running serving process reports CapEff=0 and CapBnd=0.
-6. A real host STUN transaction through 127.0.0.1:3478 reaches coturn and succeeds.
-7. A new outbound internet TCP connection from the proxy is blocked.
-8. The full unit/static test matrix passes.
+6. Coturn and proxy TCP STUN readiness checks, failure watchdogs, and restart policies pass automated failure-mode tests.
+7. A real host STUN transaction through 127.0.0.1:3478 reaches coturn and succeeds.
+8. A new outbound internet TCP connection from the proxy is blocked.
+9. The PowerShell acceptance script executes its Python probes by script path and verifies host publication, network membership, health, STUN, capabilities, and blocked egress.
+10. The full unit/static test matrix passes.
 
-The deployment gate remains a real call from a second tailnet browser with a selected relay candidate pair, two-way audio, interruption, reconnect/stop behavior, and Funnel off. A successful local proxy probe is not a substitute.
+Remote Tailnet/WebRTC acceptance is intentionally deferred until after PR #13 is merged. The post-merge procedure is to enable only the private Tailscale Serve route on port 8447, verify Funnel remains disabled, connect from a second Tailnet device, confirm the browser selected a `relay` ICE candidate through TURN, then verify two-way audio, interruption, reconnect, and cleanup. This local implementation pass does not change Tailscale routes or perform that call.
 
 ## Alternatives considered
 

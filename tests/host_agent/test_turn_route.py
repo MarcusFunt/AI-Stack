@@ -81,6 +81,31 @@ class FakeTailscale:
 
 
 class VoiceTurnRouteTests(unittest.TestCase):
+    def test_status_fails_closed_when_tailscale_route_state_is_unknown(self):
+        cli = FakeTailscale(turn=True, serve_status_unavailable=True)
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
+        ):
+            result = host_agent.tailscale_status()
+
+        self.assertFalse(result["route_state_available"])
+        self.assertFalse(result["voice_turn_enabled"])
+
+    def test_status_fails_closed_when_route_target_is_not_exact_loopback(self):
+        cli = FakeTailscale(turn=True)
+        cli.config["TCP"][TURN_KEY]["TCPForward"] = "0.0.0.0:3478"
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
+        ):
+            result = host_agent.tailscale_status()
+
+        self.assertTrue(result["voice_turn_route_present"])
+        self.assertFalse(result["voice_turn_enabled"])
+
     def test_status_requires_a_valid_node_identity_before_route_state_is_available(self):
         def fake_run(args, **_kwargs):
             if args[1:3] == ["status", "--json"]:
@@ -251,6 +276,26 @@ class VoiceTurnRouteTests(unittest.TestCase):
 
             def recv(self, _size):
                 return b"not coturn"
+
+        with patch.object(host_agent.socket, "create_connection", return_value=FakeSocket()):
+            self.assertFalse(host_agent.voice_turn_listener_ready())
+
+    def test_listener_probe_fails_when_stun_stops_responding(self):
+        class FakeSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def sendall(self, _payload):
+                pass
+
+            def recv(self, _size):
+                return b""
 
         with patch.object(host_agent.socket, "create_connection", return_value=FakeSocket()):
             self.assertFalse(host_agent.voice_turn_listener_ready())

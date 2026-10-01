@@ -87,17 +87,38 @@ allows new TCP only from its publish-side interface to port 3478, and allows
 new outbound TCP only to coturn's resolved private IPv4 address on port 3478.
 It then drops all effective and bounding capabilities before accepting
 connections. Funnel is not used. Port 8446 remains untouched; voice uses 8447.
+Both containers use `restart: unless-stopped`. Coturn's healthcheck requires
+a valid TCP STUN Binding response; its watchdog exits the container if that
+check never becomes ready or fails repeatedly. The proxy checks coturn before
+binding, checks its loopback STUN path for health, and exits after repeated
+upstream STUN failures. Docker then restarts it so it resolves a recreated
+coturn container to its current private address. Compose also restarts the
+proxy when coturn is explicitly restarted through Compose.
 
-After starting coturn, run `scripts\test-turn-proxy.ps1`. It checks the exact
-loopback TCP publication, a successful STUN transaction, zero effective and
-bounding capabilities on proxy PID 1, and blocked external TCP egress. It does
-not enable or modify the Tailnet route.
+After starting coturn, run `scripts\test-turn-proxy.ps1`. It checks healthy
+STUN probes, exact network membership, loopback-only TCP publication, no
+coturn host publication, a successful host STUN transaction, zero effective
+and bounding capabilities on proxy PID 1, and blocked external TCP egress.
+The script invokes a checked-in Python probe by file path, which keeps the
+PowerShell 5.1 argument handoff reliable. It does not enable or modify the
+Tailnet route.
 
 The host agent enables this route only after a STUN Binding request succeeds on
 the loopback coturn listener. Status also requires an exact `127.0.0.1:3478`
 target, no Funnel permission, and a live listener; applying network settings
 removes a stale route when the listener is unavailable. Remote call acceptance
 still requires a second Tailnet device, a selected `relay` candidate pair, and
-two-way audio. A direct candidate path does not count. See [coturn's relay
-options](https://github.com/coturn/coturn/wiki/turnserver) and [Tailscale Serve
-TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).
+two-way audio. A direct candidate path does not count. Remote Tailnet/WebRTC
+acceptance is intentionally deferred until after PR #13 is merged. Then:
+
+1. Enable the private `8447` Tailscale Serve route through the authenticated
+   host-agent setting and verify Funnel is disabled.
+2. Connect from a second device enrolled in the Tailnet.
+3. Inspect browser ICE statistics and confirm the selected candidate is
+   `relay` through TURN.
+4. Verify two-way audio, interruption/barge-in, reconnect, stop, and cleanup.
+5. Disable the route after acceptance if it is no longer needed.
+
+No manual Tailscale configuration or second-device call is part of this PR
+implementation pass. See [coturn's relay options](https://github.com/coturn/coturn/wiki/turnserver)
+and [Tailscale Serve TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).

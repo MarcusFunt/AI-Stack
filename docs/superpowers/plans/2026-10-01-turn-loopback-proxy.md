@@ -1,97 +1,43 @@
 # Private TURN Loopback Ingress Proxy Implementation Plan
 
-> For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
+**Status:** PR #13 implementation and local verification complete; remote Tailnet/WebRTC acceptance is post-merge.
 
-**Goal:** Provide the Tailscale TURN/TLS route with a loopback TCP listener while keeping coturn private and blocking proxy egress.
+**Goal:** Provide the private Tailscale TURN/TLS route through a host-loopback TCP listener while keeping coturn private and blocking proxy egress.
 
-**Architecture:** Coturn stays on the existing internal voice network without host ports. A small TCP proxy sits on a dedicated publish bridge and the internal voice network, publishes only loopback TCP 3478, locks its own network namespace to default-deny rules, then drops all capabilities before accepting traffic.
+**Architecture:** Coturn stays on the internal voice network with no host port. A TCP proxy joins only the publish bridge and voice network, publishes TCP 3478 on loopback, applies default-deny firewall rules, drops all capabilities before listening, and restarts with a fresh coturn DNS lookup after sustained upstream STUN failure.
 
 **Tech Stack:** Docker Compose, Python 3.12 asyncio, iptables, util-linux setpriv, coturn 4.18.0, PowerShell 5.1.
 
-**Spec:** 2026-10-01-turn-loopback-proxy-design.md
+**Spec:** [2026-10-01-turn-loopback-proxy-design.md](../specs/2026-10-01-turn-loopback-proxy-design.md)
 
-## Global Constraints
+## Completed implementation
 
-- Coturn has no host-published ports and remains on ai-stack-voice-net (internal: true).
-- Only turn-proxy publishes 127.0.0.1:3478:3478/tcp; no host UDP ports are added.
-- turn-proxy is the only service attached to turn-publish; it also joins the internal voice network.
-- Proxy OUTPUT permits new TCP connections only to the validated coturn IPv4 address on port 3478.
-- Proxy INPUT, OUTPUT, and FORWARD default to DROP; allow loopback, established/related traffic, and new TCP input on 3478.
-- Before serving, the proxy process must have CapEff=0 and CapBnd=0; Docker retains no-new-privileges:true and read_only:true.
-- The TURN shared secret is injected only into coturn and voice; the proxy receives only a non-secret enable flag.
-- Port 8447 stays disabled until the host-agent loopback STUN check succeeds; Funnel remains off.
-- Keep PowerShell scripts compatible with Windows PowerShell 5.1.
+- [x] Coturn is only on `ai-stack-voice-net`; it has no host-published ports.
+- [x] Turn proxy alone joins `ai-stack-turn-publish-net` and `ai-stack-voice-net`; it publishes only `127.0.0.1:3478:3478/tcp`.
+- [x] Proxy receives only `TURN_PROXY_ENABLED`, never the TURN shared secret or hostname.
+- [x] Proxy firewall defaults INPUT, OUTPUT, and FORWARD to DROP; new egress is only TCP/3478 to one validated private coturn address.
+- [x] Proxy has `read_only`, `/tmp` tmpfs, `no-new-privileges`, `cap_drop: ALL`, and temporary `NET_ADMIN`/`SETPCAP`; serving PID 1 must have `CapEff=0` and `CapBnd=0`.
+- [x] Coturn remains pinned to 4.18.0. Its small derived image adds a TCP STUN healthcheck and watchdog; sustained failure exits so `unless-stopped` can restart it.
+- [x] Proxy healthcheck requires a successful STUN transaction through its local listener. Startup probes coturn before binding; after three consecutive upstream failures, the process exits and Docker restarts it to re-resolve coturn.
+- [x] Compose waits for coturn health and restarts the proxy on an explicit coturn Compose restart. Container recreation outside Compose is handled by the proxy watchdog and fresh DNS lookup.
+- [x] `scripts/ai.ps1 start coturn` builds and starts only coturn and turn-proxy; stop handles the same pair.
+- [x] `scripts/test-turn-proxy.ps1` uses a checked-in Python probe by script path and verifies health, exact network membership, loopback-only publication, host STUN, zero capability masks, and blocked external TCP.
+- [x] Regression tests execute the PowerShell-to-Python handoff and cover upstream loss, changed coturn addresses, proxy startup, firewall, privilege drop, host-agent fail-closed state, and topology.
 
-## Review Focus
+## Final local verification
 
-- Missing/partial TURN environment must not leave a listening proxy or enable 8447; test in Task 1.
-- Public, loopback, unspecified, multiple, or malformed upstream DNS answers must fail before firewall changes; test in Task 2.
-- An iptables command failure must leave no listening socket; test in Task 2 and Task 3.
-- Failure to drop effective or bounding capabilities must exit before listening; test in Task 2.
-- An external TCP attempt after startup must fail while a STUN transaction through the proxy succeeds; test in Task 3.
+- [x] Run voice (79 tests), host-agent (18 tests), and architecture unit suites (core, observability, gateway, supervisor, eval-router, MCP).
+- [x] Run Dashboard Vitest (22 tests), lint, and production build.
+- [x] Run STT benchmark tests (86 tests) in an isolated environment with the CI dependency set and `python -m compileall -q voice gateway scripts tests`.
+- [x] Parse all 18 PowerShell scripts, run Compose config validation with an explicit empty interpolation file, and run `git diff --check`.
+- [x] Confirm the supervisor had no active jobs, rebuild only coturn and turn-proxy, and run `scripts/test-turn-proxy.ps1` against those local containers.
 
----
+## Post-merge Tailnet/WebRTC acceptance
 
-## File Map
+- [x] Document that this implementation pass does not enable Tailscale Serve, Funnel, or a manual Tailnet route.
+- [x] Document the post-merge acceptance procedure below.
+- [ ] After PR #13 is merged, enable only the private Tailscale Serve route on port `8447` through the authenticated host-agent setting and verify Funnel remains disabled.
+- [ ] Connect from a second Tailnet device and confirm the selected browser ICE candidate is `relay` through TURN.
+- [ ] Verify two-way audio, interruption/barge-in, reconnect, stop, and cleanup; then disable the route if no longer needed.
 
-- voice/turn_proxy/proxy.py: upstream validation, firewall rule generation/application, capability drop, and asyncio TCP byte relay.
-- voice/turn_proxy/Dockerfile: small Python runtime with the required firewall tooling.
-- compose.yaml: coturn remains internal-only; add the dual-network proxy and private publish bridge.
-- scripts/ai.ps1: start and stop coturn plus its proxy as one optional service pair.
-- scripts/test-turn-proxy.ps1: local integration checks for listener, STUN forwarding, capability state, and blocked egress.
-- voice/README.md: describe process-scoped config and the new private ingress path without credential values.
-- tests/voice/test_turn_proxy.py and tests/voice/test_compose_turn.py: unit and Compose regression coverage.
-
-## Task 1: Pin the Compose and lifecycle contract
-
-**Files:** Modify compose.yaml, scripts/ai.ps1, and tests/voice/test_compose_turn.py.
-
-- [ ] Step 1: Write failing Compose tests named test_coturn_has_no_published_ports, test_turn_proxy_publishes_only_loopback_tcp_and_uses_both_networks, test_turn_proxy_receives_no_shared_secret, and test_coturn_command_omits_removed_flags. Assert coturn has zero ports, proxy has only 127.0.0.1:3478:3478/tcp, proxy networks are ordered turn-publish then voice, and neither --no-dtls nor --no-cli appears.
-- [ ] Step 2: Run python -m unittest tests.voice.test_compose_turn -v. Expected: the new Compose contract tests FAIL on the current direct coturn port mapping and flags.
-- [ ] Step 3: Implement the service and lifecycle configuration. Add turn-publish as a normal bridge with a fixed project name; add turn-proxy with read_only, /tmp tmpfs, no-new-privileges, cap_drop: ALL, and temporary NET_ADMIN/SETPCAP. Publish only loopback TCP 3478. Do not pass either TURN secret or hostname to the proxy. Set TURN_PROXY_ENABLED only when both process-scoped TURN inputs are present and clear it after Compose returns. Update scripts/ai.ps1 to start/stop coturn and turn-proxy together.
-- [ ] Step 4: Run python -m unittest tests.voice.test_compose_turn -v and docker compose config --quiet. Expected: all Compose contract tests PASS and Compose exits 0.
-- [ ] Step 5: Commit as fix(voice): define private TURN ingress topology.
-
-## Task 2: Implement the fail-closed TCP proxy
-
-**Files:** Create voice/turn_proxy/__init__.py, voice/turn_proxy/proxy.py, voice/turn_proxy/Dockerfile, and tests/voice/test_turn_proxy.py.
-
-**Interfaces:**
-
-- resolve_upstream(host: str, port: int) -> IPv4Address accepts exactly one private IPv4 result.
-- build_firewall_rules(upstream_ip: IPv4Address, *, listen_port: int = 3478, upstream_port: int = 3478) -> list[list[str]] returns the iptables argv calls in startup order.
-- drop_privilege_argv(script_path: str) -> list[str] returns setpriv arguments clearing bounding, inheritable, ambient, and effective capabilities and setting no-new-privs.
-- proxy_connection(client_reader: StreamReader, client_writer: StreamWriter, *, upstream_ip: str, upstream_port: int) -> None forwards the byte stream bidirectionally and closes both sockets after EOF/error.
-
-- [ ] Step 1: Write failing unit tests test_resolve_upstream_accepts_one_private_ipv4, test_resolve_upstream_rejects_public_loopback_unspecified_and_ambiguous_answers, test_firewall_defaults_to_drop_and_allows_only_coturn_tcp, test_drop_privilege_command_clears_all_capability_sets, and test_proxy_connection_forwards_bytes_and_closes_on_upstream_failure. Assert no broad egress rule or DNS rule exists.
-- [ ] Step 2: Run python -m unittest tests.voice.test_turn_proxy -v. Expected: FAIL because the proxy module does not exist.
-- [ ] Step 3: Implement startup order: resolve coturn on the internal network; apply all firewall rules; exec through /usr/bin/setpriv; verify /proc/self/status has zero effective and bounding caps; only then bind TCP 3478. Any failure before bind exits nonzero.
-- [ ] Step 4: Run python -m unittest tests.voice.test_turn_proxy -v. Expected: all proxy unit tests PASS.
-- [ ] Step 5: Commit as feat(voice): add isolated TCP TURN ingress proxy.
-
-## Task 3: Add reproducible local network acceptance
-
-**Files:** Create scripts/test-turn-proxy.ps1; modify voice/README.md.
-
-- [ ] Step 1: Write test test_turn_proxy_acceptance_script_checks_security_and_stun, asserting the script checks loopback STUN readiness, proxy PID capabilities, and an outbound internet TCP attempt without printing container environment or credentials.
-- [ ] Step 2: Run the focused test and confirm it fails because the acceptance script is absent.
-- [ ] Step 3: Implement the PowerShell 5.1 script. It must require the proxy container to be running, call existing host_agent.voice_turn_listener_ready(), check PID 1 CapEff/CapBnd, and confirm a new TCP connection to 1.1.1.1:443 is blocked. It must not start models, change Tailscale Serve, or read .env.
-- [ ] Step 4: Run scripts/test-turn-proxy.ps1 with the deployed service. Expected: loopback STUN succeeds, both capability masks are zero, and egress reports blocked.
-- [ ] Step 5: Commit as test(voice): add TURN proxy network acceptance.
-
-## Task 4: Integrated verification and tailnet acceptance gate
-
-**Files:** Modify only voice/README.md and the implementation files above if a verified failure requires a correction.
-
-- [ ] Step 1: Run python -m pytest -q tests, python -m compileall -q voice gateway scripts tests, Dashboard Vitest/lint/build, PowerShell parse checks, docker compose config --quiet, and git diff --check. Expected: all exit 0.
-- [ ] Step 2: Check supervisor status before lifecycle operations. Start coturn and turn-proxy with process-scoped random secret/hostname; verify host listener exactly 127.0.0.1:3478/tcp, no host UDP ports, STUN success, proxy egress block, and Tailscale Serve 8447/Funnel both off.
-- [ ] Step 3: Enable the private 8447 Serve path only through the authenticated Dashboard host-agent UI after the listener checks pass; verify exact loopback target and Funnel off.
-- [ ] Step 4: Run the actual second-tailnet-device WebRTC call and confirm selected relay candidate pair with TLS/TCP TURN transport, two-way audio, barge-in, reconnect/stop, and audible response.
-- [ ] Step 5: Update PR #12 with the exact verification and call results. Do not merge unless the call and CI checks pass.
-
-### Spike evidence (2026-10-01)
-
-- Coturn inside the internal voice network accepted TCP on 3478.
-- Direct host publication from the internal network did not create a Windows listener.
-- A normal bridge did publish loopback TCP, but the proxy had internet egress before firewalling.
-- A temporary proxy on a publish bridge plus the internal voice network returned a valid STUN response through coturn. Its firewall blocked a fresh connection to 1.1.1.1:443, and the serving process reported CapEff=0 and CapBnd=0.
+The local acceptance script does not enable or modify Tailnet routes. A direct ICE path does not satisfy remote relay acceptance.

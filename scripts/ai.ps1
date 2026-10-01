@@ -135,14 +135,14 @@ function Save-RollbackImage {
 
 switch ($Action) {
   "start" {
-    Start-ControlPlane
+    if ($Service -ne "coturn") { Start-ControlPlane }
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
     elseif ($Service -eq "coturn") {
       $turnProxyEnabled = "0"
       if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) { $turnProxyEnabled = "1" }
       [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $turnProxyEnabled, "Process")
       try {
-        Invoke-Compose -CommandArgs @("up","-d","coturn","turn-proxy")
+        Invoke-Compose -CommandArgs @("up","--build","-d","coturn","turn-proxy")
       }
       finally {
         [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")
