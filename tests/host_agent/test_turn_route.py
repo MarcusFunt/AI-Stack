@@ -95,12 +95,12 @@ class VoiceTurnRouteTests(unittest.TestCase):
         self.assertFalse(status["voice_turn_enabled"])
         self.assertEqual(cli.config["Web"][existing_key], existing_route)
 
-    def test_voice_turn_route_uses_tls_terminated_tcp_and_never_enables_funnel(self):
-        cli = FakeTailscale()
+    def test_voice_turn_enable_request_is_rejected_and_removes_existing_route(self):
+        cli = FakeTailscale(turn=True)
         with (
             patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
             patch.object(host_agent, "run", side_effect=cli.run),
-            patch.object(host_agent, "voice_turn_listener_ready", return_value=True, create=True),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
         ):
             result = host_agent.configure_tailscale({
                 "dashboard_enabled": False,
@@ -108,12 +108,16 @@ class VoiceTurnRouteTests(unittest.TestCase):
                 "voice_turn_enabled": True,
             })
 
-        self.assertIn(
+        self.assertIn(["tailscale.exe", "serve", "--tls-terminated-tcp=8447", "off"], cli.calls)
+        self.assertNotIn(
             ["tailscale.exe", "serve", "--tls-terminated-tcp=8447", "--bg", "--yes", "tcp://127.0.0.1:3478"],
             cli.calls,
         )
         self.assertFalse(any(call[1] == "funnel" and "--bg" in call for call in cli.calls))
-        self.assertTrue(result["status"]["voice_turn_enabled"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["status"]["voice_turn_enabled"])
+        self.assertNotIn(TURN_KEY, cli.config["TCP"])
+        self.assertTrue(any(step.get("code") == 409 for step in result["steps"]))
 
     def test_disabling_voice_turn_removes_only_the_turn_route(self):
         cli = FakeTailscale(dashboard=True, turn=True)
@@ -138,7 +142,7 @@ class VoiceTurnRouteTests(unittest.TestCase):
         with (
             patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
             patch.object(host_agent, "run", side_effect=cli.run),
-            patch.object(host_agent, "voice_turn_listener_ready", return_value=True, create=True),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=True),
         ):
             result = host_agent.configure_tailscale({
                 "dashboard_enabled": False,
@@ -161,6 +165,18 @@ class VoiceTurnRouteTests(unittest.TestCase):
             result = host_agent.tailscale_status()
 
         self.assertFalse(result["voice_turn_enabled"])
+
+    def test_status_reports_a_stale_route_even_when_the_listener_is_missing(self):
+        cli = FakeTailscale(turn=True)
+        with (
+            patch.object(host_agent, "tailscale_exe", return_value="tailscale.exe"),
+            patch.object(host_agent, "run", side_effect=cli.run),
+            patch.object(host_agent, "voice_turn_listener_ready", return_value=False),
+        ):
+            result = host_agent.tailscale_status()
+
+        self.assertFalse(result["voice_turn_enabled"])
+        self.assertTrue(result["voice_turn_route_present"])
 
 
 if __name__ == "__main__":
