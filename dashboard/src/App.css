@@ -473,6 +473,7 @@
 }
 .voice-settings span { color: #929fb2; font-size: 11px; line-height: 1.3; }
 .voice-settings strong { color: #e1e7f0; font-size: 12px; font-weight: 680; }
+.voice-session-diagnostics strong { overflow-wrap: anywhere; }
 .voice-detail-label { flex: 0 0 auto; color: #929fb2; }
 .voice-ice-path { align-items: flex-start; flex-direction: column; gap: 5px; margin-top: 13px; overflow-wrap: anywhere; }
 .voice-privacy-note { margin: 14px 0 0; font-size: 11px; }

@@ -3,12 +3,14 @@ import {
   AudioLines, ChevronDown, Clock3, Mic, MicOff, PhoneOff, Volume2,
 } from 'lucide-react'
 import { localAI } from './api'
+import type { RealtimeIceRoute } from './api'
 import {
   createRealtimeVoiceClient,
   requestVoiceMicrophone,
   type RealtimeVoiceCallbacks,
   type RealtimeVoiceClient,
   type RealtimeIcePath,
+  type RealtimeIceDiagnostics,
 } from './realtimeVoice'
 import './App.css'
 
@@ -83,6 +85,13 @@ function icePathLabel(icePath: RealtimeIcePath | null, connected: boolean): stri
   return `Local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()}${icePath.localRelayProtocol ? ` via TURN ${icePath.localRelayProtocol.toUpperCase()}` : ''} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
 }
 
+function iceRouteLabel(route: RealtimeIceRoute): string {
+  if (route.kind === 'tailnet-turn') {
+    return `Private TURN · ${(route.transport ?? 'tls/tcp').toUpperCase()} :${route.port ?? 8447}`
+  }
+  return 'Direct ICE'
+}
+
 export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePanelProps) {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
@@ -95,6 +104,7 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
   const [liveAnnouncement, setLiveAnnouncement] = useState('')
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [icePath, setIcePath] = useState<RealtimeIcePath | null>(null)
+  const [iceDiagnostics, setIceDiagnostics] = useState<RealtimeIceDiagnostics | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const clientRef = useRef<RealtimeVoiceClient | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -184,6 +194,7 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
     setElapsedSeconds(0)
     setRemoteStream(null)
     setIcePath(null)
+    setIceDiagnostics(null)
     updateState('permission')
 
     let stream: MediaStream | null = null
@@ -283,6 +294,9 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
         onIcePathChanged: (path) => {
           if (attempt === attemptRef.current) setIcePath(path)
         },
+        onIceDiagnosticsChanged: (diagnostics) => {
+          if (attempt === attemptRef.current) setIceDiagnostics(diagnostics)
+        },
       }
       client = createRealtimeVoiceClient(stream, callbacks)
       clientRef.current = client
@@ -296,6 +310,8 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
             offerUrl: session.offer_url,
             ticket: session.client_secret.value,
             iceServers: session.ice_servers,
+            sessionId: session.id,
+            iceRoute: session.ice_route,
           }).then(
             () => resolveTransportConnected?.(),
             (error: unknown) => rejectTransportConnection?.(
@@ -310,11 +326,15 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
     } catch (error) {
       if (attempt !== attemptRef.current) return
       const timedOut = error instanceof Error && error.message === 'voice-ice-timeout'
+      const turnRouteFailure = error instanceof Error
+        && /private TURN route could not be verified/i.test(error.message)
       const nextState: VoiceState = timedOut ? 'ice-timeout' : 'signaling-failure'
       updateState(nextState)
-      setErrorMessage(timedOut
-        ? 'ICE connection timed out. Check the network path and try again.'
-        : 'Signaling failed. Retry starts a fresh voice session.')
+      setErrorMessage(turnRouteFailure
+        ? error.message
+        : timedOut
+          ? 'ICE connection timed out. Check the network path and try again.'
+          : 'Signaling failed. Retry starts a fresh voice session.')
       clientRef.current = null
       try {
         await client?.disconnect()
@@ -543,8 +563,25 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
             </div>
             <div className="voice-audio-state voice-ice-path" aria-live="polite">
               <span className="voice-detail-label">Selected ICE path</span>
-              <span>{icePathLabel(icePath, connected)}</span>
+              <span>{icePathLabel(iceDiagnostics?.selectedPath ?? icePath, connected)}</span>
             </div>
+            {iceDiagnostics && (
+              <div className="voice-settings voice-session-diagnostics" aria-label="Realtime session route and ICE diagnostics">
+                <div><span>Session ID</span><strong>{iceDiagnostics.sessionId}</strong></div>
+                <div><span>ICE route</span><strong>{iceRouteLabel(iceDiagnostics.route)}</strong></div>
+                <div><span>Peer connection</span><strong>{iceDiagnostics.connectionState}</strong></div>
+                <div><span>ICE connection</span><strong>{iceDiagnostics.iceConnectionState}</strong></div>
+                <div><span>ICE gathering</span><strong>{iceDiagnostics.iceGatheringState}</strong></div>
+                <div>
+                  <span>ICE candidate errors</span>
+                  <strong>{iceDiagnostics.iceCandidateErrorCount}
+                    {iceDiagnostics.lastIceCandidateErrorCode !== null
+                      ? ` · last ${iceDiagnostics.lastIceCandidateErrorCode}`
+                      : ''}
+                  </strong>
+                </div>
+              </div>
+            )}
             <p className="voice-privacy-note">The short-lived session ticket stays in the signaling request header. The browser never receives the gateway key or TURN secret.</p>
           </details>
         </section>

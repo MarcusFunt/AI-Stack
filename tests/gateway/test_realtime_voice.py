@@ -161,6 +161,105 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(result["offer_url"], "/v1/realtime/sessions/session-123/offer")
         self.assertNotIn("voice:8000", str(result))
+        self.assertEqual(result["ice_route"], {"kind": "direct", "transport": None, "port": None})
+
+    def _create_turn_session(self, network=None, host_agent_error=None):
+        original_post = self.gateway.httpx.AsyncClient.post
+        original_host_agent = self.gateway.host_agent
+
+        async def fake_post(client, url, **_kwargs):
+            return self.gateway.httpx.Response(200, json={
+                "id": "session-123",
+                "client_secret": {"value": "short-lived-ticket", "expires_at": 2000},
+                "ice_servers": [{
+                    "urls": "turns:turn-check.invalid:8447?transport=tcp",
+                    "username": "short-lived-username",
+                    "credential": "short-lived-password",
+                }],
+            })
+
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            self.assertEqual((method, path, timeout), ("GET", "/tailscale/status", 3))
+            if host_agent_error:
+                raise host_agent_error
+            return network
+
+        self.gateway.httpx.AsyncClient.post = fake_post
+        self.gateway.host_agent = fake_host_agent
+        try:
+            return self.client.post(
+                "/v1/realtime/sessions",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"language": "en"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.post = original_post
+            self.gateway.host_agent = original_host_agent
+
+    @staticmethod
+    def _verified_turn_route(**overrides):
+        status = {
+            "online": True,
+            "dns_name": "phone-call.tailnet.ts.net",
+            "voice_turn_enabled": True,
+            "voice_turn_route_present": True,
+            "voice_turn_funnel_enabled": False,
+            "voice_turn_listener_ready": True,
+            "route_state_available": True,
+        }
+        status.update(overrides)
+        return status
+
+    def test_turn_session_fails_clearly_when_host_agent_check_fails(self):
+        with patch.object(self.gateway._LOGGER, "warning") as warning_log:
+            response = self._create_turn_session(
+                host_agent_error=self.gateway.HTTPException(503, "host agent unavailable: private detail"),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        detail = response.json()["detail"]
+        self.assertIn("TURN route could not be verified", detail)
+        self.assertIn("retry", detail.lower())
+        self.assertNotIn("coturn", str(response.json()).lower())
+        self.assertNotIn("private detail", detail)
+        self.assertNotIn("short-lived-password", str(response.json()))
+        log_fields = warning_log.call_args.kwargs["extra"]
+        self.assertEqual(log_fields["voice_session_id"], "session-123")
+        self.assertEqual(log_fields["request_id"], response.headers["x-request-id"])
+        self.assertEqual(log_fields["voice_turn_route_reason"], "host-agent-unavailable")
+        self.assertNotIn("private detail", str(log_fields))
+        self.assertNotIn("short-lived-password", str(log_fields))
+
+    def test_turn_session_fails_clearly_when_host_agent_reports_route_disabled(self):
+        response = self._create_turn_session(
+            network=self._verified_turn_route(voice_turn_enabled=False),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("TURN route could not be verified", response.json()["detail"])
+
+    def test_turn_session_fails_clearly_when_host_agent_hostname_is_invalid(self):
+        response = self._create_turn_session(
+            network=self._verified_turn_route(dns_name="bad host.example"),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("TURN route could not be verified", response.json()["detail"])
+
+    def test_turn_session_requires_listener_and_route_state_and_funnel_disabled(self):
+        for overrides in (
+            {"voice_turn_listener_ready": False},
+            {"voice_turn_route_present": False},
+            {"route_state_available": False},
+            {"voice_turn_funnel_enabled": True},
+        ):
+            with self.subTest(overrides=overrides):
+                response = self._create_turn_session(
+                    network=self._verified_turn_route(**overrides),
+                )
+
+                self.assertEqual(response.status_code, 503)
+                self.assertIn("TURN route could not be verified", response.json()["detail"])
 
     def test_session_turn_url_uses_the_authenticated_tailnet_hostname(self):
         original_post = self.gateway.httpx.AsyncClient.post
@@ -180,7 +279,7 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
 
         async def fake_host_agent(method, path, payload=None, timeout=30):
             observed["request"] = (method, path)
-            return {"voice_turn_enabled": True, "dns_name": "phone-call.tailnet.ts.net"}
+            return self._verified_turn_route()
 
         self.gateway.httpx.AsyncClient.post = fake_post
         self.gateway.host_agent = fake_host_agent
@@ -203,6 +302,10 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
                 "username": "short-lived-username",
                 "credential": "short-lived-password",
             },
+        )
+        self.assertEqual(
+            response.json()["ice_route"],
+            {"kind": "tailnet-turn", "transport": "tls/tcp", "port": 8447},
         )
 
     def test_offer_proxy_authenticates_bounds_and_forwards_ticket_out_of_url(self):

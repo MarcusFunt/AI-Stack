@@ -3,6 +3,7 @@ import {
   SmallWebRTCTransport,
   type SmallWebRTCTransportConstructorOptions,
 } from '@pipecat-ai/small-webrtc-transport'
+import type { RealtimeIceRoute } from './api'
 
 export const VOICE_MICROPHONE_CONSTRAINTS: MediaStreamConstraints = {
   audio: {
@@ -16,6 +17,8 @@ export type RealtimeVoiceConnection = {
   offerUrl: string
   ticket: string
   iceServers: RTCIceServer[]
+  sessionId: string
+  iceRoute: RealtimeIceRoute
 }
 
 export type RealtimeVoiceCallbacks = {
@@ -24,6 +27,7 @@ export type RealtimeVoiceCallbacks = {
   onServerMessage: (message: unknown) => void
   onRemoteStream: (stream: MediaStream | null) => void
   onIcePathChanged: (path: RealtimeIcePath | null) => void
+  onIceDiagnosticsChanged: (diagnostics: RealtimeIceDiagnostics) => void
 }
 
 export type RealtimeIcePath = {
@@ -32,6 +36,17 @@ export type RealtimeIcePath = {
   localRelayProtocol: string | null
   remoteType: string
   remoteProtocol: string
+}
+
+export type RealtimeIceDiagnostics = {
+  sessionId: string
+  route: RealtimeIceRoute
+  connectionState: RTCPeerConnectionState
+  iceConnectionState: RTCIceConnectionState
+  iceGatheringState: RTCIceGatheringState
+  iceCandidateErrorCount: number
+  lastIceCandidateErrorCode: number | null
+  selectedPath: RealtimeIcePath | null
 }
 
 export type RealtimeVoiceClient = {
@@ -162,12 +177,98 @@ export function createRealtimeVoiceClient(
   })
   let candidatePoll: ReturnType<typeof setInterval> | undefined
   let candidateMonitorGeneration = 0
+  let peerPoll: ReturnType<typeof setInterval> | undefined
+  let monitoredPeer: RTCPeerConnection | null = null
+  let peerListeners: Array<[string, EventListener]> = []
+  let iceCandidateErrorCount = 0
+  let lastIceCandidateErrorCode: number | null = null
+  let iceDiagnostics: RealtimeIceDiagnostics | null = null
+
+  const publishIceDiagnostics = () => {
+    if (!iceDiagnostics) return
+    if (monitoredPeer) {
+      iceDiagnostics = {
+        ...iceDiagnostics,
+        connectionState: monitoredPeer.connectionState,
+        iceConnectionState: monitoredPeer.iceConnectionState,
+        iceGatheringState: monitoredPeer.iceGatheringState,
+        iceCandidateErrorCount,
+        lastIceCandidateErrorCode,
+      }
+    }
+    callbacks.onIceDiagnosticsChanged(iceDiagnostics)
+  }
+
+  const detachPeer = () => {
+    if (monitoredPeer) {
+      publishIceDiagnostics()
+      for (const [eventName, listener] of peerListeners) {
+        monitoredPeer.removeEventListener(eventName, listener)
+      }
+    }
+    peerListeners = []
+    monitoredPeer = null
+  }
+
+  const attachPeer = () => {
+    const peer = (transport as unknown as { pc?: RTCPeerConnection | null }).pc ?? null
+    if (peer === monitoredPeer) return
+    detachPeer()
+    monitoredPeer = peer
+    if (!peer) return
+
+    const reportState: EventListener = () => publishIceDiagnostics()
+    const reportCandidateError: EventListener = (event) => {
+      const code = (event as RTCPeerConnectionIceErrorEvent).errorCode
+      iceCandidateErrorCount += 1
+      lastIceCandidateErrorCode = Number.isInteger(code) ? code : null
+      publishIceDiagnostics()
+    }
+    for (const eventName of ['connectionstatechange', 'iceconnectionstatechange', 'icegatheringstatechange']) {
+      peer.addEventListener(eventName, reportState)
+      peerListeners.push([eventName, reportState])
+    }
+    peer.addEventListener('icecandidateerror', reportCandidateError)
+    peerListeners.push(['icecandidateerror', reportCandidateError])
+    publishIceDiagnostics()
+  }
+
+  const startPeerMonitor = (sessionId: string, route: RealtimeIceRoute) => {
+    iceCandidateErrorCount = 0
+    lastIceCandidateErrorCode = null
+    iceDiagnostics = {
+      sessionId,
+      route,
+      connectionState: 'new',
+      iceConnectionState: 'new',
+      iceGatheringState: 'new',
+      iceCandidateErrorCount: 0,
+      lastIceCandidateErrorCode: null,
+      selectedPath: null,
+    }
+    publishIceDiagnostics()
+    attachPeer()
+    if (peerPoll === undefined) peerPoll = setInterval(attachPeer, 50)
+  }
+
+  const stopPeerMonitor = () => {
+    if (peerPoll !== undefined) clearInterval(peerPoll)
+    peerPoll = undefined
+    detachPeer()
+  }
+
   const updateIcePath = async () => {
     const generation = candidateMonitorGeneration
     try {
       const peer = (transport as unknown as { pc?: RTCPeerConnection | null }).pc
       const path = await readSelectedIceCandidatePath(peer)
-      if (generation === candidateMonitorGeneration) callbacks.onIcePathChanged(path)
+      if (generation === candidateMonitorGeneration) {
+        callbacks.onIcePathChanged(path)
+        if (path && iceDiagnostics) {
+          iceDiagnostics = { ...iceDiagnostics, selectedPath: path }
+          publishIceDiagnostics()
+        }
+      }
     } catch {
       if (generation === candidateMonitorGeneration) callbacks.onIcePathChanged(null)
     }
@@ -184,20 +285,24 @@ export function createRealtimeVoiceClient(
     enableCam: false,
     callbacks: {
       onTransportStateChanged: (state: string) => {
+        attachPeer()
         callbacks.onTransportStateChanged(state)
         if (state === 'connected' || state === 'ready') {
           void updateIcePath()
           if (candidatePoll === undefined) candidatePoll = setInterval(() => void updateIcePath(), 1_000)
         } else if (state === 'disconnected' || state === 'error') {
           stopIcePathMonitor()
+          stopPeerMonitor()
         }
       },
       onDisconnected: () => {
         stopIcePathMonitor()
+        stopPeerMonitor()
         callbacks.onDisconnected()
       },
       onError: () => {
         stopIcePathMonitor()
+        stopPeerMonitor()
         callbacks.onTransportStateChanged('error')
       },
       onServerMessage: callbacks.onServerMessage,
@@ -215,7 +320,8 @@ export function createRealtimeVoiceClient(
   })
 
   return {
-    connect: async ({ offerUrl, ticket, iceServers }) => {
+    connect: async ({ offerUrl, ticket, iceServers, sessionId, iceRoute }) => {
+      startPeerMonitor(sessionId, iceRoute)
       await client.connect({
         webrtcRequestParams: {
           endpoint: offerUrl,
@@ -223,9 +329,11 @@ export function createRealtimeVoiceClient(
         },
         iceConfig: { iceServers },
       })
+      attachPeer()
     },
     disconnect: async () => {
       stopIcePathMonitor()
+      stopPeerMonitor()
       await client.disconnect()
     },
     setMicrophoneEnabled: capturedMedia.setMicrophoneEnabled,

@@ -24,6 +24,7 @@ const session = (id: string, ticket: string) => ({
   offer_url: `/api/v1/realtime/sessions/${id}/offer`,
   client_secret: { value: ticket, expires_at: 2_000 },
   ice_servers: [],
+  ice_route: { kind: 'direct', transport: null, port: null },
 })
 
 function setupMedia(settings: MediaTrackSettings = {}) {
@@ -104,6 +105,69 @@ describe('RealtimeVoicePanel', () => {
     expect(mocks.createRealtimeVoiceClient).not.toHaveBeenCalled()
   })
 
+  it('shows the gateway TURN route check failure clearly', async () => {
+    setupMedia()
+    setupClient()
+    mocks.createRealtimeVoiceSession.mockRejectedValueOnce(new Error(
+      'The private TURN route could not be verified. Check the Tailscale voice route and TURN listener, then retry.',
+    ))
+    render(<RealtimeVoicePanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The private TURN route could not be verified')
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the Tailscale voice route and TURN listener')
+    expect(mocks.createRealtimeVoiceClient).not.toHaveBeenCalled()
+  })
+
+  it('keeps sanitized session route and ICE failure state visible after the client disconnects', async () => {
+    setupMedia()
+    let callbackSet: Record<string, (...args: never[]) => void> | undefined
+    const client = {
+      connect: vi.fn(async () => {
+        callbackSet?.onIceDiagnosticsChanged?.({
+          sessionId: 'session-visible-123',
+          route: { kind: 'tailnet-turn', transport: 'tls/tcp', port: 8447 },
+          connectionState: 'failed',
+          iceConnectionState: 'failed',
+          iceGatheringState: 'complete',
+          iceCandidateErrorCount: 1,
+          lastIceCandidateErrorCode: 701,
+          selectedPath: {
+            localType: 'relay',
+            localProtocol: 'udp',
+            localRelayProtocol: 'tls',
+            remoteType: 'host',
+            remoteProtocol: 'udp',
+          },
+          privateHost: 'hidden-host.tailnet.ts.net',
+          ticket: 'hidden-session-ticket',
+        } as never)
+        callbackSet?.onTransportStateChanged?.('error' as never)
+      }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      setMicrophoneEnabled: vi.fn(),
+    }
+    mocks.createRealtimeVoiceClient.mockImplementation((_stream, nextCallbacks) => {
+      callbackSet = nextCallbacks
+      return client
+    })
+    render(<RealtimeVoicePanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('connection reported an error'))
+    fireEvent.click(screen.getByText('Microphone & connection details'))
+
+    expect(screen.getByText('session-visible-123')).toBeTruthy()
+    expect(screen.getByText('Private TURN · TLS/TCP :8447')).toBeTruthy()
+    expect(screen.getByText('Peer connection').nextElementSibling?.textContent).toBe('failed')
+    expect(screen.getByText('ICE connection').nextElementSibling?.textContent).toBe('failed')
+    expect(screen.getByText('ICE candidate errors')).toBeTruthy()
+    expect(screen.getByText('Local relay over UDP via TURN TLS → remote host over UDP')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('hidden-host.tailnet.ts.net')
+    expect(document.body.textContent).not.toContain('hidden-session-ticket')
+  })
+
   it('uses a fresh one-use ticket after signaling failure and retry', async () => {
     const media = setupMedia({ echoCancellation: true })
     mocks.createRealtimeVoiceSession
@@ -133,11 +197,15 @@ describe('RealtimeVoicePanel', () => {
       offerUrl: '/api/v1/realtime/sessions/session-1/offer',
       ticket: 'ticket-one',
       iceServers: [],
+      sessionId: 'session-1',
+      iceRoute: { kind: 'direct', transport: null, port: null },
     })
     expect(clients[1].client.connect).toHaveBeenCalledWith({
       offerUrl: '/api/v1/realtime/sessions/session-2/offer',
       ticket: 'ticket-two',
       iceServers: [],
+      sessionId: 'session-2',
+      iceRoute: { kind: 'direct', transport: null, port: null },
     })
     expect(document.body.textContent).not.toContain('ticket-one')
     expect(document.body.textContent).not.toContain('ticket-two')
@@ -232,6 +300,8 @@ describe('RealtimeVoicePanel', () => {
       offerUrl: '/api/v1/realtime/sessions/session-retry/offer',
       ticket: 'ticket-retry',
       iceServers: [],
+      sessionId: 'session-retry',
+      iceRoute: { kind: 'direct', transport: null, port: null },
     })
     fireEvent.click(screen.getByRole('button', { name: /Stop voice test/ }))
     await screen.findAllByText('Call ended')

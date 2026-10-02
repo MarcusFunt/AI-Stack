@@ -123,6 +123,13 @@ export type RealtimeVoiceSession = {
   offer_url: string
   client_secret: { value: string; expires_at: number }
   ice_servers: RTCIceServer[]
+  ice_route: RealtimeIceRoute
+}
+
+export type RealtimeIceRoute = {
+  kind: 'direct' | 'tailnet-turn'
+  transport: 'tls/tcp' | null
+  port: number | null
 }
 
 export type PlatformComponent = {

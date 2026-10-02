@@ -23,6 +23,7 @@ describe('createRealtimeVoiceClient', () => {
     onServerMessage: vi.fn(),
     onRemoteStream: vi.fn(),
     onIcePathChanged: vi.fn(),
+    onIceDiagnosticsChanged: vi.fn(),
   }
 
   beforeEach(() => {
@@ -45,7 +46,14 @@ describe('createRealtimeVoiceClient', () => {
     const getStats = vi.fn(() => new Promise((resolve) => { resolveStats = resolve }))
     let transportCallbacks: Record<string, (...args: unknown[]) => void> = {}
     mocks.SmallWebRTCTransport.mockImplementation(function (options) {
-      return { ...options, pc: { getStats } }
+      return { ...options, pc: {
+        getStats,
+        connectionState: 'connected',
+        iceConnectionState: 'connected',
+        iceGatheringState: 'complete',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } }
     })
     mocks.PipecatClient.mockImplementation(function (options) {
       transportCallbacks = options.callbacks
@@ -131,7 +139,14 @@ describe('createRealtimeVoiceClient', () => {
     ])
     let transportCallbacks: Record<string, (state?: string) => void> = {}
     mocks.SmallWebRTCTransport.mockImplementation(function (options) {
-      return { ...options, pc: { getStats: vi.fn().mockResolvedValue(reports) } }
+      return { ...options, pc: {
+        getStats: vi.fn().mockResolvedValue(reports),
+        connectionState: 'connected',
+        iceConnectionState: 'connected',
+        iceGatheringState: 'complete',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      } }
     })
     mocks.PipecatClient.mockImplementation(function (options) {
       transportCallbacks = options.callbacks
@@ -150,6 +165,90 @@ describe('createRealtimeVoiceClient', () => {
     expect(onIcePathChanged).toHaveBeenLastCalledWith(null)
   })
 
+  it('publishes per-session ICE state and retains sanitized failure diagnostics after disconnect', async () => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const selectedPath = {
+      localType: 'relay',
+      localProtocol: 'udp',
+      localRelayProtocol: 'tls',
+      remoteType: 'host',
+      remoteProtocol: 'udp',
+    }
+    const reports = new Map([
+      ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', { type: 'candidate-pair', localCandidateId: 'local-1', remoteCandidateId: 'remote-1' }],
+      ['local-1', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'tls' }],
+      ['remote-1', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ])
+    const peer = {
+      connectionState: 'connecting',
+      iceConnectionState: 'checking',
+      iceGatheringState: 'gathering',
+      getStats: vi.fn().mockResolvedValue(reports),
+      addEventListener: vi.fn((name: string, listener: (event: Event) => void) => listeners.set(name, listener)),
+      removeEventListener: vi.fn((name: string) => listeners.delete(name)),
+    }
+    let transportCallbacks: Record<string, (state?: string) => void> = {}
+    mocks.SmallWebRTCTransport.mockImplementation(function (options) {
+      return { ...options, pc: peer }
+    })
+    mocks.PipecatClient.mockImplementation(function (options) {
+      transportCallbacks = options.callbacks
+      return { connect: mocks.clientConnect, disconnect: mocks.clientDisconnect }
+    })
+    const onIceDiagnosticsChanged = vi.fn()
+    const client = createRealtimeVoiceClient(
+      { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream,
+      { ...callbacks, onIceDiagnosticsChanged },
+    )
+
+    await client.connect({
+      offerUrl: '/offer',
+      ticket: 'secret-session-ticket',
+      iceServers: [],
+      sessionId: 'session-diagnostic-123',
+      iceRoute: { kind: 'tailnet-turn', transport: 'tls/tcp', port: 8447 },
+    } as never)
+    expect(onIceDiagnosticsChanged).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: 'session-diagnostic-123',
+      route: { kind: 'tailnet-turn', transport: 'tls/tcp', port: 8447 },
+      connectionState: 'connecting',
+      iceConnectionState: 'checking',
+      iceGatheringState: 'gathering',
+    }))
+    transportCallbacks.onTransportStateChanged('connected')
+    await vi.waitFor(() => expect(onIceDiagnosticsChanged).toHaveBeenLastCalledWith(expect.objectContaining({
+      selectedPath,
+    })))
+
+    peer.connectionState = 'failed'
+    peer.iceConnectionState = 'failed'
+    peer.iceGatheringState = 'complete'
+    listeners.get('connectionstatechange')?.(new Event('connectionstatechange'))
+    const candidateError = Object.assign(new Event('icecandidateerror'), {
+      errorCode: 701,
+      url: 'turns:private-host.example:8447?credential=do-not-show',
+      address: '203.0.113.17',
+    })
+    listeners.get('icecandidateerror')?.(candidateError)
+    await client.disconnect()
+
+    const finalDiagnostics = onIceDiagnosticsChanged.mock.calls.at(-1)?.[0]
+    expect(finalDiagnostics).toEqual(expect.objectContaining({
+      sessionId: 'session-diagnostic-123',
+      connectionState: 'failed',
+      iceConnectionState: 'failed',
+      iceGatheringState: 'complete',
+      iceCandidateErrorCount: 1,
+      lastIceCandidateErrorCode: 701,
+      selectedPath,
+    }))
+    expect(JSON.stringify(onIceDiagnosticsChanged.mock.calls)).not.toContain('secret-session-ticket')
+    expect(JSON.stringify(onIceDiagnosticsChanged.mock.calls)).not.toContain('private-host.example')
+    expect(JSON.stringify(onIceDiagnosticsChanged.mock.calls)).not.toContain('203.0.113.17')
+    expect(JSON.stringify(onIceDiagnosticsChanged.mock.calls)).not.toContain('credential=')
+  })
+
   it('discards an in-flight stats response after transport disconnects', async () => {
     const reports = new Map([
       ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],
@@ -162,7 +261,14 @@ describe('createRealtimeVoiceClient', () => {
     mocks.SmallWebRTCTransport.mockImplementation(function (options) {
       return {
         ...options,
-        pc: { getStats: vi.fn(() => new Promise((resolve) => { resolveStats = resolve })) },
+        pc: {
+          getStats: vi.fn(() => new Promise((resolve) => { resolveStats = resolve })),
+          connectionState: 'connected',
+          iceConnectionState: 'connected',
+          iceGatheringState: 'complete',
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        },
       }
     })
     mocks.PipecatClient.mockImplementation(function (options) {
@@ -227,6 +333,8 @@ describe('createRealtimeVoiceClient', () => {
       offerUrl: '/api/v1/realtime/sessions/session-1/offer',
       ticket: 'one-use-ticket',
       iceServers: [{ urls: 'turns:host.tailnet.example:8447?transport=tcp' }],
+      sessionId: 'session-1',
+      iceRoute: { kind: 'tailnet-turn', transport: 'tls/tcp', port: 8447 },
     })
 
     expect(mocks.clientConnect).toHaveBeenCalledOnce()

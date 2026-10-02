@@ -1601,14 +1601,20 @@ async def events(websocket: WebSocket):
         return
 
 
-def _retarget_turn_ice_servers(ice_servers: list, hostname: str) -> None:
-    hostname = hostname.rstrip(".")
-    if not re.fullmatch(
+def _is_valid_turn_hostname(hostname: str) -> bool:
+    normalized = hostname.rstrip(".")
+    return bool(normalized) and re.fullmatch(
         r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*",
-        hostname,
-    ):
-        return
+        normalized,
+    ) is not None
 
+
+def _retarget_turn_ice_servers(ice_servers: list, hostname: str) -> bool:
+    hostname = hostname.rstrip(".")
+    if not _is_valid_turn_hostname(hostname):
+        return False
+
+    found_turn = False
     for server in ice_servers:
         if not isinstance(server, dict):
             continue
@@ -1617,17 +1623,24 @@ def _retarget_turn_ice_servers(ice_servers: list, hostname: str) -> None:
         candidates = urls if is_list else [urls]
         if not all(isinstance(url, str) for url in candidates):
             continue
-        rewritten = [
-            re.sub(
+        rewritten = []
+        for url in candidates:
+            if not url.lower().startswith(("turn:", "turns:")):
+                rewritten.append(url)
+                continue
+            found_turn = True
+            replacement, count = re.subn(
                 r"^(turns?:)[^:/?#]+",
                 lambda match: match.group(1) + hostname,
                 url,
                 count=1,
                 flags=re.IGNORECASE,
             )
-            for url in candidates
-        ]
+            if count != 1:
+                return False
+            rewritten.append(replacement)
         server["urls"] = rewritten if is_list else rewritten[0]
+    return found_turn
 
 
 def _has_turn_ice_server(ice_servers: list) -> bool:
@@ -1642,6 +1655,27 @@ def _has_turn_ice_server(ice_servers: list) -> bool:
         ):
             return True
     return False
+
+
+def _verified_turn_hostname(network) -> tuple[str | None, str | None]:
+    if not isinstance(network, dict):
+        return None, "invalid-status"
+    if network.get("route_state_available") is not True:
+        return None, "route-state-unavailable"
+    if network.get("online") is not True:
+        return None, "tailscale-offline"
+    if network.get("voice_turn_route_present") is not True:
+        return None, "route-missing"
+    if network.get("voice_turn_listener_ready") is not True:
+        return None, "listener-not-ready"
+    if network.get("voice_turn_funnel_enabled") is not False:
+        return None, "funnel-state-unverified-or-enabled"
+    if network.get("voice_turn_enabled") is not True:
+        return None, "route-disabled"
+    hostname = network.get("dns_name")
+    if not isinstance(hostname, str) or not _is_valid_turn_hostname(hostname):
+        return None, "dns-name-invalid"
+    return hostname.rstrip("."), None
 
 
 @app.post("/v1/realtime/sessions")
@@ -1679,18 +1713,53 @@ async def create_realtime_session(request: Request):
         raise HTTPException(502, "realtime voice service returned an invalid session")
 
     ice_servers = result.get("ice_servers")
+    ice_route = {"kind": "direct", "transport": None, "port": None}
     if isinstance(ice_servers, list) and _has_turn_ice_server(ice_servers):
+        route_reason = None
         try:
             network = await host_agent("GET", "/tailscale/status", timeout=3)
-        except HTTPException:
-            network = {}
-        hostname = network.get("dns_name") if isinstance(network, dict) else None
-        if (
-            isinstance(network, dict)
-            and network.get("voice_turn_enabled") is True
-            and isinstance(hostname, str)
-        ):
-            _retarget_turn_ice_servers(ice_servers, hostname)
+        except HTTPException as exc:
+            network = None
+            route_reason = "host-agent-unavailable"
+            host_agent_status = exc.status_code
+        except ValueError:
+            network = None
+            route_reason = "invalid-host-agent-response"
+            host_agent_status = None
+        else:
+            host_agent_status = 200
+
+        hostname, status_reason = _verified_turn_hostname(network)
+        route_reason = route_reason or status_reason
+        if hostname is None or not _retarget_turn_ice_servers(ice_servers, hostname):
+            trace_context = getattr(request.state, "trace_context", None)
+            _LOGGER.warning(
+                "Realtime voice TURN route could not be verified",
+                extra={
+                    "voice_session_id": result["id"],
+                    "request_id": getattr(trace_context, "request_id", None),
+                    "voice_turn_route_reason": route_reason or "ice-route-invalid",
+                    "host_agent_status": host_agent_status,
+                },
+            )
+            raise HTTPException(
+                503,
+                "The private TURN route could not be verified. Check the Tailscale voice route and TURN listener, then retry.",
+            )
+        ice_route = {"kind": "tailnet-turn", "transport": "tls/tcp", "port": 8447}
+
+    result["ice_route"] = ice_route
+    trace_context = getattr(request.state, "trace_context", None)
+    _LOGGER.info(
+        "Realtime voice ICE route selected",
+        extra={
+            "voice_session_id": result["id"],
+            "request_id": getattr(trace_context, "request_id", None),
+            "ice_route_kind": ice_route["kind"],
+            "ice_route_transport": ice_route["transport"],
+            "ice_route_port": ice_route["port"],
+        },
+    )
 
     scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
     result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"
