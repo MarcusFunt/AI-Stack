@@ -139,13 +139,20 @@ switch ($Action) {
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
     elseif ($Service -eq "coturn") {
       $turnProxyEnabled = "0"
-      if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) { $turnProxyEnabled = "1" }
+      $turnRestartPolicy = "no"
+      if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) {
+        $turnProxyEnabled = "1"
+        $turnRestartPolicy = "unless-stopped"
+      }
+      $previousTurnRestartPolicy = $env:TURN_RESTART_POLICY
       [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $turnProxyEnabled, "Process")
+      [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $turnRestartPolicy, "Process")
       try {
         Invoke-Compose -CommandArgs @("up","--build","-d","coturn","turn-proxy")
       }
       finally {
         [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")
+        [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $previousTurnRestartPolicy, "Process")
       }
     }
     elseif ($Service -ne "gateway") { Invoke-Supervisor "POST" "/ensure/$Service" }

@@ -63,11 +63,11 @@ class ComposeTurnServiceTests(unittest.TestCase):
         coturn = self._service(compose, "coturn")
         service = self._service(compose, "turn-proxy")
 
-        self.assertIn("restart: unless-stopped", coturn)
+        self.assertIn("restart: ${TURN_RESTART_POLICY:-no}", coturn)
         self.assertIn("stop_grace_period: 20s", coturn)
         self.assertIn("healthcheck:\n      test: [\"CMD\",\"python3\",\"/usr/local/bin/turn_proxy_health.py\",\"--healthcheck\"]", coturn)
         self.assertIn("coturn_supervisor.py -- turnserver", coturn)
-        self.assertIn("restart: unless-stopped", service)
+        self.assertIn("restart: ${TURN_RESTART_POLICY:-no}", service)
         self.assertIn("condition: service_healthy\n        restart: true", service)
         self.assertIn("healthcheck:\n      test: [\"CMD\",\"python\",\"/app/turn_proxy/proxy.py\",\"--healthcheck\"]", service)
         proxy_path = Path(__file__).resolve().parents[2] / "voice" / "turn_proxy" / "proxy.py"
@@ -76,6 +76,20 @@ class ComposeTurnServiceTests(unittest.TestCase):
         self.assertIn("time.sleep(_DNS_RETRY_INTERVAL_SECONDS)", proxy_source)
         self.assertIn("_watch_upstream", proxy_source)
         self.assertIn("stun_binding_ready", proxy_source)
+
+    def test_ai_ps1_disables_restart_loop_without_complete_turn_configuration(self):
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "ai.ps1"
+        script = script_path.read_text(encoding="utf-8")
+
+        self.assertIn('$turnRestartPolicy = "no"', script)
+        self.assertIn('$turnRestartPolicy = "unless-stopped"', script)
+        enabled_branch = script.split(
+            'if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) {', 1
+        )[1].split("}", 1)[0]
+        self.assertIn('$turnProxyEnabled = "1"', enabled_branch)
+        self.assertIn('$turnRestartPolicy = "unless-stopped"', enabled_branch)
+        self.assertIn('SetEnvironmentVariable("TURN_RESTART_POLICY", $turnRestartPolicy, "Process")', script)
+        self.assertIn('SetEnvironmentVariable("TURN_RESTART_POLICY", $previousTurnRestartPolicy, "Process")', script)
 
     def test_coturn_healthcheck_image_uses_pinned_coturn_and_local_stun_probe(self):
         root = Path(__file__).resolve().parents[2]

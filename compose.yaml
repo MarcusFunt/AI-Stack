@@ -201,7 +201,7 @@ services:
       context: ./voice/turn_proxy
       dockerfile: Dockerfile.coturn
     container_name: ai-stack-coturn
-    restart: unless-stopped
+    restart: ${TURN_RESTART_POLICY:-no}
     stop_grace_period: 20s
     init: true
     read_only: true
@@ -237,7 +237,7 @@ services:
       context: ./voice/turn_proxy
       dockerfile: Dockerfile
     container_name: ai-stack-turn-proxy
-    restart: unless-stopped
+    restart: ${TURN_RESTART_POLICY:-no}
     read_only: true
     tmpfs:
       - /tmp
