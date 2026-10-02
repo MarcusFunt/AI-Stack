@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Position=0)]
-  [ValidateSet("start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","test-leases","test-proxy","test-agent-lab","test-agent-evaluator","bench-agent-lab","burn-in","bench","logs","down")]
+  [ValidateSet("launch","start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","voice-smoke","test-leases","test-proxy","test-agent-lab","test-agent-evaluator","bench-agent-lab","burn-in","bench","logs","down")]
   [string]$Action = "status",
   [Parameter(Position=1)]
   [ValidateSet("gateway","voice","coturn","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
@@ -32,6 +32,92 @@ function Invoke-Compose {
   if ($LASTEXITCODE -ne 0) { throw "docker compose failed: $($CommandArgs -join ' ')" }
 }
 
+function Test-DockerEngine {
+  try {
+    $null = & docker info --format "{{.ServerVersion}}" 2>$null
+    return $LASTEXITCODE -eq 0
+  } catch { return $false }
+}
+
+function Ensure-DockerEngine {
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    foreach ($candidate in @(
+      "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe",
+      "${env:ProgramFiles(x86)}\Docker\Docker\resources\bin\docker.exe"
+    )) {
+      if ($candidate -and (Test-Path $candidate)) {
+        $env:PATH = (Split-Path $candidate -Parent) + ";" + $env:PATH
+        break
+      }
+    }
+  }
+  if (Test-DockerEngine) { Write-Output "Docker Engine is ready."; return }
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw "Docker CLI was not found. Install Docker Desktop, then run this launcher again."
+  }
+
+  $desktopPaths = @(@(
+    (Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Docker\Docker\Docker Desktop.exe")
+  ) | Where-Object { $_ -and (Test-Path $_) })
+  if (-not $desktopPaths) {
+    throw "Docker Engine is not running and Docker Desktop was not found. Start or install Docker Desktop, then try again."
+  }
+
+  Write-Output "Starting Docker Desktop and waiting for its engine..."
+  Start-Process -FilePath $desktopPaths[0] -WindowStyle Minimized
+  for ($i = 0; $i -lt 90; $i++) {
+    Start-Sleep -Seconds 2
+    if (Test-DockerEngine) { Write-Output "Docker Engine is ready."; return }
+    if (($i + 1) % 15 -eq 0) { Write-Output "Still waiting for Docker Desktop..." }
+  }
+  throw "Docker Desktop did not make its engine ready within 3 minutes. Check Docker Desktop, then run the launcher again."
+}
+
+function Start-TailscaleBestEffort {
+  $tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+  $tailscalePath = $null
+  if ($tailscale) {
+    $tailscalePath = $tailscale.Path
+    if (-not $tailscalePath) { $tailscalePath = $tailscale.Source }
+    if (-not $tailscalePath -and $tailscale.CommandType -eq "Function") { $tailscalePath = $tailscale.Name }
+  }
+  if (-not $tailscalePath) {
+    foreach ($candidate in @("$env:ProgramFiles\Tailscale\tailscale.exe", "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe")) {
+      if ($candidate -and (Test-Path $candidate)) { $tailscalePath = $candidate; break }
+    }
+  }
+  if (-not $tailscalePath) { Write-Warning "Tailscale is not installed; continuing with local-only startup."; return }
+
+  try {
+    $statusText = & $tailscalePath status --json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $status = ($statusText -join "`n") | ConvertFrom-Json
+      if ($status.BackendState -eq "Running" -and $status.Self.Online) {
+        Write-Output "Tailscale is online. Existing Serve/Funnel routes were left unchanged."
+        return
+      }
+    }
+
+    $service = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne "Running") {
+      try { Start-Service -Name "Tailscale" -ErrorAction Stop } catch { Write-Warning "Could not start the Tailscale service: $($_.Exception.Message)" }
+    }
+    Start-Sleep -Seconds 2
+    $statusText = & $tailscalePath status --json 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $status = ($statusText -join "`n") | ConvertFrom-Json
+      if ($status.BackendState -eq "Running" -and $status.Self.Online) {
+        Write-Output "Tailscale is online. Existing Serve/Funnel routes were left unchanged."
+        return
+      }
+    }
+    Write-Warning "Tailscale is installed but not online. Local startup will continue; sign in or reconnect in Tailscale if remote access is needed."
+  } catch {
+    Write-Warning "Could not verify Tailscale status: $($_.Exception.Message). Local startup will continue."
+  }
+}
+
 function Wait-Gateway {
   for($i=0; $i -lt 40; $i++) {
     try {
@@ -41,6 +127,17 @@ function Wait-Gateway {
     Start-Sleep -Milliseconds 750
   }
   throw "gateway did not become ready"
+}
+
+function Wait-Dashboard {
+  for($i=0; $i -lt 60; $i++) {
+    try {
+      $r = Invoke-RestMethod http://127.0.0.1:3000/api/health -TimeoutSec 2
+      if($r.service -eq "gateway") { return }
+    } catch {}
+    Start-Sleep -Seconds 1
+  }
+  throw "dashboard did not become ready at http://127.0.0.1:3000"
 }
 
 function Test-HostAgent {
@@ -106,13 +203,67 @@ function Stop-GpuFallback {
 
 function Assert-CleanTrackedRepo {
   param([string]$Path)
-  $dirty = & git -C $Path status --porcelain --untracked-files=no
+  $dirty = & git -C $Path status --porcelain --untracked-files=all
   if ($LASTEXITCODE -ne 0) { throw "git status failed for $Path" }
-  if ($dirty) { throw "tracked changes in $Path; refusing update/rollback" }
+  if ($dirty) { throw "changes in $Path; refusing update/rollback" }
+}
+
+function Get-RootSourceUpdate {
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & git -C $Root fetch origin refs/heads/main:refs/remotes/origin/main 2>&1 | Out-Null
+    $fetchExit = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $previousPreference }
+  if ($fetchExit -ne 0) { throw "fetch from origin/main failed; source was not changed" }
+  $previous = (& git -C $Root rev-parse HEAD).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $previous) { throw "could not read the current AI-Stack source revision" }
+  $target = (& git -C $Root rev-parse origin/main).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $target) { throw "could not read origin/main after fetch" }
+  $branch = (& git -C $Root branch --show-current).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $branch) { throw "AI-Stack must be on a named branch before updating" }
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & git -C $Root merge-base --is-ancestor $previous $target 2>&1 | Out-Null
+    $ancestorExit = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $previousPreference }
+  if ($ancestorExit -ne 0) { throw "current AI-Stack branch cannot fast-forward to origin/main; no branch was changed" }
+  return [pscustomobject]@{ previous_sha=$previous; updated_sha=$target; branch=$branch }
+}
+
+function Assert-RootWorktreeClean {
+  $dirty = & git -C $Root status --porcelain --untracked-files=all
+  if ($LASTEXITCODE -ne 0) { throw "git status failed for AI-Stack" }
+  if ($dirty) { throw "AI-Stack worktree has tracked or untracked changes; refusing update/rollback" }
+}
+
+function New-SourceRevisionSnapshot {
+  param([Parameter(Mandatory=$true)][object]$SourceUpdate)
+  return [ordered]@{
+    previous_sha = [string]$SourceUpdate.previous_sha
+    updated_sha = [string]$SourceUpdate.updated_sha
+    branch = [string]$SourceUpdate.branch
+  }
+}
+
+function Assert-SourceRollbackSafe {
+  param(
+    [Parameter(Mandatory=$true)][object]$Snapshot,
+    [Parameter(Mandatory=$true)][string]$CurrentBranch,
+    [Parameter(Mandatory=$true)][string]$CurrentSha
+  )
+  if ($CurrentBranch -ne $Snapshot.branch -or $CurrentSha -notin @($Snapshot.previous_sha, $Snapshot.updated_sha)) {
+    throw "AI-Stack source no longer matches this snapshot; refusing guarded source rollback"
+  }
 }
 
 function Assert-NoActiveJobs {
   Start-ControlPlane | Out-Null
+  Assert-CurrentSupervisorIdle
+}
+
+function Assert-CurrentSupervisorIdle {
   $raw = Invoke-Supervisor "GET" "/status" 10
   $state = $raw | ConvertFrom-Json
   $busy = @($state.active_jobs.PSObject.Properties | Where-Object { [int]$_.Value -gt 0 })
@@ -134,6 +285,14 @@ function Save-RollbackImage {
 }
 
 switch ($Action) {
+  "launch" {
+    Ensure-DockerEngine
+    Start-TailscaleBestEffort
+    Start-ControlPlane
+    Wait-Dashboard
+    Start-Process "http://127.0.0.1:3000"
+    Write-Output "AI-Stack is ready at http://127.0.0.1:3000."
+  }
   "start" {
     if ($Service -ne "coturn") { Start-ControlPlane }
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
@@ -192,9 +351,12 @@ switch ($Action) {
     Start-ControlPlane
   }
   "update" {
+    Assert-RootWorktreeClean
     Assert-NoActiveJobs
+    Assert-RootWorktreeClean
     Assert-CleanTrackedRepo (Join-Path $Root "third_party\ComfyUI")
     Assert-CleanTrackedRepo (Join-Path $Root "third_party\Wan2GP")
+    $sourceUpdate = Get-RootSourceUpdate
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
     $rollbackImages = [ordered]@{}
@@ -206,6 +368,7 @@ switch ($Action) {
 
     $state = [ordered]@{
       timestamp = $stamp
+      ai_stack = (New-SourceRevisionSnapshot -SourceUpdate $sourceUpdate)
       comfyui = [ordered]@{
         sha = (& git -C (Join-Path $Root "third_party\ComfyUI") rev-parse HEAD)
         branch = (& git -C (Join-Path $Root "third_party\ComfyUI") branch --show-current)
@@ -220,6 +383,16 @@ switch ($Action) {
     $statePath = Join-Path $Root ("data\state\update-" + $stamp + ".json")
     $state | ConvertTo-Json -Depth 8 | Set-Content $statePath -Encoding UTF8
 
+    if ($sourceUpdate.previous_sha -ne $sourceUpdate.updated_sha) {
+      $previousPreference = $ErrorActionPreference
+      $ErrorActionPreference = "Continue"
+      try {
+        & git -C $Root merge --ff-only origin/main 2>&1 | Out-Null
+        $mergeExit = $LASTEXITCODE
+      } finally { $ErrorActionPreference = $previousPreference }
+      if ($mergeExit -ne 0) { throw "AI-Stack source fast-forward failed; rollback snapshot: $statePath" }
+    }
+
     & git -C (Join-Path $Root "third_party\ComfyUI") pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw "ComfyUI update failed" }
     & git -C (Join-Path $Root "third_party\Wan2GP") pull --ff-only
@@ -230,6 +403,8 @@ switch ($Action) {
     Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("up","-d","--force-recreate","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab-sandbox","agent-eval-runner","agent-evaluator","agent-lab")
+    Wait-Gateway
+    Wait-Dashboard
     Write-Output "Update complete. Rollback snapshot: $statePath"
   }
   "rollback" {
@@ -241,6 +416,12 @@ switch ($Action) {
       $Snapshot = $latest.FullName
     }
     $state = Get-Content $Snapshot -Raw | ConvertFrom-Json
+    if($state.ai_stack) {
+      Assert-RootWorktreeClean
+      $currentBranch = (& git -C $Root branch --show-current).Trim()
+      $currentSha = (& git -C $Root rev-parse HEAD).Trim()
+      Assert-SourceRollbackSafe -Snapshot $state.ai_stack -CurrentBranch $currentBranch -CurrentSha $currentSha
+    }
     Assert-CleanTrackedRepo (Join-Path $Root "third_party\ComfyUI")
     Assert-CleanTrackedRepo (Join-Path $Root "third_party\Wan2GP")
 
@@ -248,6 +429,11 @@ switch ($Action) {
     if ($LASTEXITCODE -ne 0) { throw "ComfyUI rollback failed" }
     & git -C (Join-Path $Root "third_party\Wan2GP") reset --hard $state.wangp.sha
     if ($LASTEXITCODE -ne 0) { throw "Wan2GP rollback failed" }
+
+    if($state.ai_stack -and $currentSha -eq $state.ai_stack.updated_sha) {
+      & git -C $Root reset --hard $state.ai_stack.previous_sha
+      if ($LASTEXITCODE -ne 0) { throw "AI-Stack source rollback failed" }
+    }
 
     if($state.rollback_images) {
       foreach($prop in $state.rollback_images.PSObject.Properties) {
@@ -262,11 +448,18 @@ switch ($Action) {
 
     Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
     Invoke-Compose -CommandArgs @("up","-d","--force-recreate","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab-sandbox","agent-eval-runner","agent-evaluator","agent-lab")
+    Wait-Gateway
+    Wait-Dashboard
     Write-Output "Rollback complete from: $Snapshot"
   }
   "doctor" { & (Join-Path $PSScriptRoot "doctor.ps1") }
   "model-info" { & python (Join-Path $PSScriptRoot "gguf-info.py") "models\llm\daily.gguf" "models\llm\reasoning.gguf" }
   "smoke" { & (Join-Path $PSScriptRoot "smoke.ps1") }
+  "voice-smoke" {
+    Wait-Gateway
+    & docker compose exec -T gateway python -m gateway.voice_smoke
+    if ($LASTEXITCODE -ne 0) { throw "voice pipeline smoke test failed" }
+  }
   "test-leases" {
     Start-ControlPlane
     try {

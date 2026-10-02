@@ -79,6 +79,63 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_voice_smoke_is_an_authenticated_maintenance_action_with_idle_gpu_guard(self):
+        observed = {}
+        original_supervisor = self.gateway.supervisor
+        original_host_agent = self.gateway.host_agent
+
+        async def fake_supervisor(method, path, timeout=600):
+            observed["supervisor"] = (method, path)
+            return {"active_jobs": {"llm": 0, "tts": 0, "stt": 0}}
+
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            observed["operation"] = (method, path, payload)
+            return {"id": "op-0123456789ab", "action": "voice-smoke", "state": "running"}
+
+        self.gateway.supervisor = fake_supervisor
+        self.gateway.host_agent = fake_host_agent
+        try:
+            response = self.client.post(
+                "/control/maintenance/start",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"action": "voice-smoke"},
+            )
+        finally:
+            self.gateway.supervisor = original_supervisor
+            self.gateway.host_agent = original_host_agent
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["supervisor"], ("GET", "/status"))
+        self.assertEqual(observed["operation"], ("POST", "/operations/start", {"action": "voice-smoke"}))
+
+    def test_voice_smoke_maintenance_refuses_active_gpu_jobs(self):
+        original_supervisor = self.gateway.supervisor
+        original_host_agent = self.gateway.host_agent
+        forwarded = []
+
+        async def fake_supervisor(method, path, timeout=600):
+            return {"active_jobs": {"tts": 1}}
+
+        async def fake_host_agent(*args, **kwargs):
+            forwarded.append(True)
+            return {}
+
+        self.gateway.supervisor = fake_supervisor
+        self.gateway.host_agent = fake_host_agent
+        try:
+            response = self.client.post(
+                "/control/maintenance/start",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"action": "voice-smoke"},
+            )
+        finally:
+            self.gateway.supervisor = original_supervisor
+            self.gateway.host_agent = original_host_agent
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("active AI jobs", response.json()["detail"])
+        self.assertEqual(forwarded, [])
+
     def test_session_response_adds_same_origin_offer_url(self):
         original = self.gateway.httpx.AsyncClient.post
 

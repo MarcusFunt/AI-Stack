@@ -141,6 +141,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   background: linear-gradient(90deg, rgba(127,156,245,.14), rgba(127,156,245,.055));
 }
 .side-nav button.active svg { color: #9eb2ff; }
+.setup-start-copy { max-width: 760px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.setup-start-copy code { color: #c8d3e2; }
+.maintenance-live-progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(127,156,245,.24);
+  border-radius: 9px;
+  color: #aebfff;
+  background: rgba(127,156,245,.06);
+}
+.maintenance-live-progress strong, .maintenance-live-progress span { display: block; }
+.maintenance-live-progress strong { color: #d9e2ff; font-size: 12px; }
+.maintenance-live-progress span { margin-top: 4px; color: var(--muted); font-size: 11px; }
 
 .sidebar-foot {
   margin-top: auto;

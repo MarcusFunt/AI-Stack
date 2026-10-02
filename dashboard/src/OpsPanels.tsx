@@ -1015,7 +1015,9 @@ export function SetupPanel(props: {
   return (
     <section className="workspace">
       <div className="workspace-head">
-        <div><span className="eyebrow">SETUP & INTEGRATIONS</span><h2>Configure without editing files.</h2></div>
+        <div><span className="eyebrow">START HERE</span><h2>Get the workstation ready.</h2>
+          <p className="setup-start-copy">For a cold start, double-click <code>scripts\start-ai-stack.cmd</code> on the Windows host. It starts Docker and the local control plane, then opens this dashboard. Updates stay separate and require the Maintenance page.</p>
+        </div>
         <button className="secondary no-margin" onClick={() => void refreshDoctor()}>
           <RefreshCw className={doctorState === 'loading' ? 'spin' : ''} size={14} /> Run checks
         </button>

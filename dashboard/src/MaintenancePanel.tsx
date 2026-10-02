@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Activity, BrainCircuit, Download, History, Play, RefreshCw, RotateCcw,
+  Activity, AudioLines, BrainCircuit, Download, History, Play, RefreshCw, RotateCcw,
   ShieldCheck, Square, TestTube2, Wrench,
 } from 'lucide-react'
 import { localAI } from './api'
@@ -26,6 +26,7 @@ function actionLabel(action: string) {
     update: 'Dependency update',
     rollback: 'Rollback',
     'opencode-smoke': 'OpenCode smoke test',
+    'voice-smoke': 'Voice pipeline smoke test',
   }
   return labels[action] || action
 }
@@ -66,6 +67,9 @@ export function MaintenancePanel() {
   }, [refresh])
 
   const activeOperation = data?.operations.find((item) => item.state === 'running')
+  const activeProgress = activeOperation?.log_tail.split(/\r?\n/)
+    .filter((line) => line.trim())
+    .slice(-1)[0] || ''
   const effectiveSnapshot = selectedSnapshot || data?.snapshots[0]?.file || ''
   const selectedOperation = useMemo(() => {
     if (!data?.operations.length) return null
@@ -93,7 +97,7 @@ export function MaintenancePanel() {
     }
   }
 
-  async function startOperation(action: 'update' | 'rollback' | 'burn-in' | 'opencode-smoke') {
+  async function startOperation(action: 'update' | 'rollback' | 'burn-in' | 'opencode-smoke' | 'voice-smoke') {
     if (activeOperation) {
       setError('Another maintenance operation is already running.')
       return
@@ -107,6 +111,7 @@ export function MaintenancePanel() {
       update: 'Update stack dependencies now? This rebuilds and recreates services, so the dashboard may disconnect briefly.',
       rollback: 'Roll back to ' + effectiveSnapshot + '? This restores saved third-party revisions and rollback images, then recreates services.',
       'burn-in': 'Start the full burn-in suite? It can take a long time, exercises the full stack, and stops GPU workers when it finishes.',
+      'voice-smoke': 'Run one local-fast → local-tts → local-stt check? It uses the GPU for several minutes, refuses to start while another AI job is active, and removes its temporary audio when finished.',
     }
     const prompt = confirmations[action]
     if (prompt && !window.confirm(prompt)) return
@@ -197,6 +202,19 @@ export function MaintenancePanel() {
 
       <div className="maintenance-action-grid">
         <div className="tool-card maintenance-action-card">
+          <div className="maintenance-action-icon"><AudioLines size={20} /></div>
+          <span className="eyebrow">VOICE PIPELINE</span>
+          <h3>LLM → TTS → STT check</h3>
+          <p>Asks local-fast for a phrase, synthesizes an MP3 with local-tts, then checks that local-stt recognizes the same phrase. Runs only when requested.</p>
+          <button className="primary no-margin"
+            disabled={!!busy || !!activeOperation}
+            onClick={() => void startOperation('voice-smoke')}>
+            {busy === 'voice-smoke' ? <RefreshCw className="spin" size={13} /> : <Play size={13} />}
+            Run voice smoke
+          </button>
+        </div>
+
+        <div className="tool-card maintenance-action-card">
           <div className="maintenance-action-icon"><TestTube2 size={20} /></div>
           <span className="eyebrow">VALIDATE</span>
           <h3>Full burn-in</h3>
@@ -213,7 +231,7 @@ export function MaintenancePanel() {
           <div className="maintenance-action-icon"><Download size={20} /></div>
           <span className="eyebrow">UPDATE</span>
           <h3>Refresh dependencies</h3>
-          <p>Creates rollback image tags, snapshots ComfyUI/Wan2GP revisions, pulls updates, rebuilds managed images, and recreates the stack.</p>
+          <p>Requires a clean worktree and idle GPU. Fast-forwards this branch to origin/main, snapshots source/dependencies/images, rebuilds and verifies the stack.</p>
           <button className="secondary no-margin"
             disabled={!!busy || !!activeOperation}
             onClick={() => void startOperation('update')}>
@@ -226,13 +244,16 @@ export function MaintenancePanel() {
           <div className="maintenance-action-icon"><RotateCcw size={20} /></div>
           <span className="eyebrow">RECOVERY</span>
           <h3>Rollback</h3>
-          <p>Restores saved third-party revisions and rollback images from a previous update snapshot, then recreates services.</p>
+          <p>Restores saved dependencies and images. Source rollback is guarded by the recorded branch/revision and a clean worktree.</p>
           <label className="maintenance-snapshot-select">
             Snapshot
             <select value={effectiveSnapshot} onChange={(event) => setSelectedSnapshot(event.target.value)}>
               {data?.snapshots.length ? data.snapshots.map((snapshot) => (
                 <option key={snapshot.file} value={snapshot.file}>
                   {snapshot.timestamp} · {snapshot.images.length} images
+                  {snapshot.ai_stack_previous_sha && snapshot.ai_stack_updated_sha
+                    ? ' · code ' + snapshot.ai_stack_previous_sha.slice(0, 7) + ' → ' + snapshot.ai_stack_updated_sha.slice(0, 7)
+                    : ''}
                 </option>
               )) : <option value="">No snapshots available</option>}
             </select>
@@ -252,6 +273,13 @@ export function MaintenancePanel() {
           </div></div>
           {activeOperation && <StateBadge state="running" />}
         </div>
+
+        {activeOperation && <div className="maintenance-live-progress" role="status" aria-live="polite">
+          <RefreshCw className="spin" size={15} />
+          <div><strong>{actionLabel(activeOperation.action)} in progress</strong>
+            <span>{activeProgress || 'Waiting for the host operation to report its first stage…'}</span>
+          </div>
+        </div>}
 
         <div className="maintenance-operation-grid">
           <div className="maintenance-operation-list">

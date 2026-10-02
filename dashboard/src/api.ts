@@ -171,6 +171,9 @@ export type RollbackSnapshot = {
   file: string
   timestamp: string
   created_at: number
+  ai_stack_previous_sha?: string | null
+  ai_stack_updated_sha?: string | null
+  ai_stack_branch?: string | null
   comfyui_sha?: string | null
   wangp_sha?: string | null
   images: string[]
@@ -302,7 +305,7 @@ export const localAI = {
   ),
   maintenance: () => request<MaintenanceState>('/control/maintenance'),
   startMaintenance: (payload: {
-    action: 'update' | 'rollback' | 'burn-in' | 'opencode-smoke'
+    action: 'update' | 'rollback' | 'burn-in' | 'opencode-smoke' | 'voice-smoke'
     snapshot?: string
   }) => request<MaintenanceOperation>('/control/maintenance/start', {
     method: 'POST',

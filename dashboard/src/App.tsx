@@ -1,13 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
-  Activity, AudioLines, Bot, BrainCircuit, ChevronRight, CircleStop,
-  Cpu, Gauge, Image as ImageIcon, MessageSquareText, Mic, Network, Play,
-  RefreshCw, Sparkles, Video, Volume2, Wrench,
+  Bot, BrainCircuit, ChevronRight, CircleStop, Cpu, Gauge,
+  Image as ImageIcon, Mic, Play, RefreshCw, Video, Volume2,
 } from 'lucide-react'
 import { localAI } from './api'
 import { AgentLabPanel } from './AgentLabPanel'
 import { MaintenancePanel } from './MaintenancePanel'
+import { navGroups } from './navigation'
 import type { ApiCapabilities, ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
 import {
   ControlOverview, HealthPanel, JobsPanel, LogsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
@@ -20,41 +20,8 @@ const RealtimeVoicePanel = lazy(() => import('./RealtimeVoicePanel'))
 type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'voice' | 'vision' | 'studio' | 'setup' | 'network' | 'maintenance' | 'system'
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
-const navGroups = [
-  {
-    label: 'Monitor',
-    items: [
-      ['overview', Activity, 'Overview'],
-      ['models', BrainCircuit, 'Models'],
-      ['jobs', Gauge, 'Jobs'],
-      ['logs', Activity, 'Logs'],
-      ['health', Cpu, 'Health'],
-    ],
-  },
-  {
-    label: 'Work',
-    items: [
-      ['agentlab', Bot, 'Agent Lab'],
-      ['chat', MessageSquareText, 'Chat'],
-      ['speech', AudioLines, 'Speech'],
-      ['voice', Mic, 'Realtime voice'],
-      ['vision', Bot, 'Robot vision'],
-      ['studio', Sparkles, 'Studio'],
-    ],
-  },
-  {
-    label: 'Configure',
-    items: [
-      ['setup', Wrench, 'Setup'],
-      ['network', Network, 'Network'],
-      ['maintenance', Wrench, 'Maintenance'],
-      ['system', Wrench, 'API'],
-    ],
-  },
-] as const
-
 const sectionMeta: Record<Section, { title: string; context: string }> = {
-  overview: { title: 'Overview', context: 'Machine and scheduler' },
+  overview: { title: 'System overview', context: 'Machine and scheduler status' },
   models: { title: 'Models', context: 'Fleet and runtime configuration' },
   jobs: { title: 'Jobs', context: 'Recent inference activity' },
   logs: { title: 'Logs', context: 'Managed worker diagnostics' },
@@ -65,7 +32,7 @@ const sectionMeta: Record<Section, { title: string; context: string }> = {
   voice: { title: 'Realtime voice', context: 'Browser WebRTC test' },
   vision: { title: 'Robot vision', context: 'Visual reasoning' },
   studio: { title: 'Studio', context: 'Image and video generation' },
-  setup: { title: 'Setup', context: 'Workstation configuration' },
+  setup: { title: 'Getting started', context: 'Guided startup and workstation setup' },
   network: { title: 'Network', context: 'Remote access and exposure' },
   maintenance: { title: 'Maintenance', context: 'Host operations and recovery' },
   system: { title: 'API', context: 'Local interface and control' },
@@ -490,7 +457,7 @@ function SystemPanel(props: {
 }
 
 export default function App() {
-  const [section, setSection] = useState<Section>('overview')
+  const [section, setSection] = useState<Section>('setup')
   const [status, setStatus] = useState<SupervisorStatus | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])

@@ -1403,10 +1403,10 @@ async def control_maintenance_start(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "maintenance request must be an object")
     action = str(payload.get("action", "")).strip().lower()
-    allowed = {"update", "rollback", "burn-in", "opencode-smoke"}
+    allowed = {"update", "rollback", "burn-in", "opencode-smoke", "voice-smoke"}
     if action not in allowed:
         raise HTTPException(400, "unsupported maintenance action")
-    if action in {"update", "rollback", "burn-in"}:
+    if action in {"update", "rollback", "burn-in", "voice-smoke"}:
         status = await supervisor("GET", "/status", timeout=10)
         busy = {
             name: count for name, count in status.get("active_jobs", {}).items()

@@ -33,6 +33,16 @@ Only one heavyweight GPU service owns the GPU at a time. The gateway, supervisor
 
 Open **http://127.0.0.1:3000** for the Local AI control surface. It provides the instrument-style Overview, Models, Jobs, Health and Setup pages in addition to fast/reasoning chat, STT, TTS, robotics vision, image/video studio launchers, model registry information, and service controls. Browser requests go through the dashboard's `/api` proxy; `AI_API_KEY` is injected server-side and is not stored in frontend code or browser storage.
 
+### Start and update
+
+For a cold start on Windows, double-click `scripts\start-ai-stack.cmd`, or run:
+
+```powershell
+.\scripts\ai.ps1 launch
+```
+
+The launcher starts Docker Desktop when needed, checks the existing Windows Tailscale client without changing Serve/Funnel routes, starts the resident control plane, waits for Gateway and Dashboard health, then opens the Dashboard. If Tailscale is unavailable, local startup continues. Normal startup does not pull or build code. Use **Dashboard → Operate → Maintenance → Refresh dependencies** or `.\scripts\ai.ps1 update` to explicitly update; updates require a clean worktree and idle GPU and fast-forward the current branch to `origin/main` when safe.
+
 ## Remote access
 
 Tailscale keeps normal Local AI access private to the tailnet:
@@ -70,6 +80,8 @@ The Dashboard includes **Work → Realtime voice** for testing microphone captur
 The existing Dashboard Tailscale HTTPS address above also works from devices enrolled in the tailnet, including a device on the same physical LAN. A LAN connection without Tailscale is not supported; Dashboard and Gateway host ports remain loopback-bound.
 
 The optional voice TURN relay is off by default. It requires `VOICE_TURN_SHARED_SECRET` and `VOICE_TURN_HOSTNAME` to be injected into the voice runtime, then an explicit **Voice TURN relay** opt-in in the Dashboard Network panel. The host agent exposes the relay only through private Tailscale Serve TLS TCP on port 8447; do not enable Funnel or publish a host UDP port. Port 8446 already serves another local endpoint. Treat remote relay as unverified until a second tailnet device completes two-way speech and WebRTC stats show a selected relay candidate pair.
+
+For an on-demand non-realtime pipeline check, use **Operate → Maintenance → Run voice smoke** or `.\scripts\ai.ps1 voice-smoke` after starting the stack. It generates a short sentence with `local-fast`, synthesizes it with `local-tts`, then transcribes that same temporary MP3 with `local-stt` and verifies a known phrase. It refuses to start during active GPU work, reports stage timings, and deletes the audio after the run without persisting the transcript.
 
 Compose voice settings (all optional) are:
 
@@ -183,6 +195,7 @@ Maintenance:
 .\scripts\ai.ps1 doctor
 .\scripts\ai.ps1 model-info
 .\scripts\ai.ps1 smoke
+.\scripts\ai.ps1 voice-smoke
 .\scripts\ai.ps1 test-leases
 .\scripts\ai.ps1 test-proxy
 .\scripts\ai.ps1 test-agent-lab

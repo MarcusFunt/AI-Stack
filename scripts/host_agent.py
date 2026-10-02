@@ -20,7 +20,7 @@ from env_utils import load_env_file
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 STATE_DIR = ROOT / "data" / "state"
-HOST_AGENT_VERSION = "1.5"
+HOST_AGENT_VERSION = "1.7"
 VOICE_TURN_PORT = 8447
 INSTALL_JOBS = {}
 INSTALL_LOCK = threading.Lock()
@@ -219,6 +219,9 @@ def rollback_snapshots():
             "file": path.name,
             "timestamp": data.get("timestamp") or path.stem.removeprefix("update-"),
             "created_at": path.stat().st_mtime,
+            "ai_stack_previous_sha": ((data.get("ai_stack") or {}).get("previous_sha")),
+            "ai_stack_updated_sha": ((data.get("ai_stack") or {}).get("updated_sha")),
+            "ai_stack_branch": ((data.get("ai_stack") or {}).get("branch")),
             "comfyui_sha": ((data.get("comfyui") or {}).get("sha")),
             "wangp_sha": ((data.get("wangp") or {}).get("sha")),
             "images": sorted((data.get("rollback_images") or {}).keys()),
@@ -231,6 +234,8 @@ def _operation_args(action, payload):
         return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ai), "burn-in"], None
     if action == "update":
         return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ai), "update"], None
+    if action == "voice-smoke":
+        return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ai), "voice-smoke"], None
     if action == "opencode-smoke":
         script = ROOT / "scripts" / "opencode-smoke.ps1"
         return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], None
@@ -390,13 +395,15 @@ def voice_turn_listener_ready(timeout=0.5):
 def voice_turn_route_present(routes, dns_name):
     if not dns_name or not isinstance(routes, dict):
         return False
-    key = f"{dns_name}:{VOICE_TURN_PORT}"
+    tcp_keys = {str(VOICE_TURN_PORT), f"{dns_name}:{VOICE_TURN_PORT}"}
+    host_key = f"{dns_name}:{VOICE_TURN_PORT}"
     tcp = routes.get("TCP", {})
     web = routes.get("Web", {})
     allow_funnel = routes.get("AllowFunnel", {})
     return any(
-        isinstance(section, dict) and key in section
-        for section in (tcp, web, allow_funnel)
+        isinstance(tcp, dict) and any(key in tcp for key in tcp_keys)
+        or isinstance(section, dict) and host_key in section
+        for section in (web, allow_funnel)
     )
 
 
@@ -416,7 +423,7 @@ def voice_turn_route_enabled(routes, dns_name, listener_ready=None):
     allow_funnel = routes.get("AllowFunnel", {})
     if not isinstance(tcp, dict) or not isinstance(allow_funnel, dict):
         return False
-    endpoint = tcp.get(key)
+    endpoint = tcp.get(str(VOICE_TURN_PORT)) or tcp.get(key)
     if listener_ready is None:
         listener_ready = voice_turn_listener_ready()
     return bool(
@@ -524,6 +531,17 @@ def configure_tailscale(payload):
         results.append(run([exe, "serve", "--https=443", "off"]))
 
     def disable_turn_funnel_and_verify():
+        current = tailscale_status()
+        route_state_available = current.get("route_state_available") is True
+        funnel_enabled = route_state_available and voice_turn_funnel_enabled(
+            current.get("route_state", {}), current.get("dns_name", "")
+        )
+        if route_state_available and not funnel_enabled:
+            # Tailscale returns an error when asked to remove a Funnel config
+            # that does not exist. A verified status with no Funnel permission
+            # already satisfies the safety requirement.
+            return True
+
         result = run([
             exe,
             "funnel",
