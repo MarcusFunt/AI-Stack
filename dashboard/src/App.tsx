@@ -6,9 +6,10 @@ import {
 } from 'lucide-react'
 import { localAI } from './api'
 import { SpeechPanel } from './SpeechPanel'
+import { MobileNavigation } from './MobileNavigation'
 import { AgentLabPanel } from './AgentLabPanel'
 import { MaintenancePanel } from './MaintenancePanel'
-import { navGroups } from './navigation'
+import { navGroups, type NavigationSection } from './navigation'
 import type { ApiCapabilities, ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
 import {
   ControlOverview, HealthPanel, JobsPanel, LogsPanel, ModelsPanel, NetworkPanel, SetupPanel, StateBadge,
@@ -18,7 +19,7 @@ import './index.css'
 
 const RealtimeVoicePanel = lazy(() => import('./RealtimeVoicePanel'))
 
-type Section = 'overview' | 'models' | 'jobs' | 'logs' | 'health' | 'agentlab' | 'chat' | 'speech' | 'voice' | 'vision' | 'studio' | 'setup' | 'network' | 'maintenance' | 'system'
+type Section = NavigationSection
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
 const sectionMeta: Record<Section, { title: string; context: string }> = {
@@ -567,7 +568,15 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main-shell">
+      <MobileNavigation
+        section={section}
+        title={meta.title}
+        gatewayOnline={gatewayOk}
+        callActive={voiceCallActive}
+        onNavigate={setSection}
+      />
+
+      <main className="main-shell" id="main-content" tabIndex={-1} aria-label={meta.title}>
         <header className="app-topbar">
           <div className="topbar-context">
             <div className="topbar-path">

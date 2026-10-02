@@ -34,3 +34,17 @@ export const navGroups = [
     ],
   },
 ] as const
+
+export type NavigationSection = (typeof navGroups)[number]['items'][number][0]
+
+export const mobilePrimaryNav = [
+  { section: 'overview', Icon: Activity, label: 'Home' },
+  { section: 'chat', Icon: MessageSquareText, label: 'Chat' },
+  { section: 'speech', Icon: AudioLines, label: 'Speech' },
+  { section: 'voice', Icon: Mic, label: 'Call' },
+] as const satisfies readonly { section: NavigationSection; Icon: typeof Activity; label: string }[]
+
+export const mobileMoreGroups = navGroups.map((group) => ({
+  label: group.label,
+  items: group.items.filter(([section]) => !mobilePrimaryNav.some((primary) => primary.section === section)),
+})).filter((group) => group.items.length > 0)
