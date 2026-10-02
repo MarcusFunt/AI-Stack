@@ -20,6 +20,10 @@ on:
       - "tests/host_agent/**"
       - "scripts/host_agent.py"
       - "scripts/env_utils.py"
+      - "scripts/ai.ps1"
+      - "scripts/test-turn-proxy.ps1"
+      - "scripts/turn_proxy_acceptance_probe.py"
+      - "voice/turn_proxy/Dockerfile.coturn"
       - "dashboard/**"
       - "config/models.json"
       - "compose.yaml"
@@ -44,6 +48,10 @@ on:
       - "tests/host_agent/**"
       - "scripts/host_agent.py"
       - "scripts/env_utils.py"
+      - "scripts/ai.ps1"
+      - "scripts/test-turn-proxy.ps1"
+      - "scripts/turn_proxy_acceptance_probe.py"
+      - "voice/turn_proxy/Dockerfile.coturn"
       - "dashboard/**"
       - ".github/workflows/architecture-tests.yml"
 
@@ -121,3 +129,14 @@ jobs:
 
       - name: Dashboard build
         run: npm --prefix dashboard run build
+
+  powershell-handoff:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Exercise the Windows PowerShell to Python probe handoff
+        shell: powershell
+        run: python -m unittest tests.voice.test_turn_proxy.TurnProxyTests.test_acceptance_probe_runs_through_the_real_powershell_python_handoff -v

@@ -69,24 +69,56 @@ TURN credentials are returned only when both `VOICE_TURN_SHARED_SECRET` and
 put their values in browser configuration or logs. The host-agent
 `voice_turn_enabled` setting defaults to false and is changed from the
 Dashboard Network panel. It maps private Tailscale Serve TLS-terminated TCP
-port 8447 to the coturn TCP listener on `127.0.0.1:3478`; Funnel and host UDP
-port publishing are not part of this route.
+port 8447 to the TCP listener on `127.0.0.1:3478`; Funnel and host UDP port
+publishing are not part of this route. Coturn has no host port mapping and
+remains only on the internal `ai-stack-voice-net`. The `turn-proxy` service is
+the only member of a separate publish bridge and also joins the internal voice
+network. It forwards TCP bytes to coturn without terminating TURN or TLS.
 
 The route uses TURN over TLS/TCP from the browser to Tailscale Serve on port
 8447. Serve terminates TLS and forwards the TURN TCP stream to
 `127.0.0.1:3478`; coturn accepts no UDP client listener and no TCP peer relay.
-Its UDP relay endpoints remain inside the isolated `ai-stack-voice-net` Docker
-network, where the voice service's TURN allocation can reach the browser's
-allocation. TURN explicitly supports TLS/TCP from client to server with UDP
-between TURN and peer, so this path does not require publishing UDP ports on
-the Windows host ([RFC 8656 §3.1](https://www.rfc-editor.org/rfc/rfc8656.html)).
-Funnel is not used. Port 8446 remains untouched; voice uses 8447.
+Its UDP relay endpoints remain inside the isolated `ai-stack-voice-net`, where
+the voice service can reach the browser's allocation. TURN supports TLS/TCP
+between client and server while relaying UDP between server and peer; this
+path does not require publishing UDP ports on Windows ([RFC 8656 §3.1](https://www.rfc-editor.org/rfc/rfc8656.html)).
+The proxy installs default-drop IPv4 and IPv6 firewall rules before binding,
+allows new TCP only from its publish-side interface to port 3478, and allows
+new outbound TCP only to coturn's resolved private IPv4 address on port 3478.
+It then drops all effective and bounding capabilities before accepting
+connections. Funnel is not used. Port 8446 remains untouched; voice uses 8447.
+Both containers use `restart: unless-stopped`. Coturn's healthcheck requires
+a valid TCP STUN Binding response; its watchdog exits the container if that
+check never becomes ready or fails repeatedly. The proxy checks coturn before
+binding, checks its loopback STUN path for health, and exits after repeated
+upstream STUN failures. Docker then restarts it so it resolves a recreated
+coturn container to its current private address. Compose also restarts the
+proxy when coturn is explicitly restarted through Compose.
+
+After starting coturn, run `scripts\test-turn-proxy.ps1`. It checks healthy
+STUN probes, exact network membership, loopback-only TCP publication, no
+coturn host publication, a successful host STUN transaction, zero effective
+and bounding capabilities on proxy PID 1, and blocked external TCP egress.
+The script invokes a checked-in Python probe by file path, which keeps the
+PowerShell 5.1 argument handoff reliable. It does not enable or modify the
+Tailnet route.
 
 The host agent enables this route only after a STUN Binding request succeeds on
 the loopback coturn listener. Status also requires an exact `127.0.0.1:3478`
 target, no Funnel permission, and a live listener; applying network settings
 removes a stale route when the listener is unavailable. Remote call acceptance
 still requires a second Tailnet device, a selected `relay` candidate pair, and
-two-way audio. A direct candidate path does not count. See [coturn's relay
-options](https://github.com/coturn/coturn/wiki/turnserver) and [Tailscale Serve
-TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).
+two-way audio. A direct candidate path does not count. Remote Tailnet/WebRTC
+acceptance is intentionally deferred until after PR #13 is merged. Then:
+
+1. Enable the private `8447` Tailscale Serve route through the authenticated
+   host-agent setting and verify Funnel is disabled.
+2. Connect from a second device enrolled in the Tailnet.
+3. Inspect browser ICE statistics and confirm the selected candidate is
+   `relay` through TURN.
+4. Verify two-way audio, interruption/barge-in, reconnect, stop, and cleanup.
+5. Disable the route after acceptance if it is no longer needed.
+
+No manual Tailscale configuration or second-device call is part of this PR
+implementation pass. See [coturn's relay options](https://github.com/coturn/coturn/wiki/turnserver)
+and [Tailscale Serve TCP forwarding](https://tailscale.com/docs/reference/tailscale-cli/serve).

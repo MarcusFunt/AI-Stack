@@ -135,13 +135,31 @@ function Save-RollbackImage {
 
 switch ($Action) {
   "start" {
-    Start-ControlPlane
+    if ($Service -ne "coturn") { Start-ControlPlane }
     if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
-    elseif ($Service -eq "coturn") { Invoke-Compose -CommandArgs @("up","-d","coturn") }
+    elseif ($Service -eq "coturn") {
+      $turnProxyEnabled = "0"
+      $turnRestartPolicy = "no"
+      if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) {
+        $turnProxyEnabled = "1"
+        $turnRestartPolicy = "unless-stopped"
+      }
+      $previousTurnRestartPolicy = $env:TURN_RESTART_POLICY
+      [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $turnProxyEnabled, "Process")
+      [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $turnRestartPolicy, "Process")
+      try {
+        Invoke-Compose -CommandArgs @("up","--build","-d","coturn","turn-proxy")
+      }
+      finally {
+        [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")
+        [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $previousTurnRestartPolicy, "Process")
+      }
+    }
     elseif ($Service -ne "gateway") { Invoke-Supervisor "POST" "/ensure/$Service" }
   }
   "stop" {
-    if ($Service -in @("gateway","voice","coturn")) { Invoke-Compose -CommandArgs @("stop",$Service) }
+    if ($Service -eq "coturn") { Invoke-Compose -CommandArgs @("stop","coturn","turn-proxy") }
+    elseif ($Service -in @("gateway","voice")) { Invoke-Compose -CommandArgs @("stop",$Service) }
     else {
       Start-ControlPlane
       Invoke-Supervisor "POST" "/stop/$Service" 120
