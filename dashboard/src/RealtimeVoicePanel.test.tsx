@@ -355,6 +355,26 @@ describe('RealtimeVoicePanel', () => {
     expect(screen.getByRole('alert').textContent).toContain('ICE connection timed out')
   })
 
+  it('does not time out after the transport reports connected while connect remains pending', async () => {
+    vi.useFakeTimers()
+    setupMedia()
+    const { client, callbacks } = setupClient(() => new Promise(() => {}))
+    render(<RealtimeVoicePanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await act(async () => {
+      for (let index = 0; index < 10; index += 1) await Promise.resolve()
+    })
+    expect(client.connect).toHaveBeenCalledOnce()
+
+    act(() => callbacks()?.onTransportStateChanged?.('connected' as never))
+    expect(screen.getByText('Connected · Speak naturally')).toBeTruthy()
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+
+    expect(screen.getByText('Connected · Speak naturally')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(client.disconnect).not.toHaveBeenCalled()
+  })
+
   it('releases the microphone when session creation fails and leaves retry available', async () => {
     const media = setupMedia()
     setupClient()

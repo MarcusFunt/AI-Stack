@@ -214,11 +214,22 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
       const session = await localAI.createRealtimeVoiceSession()
       if (attempt !== attemptRef.current) return
 
+      let resolveTransportConnected: (() => void) | undefined
+      let rejectTransportConnection: ((error: Error) => void) | undefined
+      const transportConnected = new Promise<void>((resolve, reject) => {
+        resolveTransportConnected = resolve
+        rejectTransportConnection = reject
+      })
+
       const callbacks: RealtimeVoiceCallbacks = {
         onTransportStateChanged: (state) => {
           if (attempt !== attemptRef.current) return
-          if (state === 'connected' || state === 'ready') updateState('connected')
+          if (state === 'connected' || state === 'ready') {
+            updateState('connected')
+            resolveTransportConnected?.()
+          }
           if (state === 'error') {
+            rejectTransportConnection?.(new Error('voice-transport-error'))
             const cleanupAttempt = ++attemptRef.current
             const activeClient = clientRef.current ?? client
             const activeStream = streamRef.current ?? stream
@@ -278,14 +289,17 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
         timeoutId = window.setTimeout(() => reject(new Error('voice-ice-timeout')), ICE_TIMEOUT_MS)
       })
       try {
-        await Promise.race([
-          client.connect({
+        void client.connect({
             offerUrl: session.offer_url,
             ticket: session.client_secret.value,
             iceServers: session.ice_servers,
-          }),
-          timeout,
-        ])
+          }).then(
+            () => resolveTransportConnected?.(),
+            (error: unknown) => rejectTransportConnection?.(
+              error instanceof Error ? error : new Error('voice-signaling-failed'),
+            ),
+          )
+        await Promise.race([transportConnected, timeout])
         if (attempt === attemptRef.current) updateState('connected')
       } finally {
         if (timeoutId !== undefined) window.clearTimeout(timeoutId)
