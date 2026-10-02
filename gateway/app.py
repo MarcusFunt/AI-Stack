@@ -1678,6 +1678,41 @@ def _verified_turn_hostname(network) -> tuple[str | None, str | None]:
     return hostname.rstrip("."), None
 
 
+def _host_agent_route_reason(network) -> str | None:
+    if not isinstance(network, dict):
+        return "invalid-status"
+    if network.get("route_state_available") is not True:
+        return "route-state-unavailable"
+    if network.get("online") is not True:
+        return "tailscale-offline"
+    if not isinstance(network.get("voice_turn_enabled"), bool):
+        return "turn-enabled-state-unavailable"
+    return None
+
+
+def _raise_realtime_route_error(
+    request: Request,
+    session_id: str,
+    reason: str,
+    host_agent_status: int | None,
+    detail: str,
+) -> None:
+    trace_context = getattr(request.state, "trace_context", None)
+    request_id = getattr(trace_context, "request_id", None) or "unavailable"
+    _LOGGER.warning(
+        "Realtime voice route could not be verified "
+        f"session_id={session_id} request_id={request_id} "
+        f"reason={reason} host_agent_status={host_agent_status}",
+        extra={
+            "voice_session_id": session_id,
+            "request_id": request_id,
+            "voice_route_reason": reason,
+            "host_agent_status": host_agent_status,
+        },
+    )
+    raise HTTPException(503, detail)
+
+
 @app.post("/v1/realtime/sessions")
 async def create_realtime_session(request: Request):
     raw = await read_body_limited(request, 16 * 1024, "voice session configuration")
@@ -1714,41 +1749,61 @@ async def create_realtime_session(request: Request):
 
     ice_servers = result.get("ice_servers")
     ice_route = {"kind": "direct", "transport": None, "port": None}
-    if isinstance(ice_servers, list) and _has_turn_ice_server(ice_servers):
-        route_reason = None
-        try:
-            network = await host_agent("GET", "/tailscale/status", timeout=3)
-        except HTTPException as exc:
-            network = None
-            route_reason = "host-agent-unavailable"
-            host_agent_status = exc.status_code
-        except ValueError:
-            network = None
-            route_reason = "invalid-host-agent-response"
-            host_agent_status = None
-        else:
-            host_agent_status = 200
+    try:
+        network = await host_agent("GET", "/tailscale/status", timeout=3)
+    except HTTPException as exc:
+        _raise_realtime_route_error(
+            request,
+            result["id"],
+            "host-agent-unavailable",
+            exc.status_code,
+            "The TURN route could not be verified because the Tailscale host-agent check failed. Check the host agent and Tailscale network, then retry.",
+        )
+    except ValueError:
+        _raise_realtime_route_error(
+            request,
+            result["id"],
+            "invalid-host-agent-response",
+            None,
+            "The TURN route could not be verified because the Tailscale host-agent returned an invalid response. Check the host agent, then retry.",
+        )
 
-        hostname, status_reason = _verified_turn_hostname(network)
-        route_reason = route_reason or status_reason
-        if hostname is None or not _retarget_turn_ice_servers(ice_servers, hostname):
-            trace_context = getattr(request.state, "trace_context", None)
-            session_id = result["id"]
-            request_id = getattr(trace_context, "request_id", None) or "unavailable"
-            route_reason = route_reason or "ice-route-invalid"
-            _LOGGER.warning(
-                "Realtime voice TURN route could not be verified "
-                f"session_id={session_id} request_id={request_id} "
-                f"reason={route_reason} host_agent_status={host_agent_status}",
-                extra={
-                    "voice_session_id": session_id,
-                    "request_id": request_id,
-                    "voice_turn_route_reason": route_reason,
-                    "host_agent_status": host_agent_status,
-                },
+    host_status_reason = _host_agent_route_reason(network)
+    if host_status_reason:
+        _raise_realtime_route_error(
+            request,
+            result["id"],
+            host_status_reason,
+            200,
+            "The TURN route could not be verified from the Tailscale host-agent status. Check Tailscale and the host agent, then retry.",
+        )
+
+    has_turn = isinstance(ice_servers, list) and _has_turn_ice_server(ice_servers)
+    turn_enabled = network["voice_turn_enabled"]
+    if has_turn or turn_enabled:
+        hostname, route_reason = _verified_turn_hostname(network)
+        if hostname is None:
+            _raise_realtime_route_error(
+                request,
+                result["id"],
+                route_reason or "turn-route-unverified",
+                200,
+                "The private TURN route could not be verified. Check the Tailscale voice route and TURN listener, then retry.",
             )
-            raise HTTPException(
-                503,
+        if not has_turn:
+            _raise_realtime_route_error(
+                request,
+                result["id"],
+                "voice-turn-configuration-missing",
+                200,
+                "Tailscale TURN is enabled, but the voice service returned no TURN relay. Check the voice TURN credentials and restart the voice service before retrying.",
+            )
+        if not _retarget_turn_ice_servers(ice_servers, hostname):
+            _raise_realtime_route_error(
+                request,
+                result["id"],
+                "ice-route-invalid",
+                200,
                 "The private TURN route could not be verified. Check the Tailscale voice route and TURN listener, then retry.",
             )
         ice_route = {"kind": "tailnet-turn", "transport": "tls/tcp", "port": 8447}

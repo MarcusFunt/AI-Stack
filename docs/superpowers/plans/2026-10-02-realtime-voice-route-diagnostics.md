@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prevent unreachable TURN sessions when host-agent route verification fails and expose safe, per-session route and ICE-state diagnostics.
+**Goal:** Prevent sessions from silently omitting an enabled TURN relay when host-agent or voice-service routing is not verifiable, and expose safe, per-session route and ICE-state diagnostics.
 
-**Architecture:** The gateway remains responsible for selecting and validating the public ICE route; it returns a credential-free route summary alongside the session and fails with an actionable 503 when a TURN route cannot be verified. The dashboard attaches listeners to the active peer connection and retains a sanitized diagnostic snapshot through failures and cleanup.
+**Architecture:** The gateway remains responsible for selecting and validating the public ICE route; it verifies host-agent status for each session, returns a credential-free route summary alongside the session, and fails with an actionable 503 when the host-agent is unavailable or when TURN is enabled but the voice service supplies no relay. Direct-only sessions remain usable when the host-agent confirms TURN is disabled. The dashboard attaches listeners to the active peer connection and retains a sanitized diagnostic snapshot through failures and cleanup.
 
 **Tech Stack:** FastAPI/Python, gateway unittest suite, React/TypeScript, Vitest.
 
@@ -22,6 +22,8 @@
 - Host-agent timeout or error with TURN configured returns actionable 503 and no internal ICE URL.
 - TURN disabled, missing, or invalid advertised hostname cannot produce a success response with internal coturn URLs.
 - A response without TURN configuration remains usable and reports a direct route.
+- A direct-only response is allowed only when the host-agent check succeeds and confirms TURN is disabled.
+- TURN enabled in the host-agent with no TURN server from the voice service fails clearly rather than silently downgrading to direct ICE.
 - Failed peer connections retain the last connection, ICE, and gathering state after cleanup.
 - Diagnostics never include candidate IPs, server hostnames, credentials, or session tickets.
 
@@ -36,6 +38,7 @@
 **Interfaces:** Successful session responses include `ice_route` with sanitized route kind and transport/port; TURN session creation requires an online host with available route state, a present private route, a ready listener, Funnel explicitly disabled, `voice_turn_enabled=true`, and a valid DNS name.
 
 - [x] Add tests for host-agent error, disabled route, malformed DNS name, verified TURN route metadata, and direct-only response metadata.
+- [x] Add tests for host-agent failure with no upstream TURN server and TURN-enabled/voice-server configuration mismatch.
 - [x] Run the gateway voice test module and confirm the new failure cases fail against current behavior.
 - [x] Return an actionable 503 when TURN is configured but its route cannot be verified; only return the rewritten TURN URL after hostname validation.
 - [x] Add credential-free structured route verification logs correlated by session ID and request ID.

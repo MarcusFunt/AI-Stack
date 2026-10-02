@@ -33,6 +33,7 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
     def test_session_create_is_authenticated_traced_and_rewrites_internal_websocket_url(self):
         observed = {}
         original = self.gateway.httpx.AsyncClient.post
+        original_host_agent = self.gateway.host_agent
 
         async def fake_post(client, url, **kwargs):
             observed["url"] = url
@@ -44,7 +45,12 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
                 "ws_url": "ws://voice:8000/ws/session-123",
             })
 
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            self.assertEqual((method, path, timeout), ("GET", "/tailscale/status", 3))
+            return self._direct_route_status()
+
         self.gateway.httpx.AsyncClient.post = fake_post
+        self.gateway.host_agent = fake_host_agent
         try:
             unauthorized = self.client.post("/v1/realtime/sessions", json={})
             self.assertEqual(unauthorized.status_code, 401)
@@ -59,6 +65,7 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
             )
         finally:
             self.gateway.httpx.AsyncClient.post = original
+            self.gateway.host_agent = original_host_agent
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(observed["url"], "http://voice-test:8000/sessions")
@@ -138,6 +145,7 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
 
     def test_session_response_adds_same_origin_offer_url(self):
         original = self.gateway.httpx.AsyncClient.post
+        original_host_agent = self.gateway.host_agent
 
         async def fake_post(client, url, **_kwargs):
             return self.gateway.httpx.Response(200, json={
@@ -147,7 +155,12 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
                 "offer_url": "http://voice:8000/sessions/session-123/offer",
             })
 
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            self.assertEqual((method, path, timeout), ("GET", "/tailscale/status", 3))
+            return self._direct_route_status()
+
         self.gateway.httpx.AsyncClient.post = fake_post
+        self.gateway.host_agent = fake_host_agent
         try:
             response = self.client.post(
                 "/v1/realtime/sessions",
@@ -156,12 +169,73 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
             )
         finally:
             self.gateway.httpx.AsyncClient.post = original
+            self.gateway.host_agent = original_host_agent
 
         result = response.json()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(result["offer_url"], "/v1/realtime/sessions/session-123/offer")
         self.assertNotIn("voice:8000", str(result))
         self.assertEqual(result["ice_route"], {"kind": "direct", "transport": None, "port": None})
+
+    def _create_session_without_turn(self, network=None, host_agent_error=None):
+        original_post = self.gateway.httpx.AsyncClient.post
+        original_host_agent = self.gateway.host_agent
+
+        async def fake_post(client, url, **_kwargs):
+            return self.gateway.httpx.Response(200, json={
+                "id": "session-direct-123",
+                "client_secret": {"value": "short-lived-ticket", "expires_at": 2000},
+                "ice_servers": [],
+            })
+
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            self.assertEqual((method, path, timeout), ("GET", "/tailscale/status", 3))
+            if host_agent_error:
+                raise host_agent_error
+            return network if network is not None else self._direct_route_status()
+
+        self.gateway.httpx.AsyncClient.post = fake_post
+        self.gateway.host_agent = fake_host_agent
+        try:
+            return self.client.post(
+                "/v1/realtime/sessions",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"language": "en"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.post = original_post
+            self.gateway.host_agent = original_host_agent
+
+    @staticmethod
+    def _direct_route_status():
+        return {
+            "online": True,
+            "route_state_available": True,
+            "voice_turn_enabled": False,
+        }
+
+    def test_session_fails_clearly_when_host_agent_check_fails_without_turn(self):
+        with self.assertLogs(self.gateway._LOGGER, level="WARNING") as route_logs:
+            response = self._create_session_without_turn(
+                host_agent_error=self.gateway.HTTPException(503, "host agent unavailable: private detail"),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("host-agent check failed", response.json()["detail"].lower())
+        self.assertNotIn("private detail", str(response.json()))
+        log_output = "\n".join(route_logs.output)
+        self.assertIn("session_id=session-direct-123", log_output)
+        self.assertIn(f"request_id={response.headers['x-request-id']}", log_output)
+        self.assertIn("reason=host-agent-unavailable", log_output)
+        self.assertIn("host_agent_status=503", log_output)
+        self.assertNotIn("private detail", log_output)
+
+    def test_session_fails_clearly_when_turn_is_enabled_but_voice_has_no_turn_servers(self):
+        response = self._create_session_without_turn(network=self._verified_turn_route())
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("TURN is enabled", response.json()["detail"])
+        self.assertIn("voice service returned no TURN relay", response.json()["detail"])
 
     def _create_turn_session(self, network=None, host_agent_error=None):
         original_post = self.gateway.httpx.AsyncClient.post
