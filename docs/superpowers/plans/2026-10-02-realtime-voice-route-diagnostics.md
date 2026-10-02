@@ -64,8 +64,8 @@
 **Files:**
 - No additional production files.
 
-- [ ] Run Python syntax compilation for `gateway/app.py` and the complete relevant gateway voice tests.
+- [x] Run Python syntax compilation for `gateway/app.py` and the complete relevant gateway voice tests.
 - [x] Run dashboard lint, tests, and build.
-- [ ] Run `docker compose config` and `git diff --check`.
-- [ ] Check `scripts\ai.ps1 status`, rebuild/recreate only gateway and dashboard if safe, then run `scripts\doctor.ps1` and relevant smoke checks.
+- [x] Run `docker compose config` and `git diff --check`.
+- [ ] Check `scripts\ai.ps1 status`, rebuild/recreate only gateway and dashboard if safe, then run safe service health checks. Run the full doctor/smoke scripts only if they do not read `.env` or start/stop GPU jobs.
 - [ ] Commit only implementation, tests, and this plan; push to `origin/main` as previously authorized.

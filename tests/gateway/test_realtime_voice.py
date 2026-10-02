@@ -211,7 +211,7 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
         return status
 
     def test_turn_session_fails_clearly_when_host_agent_check_fails(self):
-        with patch.object(self.gateway._LOGGER, "warning") as warning_log:
+        with self.assertLogs(self.gateway._LOGGER, level="WARNING") as route_logs:
             response = self._create_turn_session(
                 host_agent_error=self.gateway.HTTPException(503, "host agent unavailable: private detail"),
             )
@@ -223,12 +223,14 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
         self.assertNotIn("coturn", str(response.json()).lower())
         self.assertNotIn("private detail", detail)
         self.assertNotIn("short-lived-password", str(response.json()))
-        log_fields = warning_log.call_args.kwargs["extra"]
-        self.assertEqual(log_fields["voice_session_id"], "session-123")
-        self.assertEqual(log_fields["request_id"], response.headers["x-request-id"])
-        self.assertEqual(log_fields["voice_turn_route_reason"], "host-agent-unavailable")
-        self.assertNotIn("private detail", str(log_fields))
-        self.assertNotIn("short-lived-password", str(log_fields))
+        log_output = "\n".join(route_logs.output)
+        self.assertIn("session_id=session-123", log_output)
+        self.assertIn(f"request_id={response.headers['x-request-id']}", log_output)
+        self.assertIn("reason=host-agent-unavailable", log_output)
+        self.assertIn("host_agent_status=503", log_output)
+        self.assertNotIn("private detail", log_output)
+        self.assertNotIn("short-lived-password", log_output)
+        self.assertNotIn("turn-check.invalid", log_output)
 
     def test_turn_session_fails_clearly_when_host_agent_reports_route_disabled(self):
         response = self._create_turn_session(

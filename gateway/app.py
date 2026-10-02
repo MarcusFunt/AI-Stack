@@ -1733,12 +1733,17 @@ async def create_realtime_session(request: Request):
         route_reason = route_reason or status_reason
         if hostname is None or not _retarget_turn_ice_servers(ice_servers, hostname):
             trace_context = getattr(request.state, "trace_context", None)
+            session_id = result["id"]
+            request_id = getattr(trace_context, "request_id", None) or "unavailable"
+            route_reason = route_reason or "ice-route-invalid"
             _LOGGER.warning(
-                "Realtime voice TURN route could not be verified",
+                "Realtime voice TURN route could not be verified "
+                f"session_id={session_id} request_id={request_id} "
+                f"reason={route_reason} host_agent_status={host_agent_status}",
                 extra={
-                    "voice_session_id": result["id"],
-                    "request_id": getattr(trace_context, "request_id", None),
-                    "voice_turn_route_reason": route_reason or "ice-route-invalid",
+                    "voice_session_id": session_id,
+                    "request_id": request_id,
+                    "voice_turn_route_reason": route_reason,
                     "host_agent_status": host_agent_status,
                 },
             )
@@ -1749,17 +1754,6 @@ async def create_realtime_session(request: Request):
         ice_route = {"kind": "tailnet-turn", "transport": "tls/tcp", "port": 8447}
 
     result["ice_route"] = ice_route
-    trace_context = getattr(request.state, "trace_context", None)
-    _LOGGER.info(
-        "Realtime voice ICE route selected",
-        extra={
-            "voice_session_id": result["id"],
-            "request_id": getattr(trace_context, "request_id", None),
-            "ice_route_kind": ice_route["kind"],
-            "ice_route_transport": ice_route["transport"],
-            "ice_route_port": ice_route["port"],
-        },
-    )
 
     scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
     result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"

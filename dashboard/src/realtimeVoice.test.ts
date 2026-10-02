@@ -249,6 +249,61 @@ describe('createRealtimeVoiceClient', () => {
     expect(JSON.stringify(onIceDiagnosticsChanged.mock.calls)).not.toContain('credential=')
   })
 
+  it('does not replace failed ICE diagnostics with closed states during Pipecat disconnect cleanup', async () => {
+    const listeners = new Map<string, (event: Event) => void>()
+    const peer = {
+      connectionState: 'failed',
+      iceConnectionState: 'failed',
+      iceGatheringState: 'complete',
+      getStats: vi.fn().mockResolvedValue(new Map()),
+      addEventListener: vi.fn((name: string, listener: (event: Event) => void) => listeners.set(name, listener)),
+      removeEventListener: vi.fn((name: string) => listeners.delete(name)),
+    }
+    let transportCallbacks: Record<string, (state?: string) => void> = {}
+    let transportInstance: { pc: typeof peer | null } | undefined
+    mocks.SmallWebRTCTransport.mockImplementation(function (options) {
+      transportInstance = { ...options, pc: peer }
+      return transportInstance
+    })
+    mocks.PipecatClient.mockImplementation(function (options) {
+      transportCallbacks = options.callbacks
+      return {
+        connect: mocks.clientConnect,
+        disconnect: vi.fn(async () => {
+          transportCallbacks.onTransportStateChanged('disconnecting')
+          peer.connectionState = 'closed'
+          peer.iceConnectionState = 'closed'
+          peer.iceGatheringState = 'complete'
+          listeners.get('connectionstatechange')?.(new Event('connectionstatechange'))
+          if (transportInstance) transportInstance.pc = null
+          transportCallbacks.onTransportStateChanged('disconnected')
+        }),
+      }
+    })
+    const onIceDiagnosticsChanged = vi.fn()
+    const client = createRealtimeVoiceClient(
+      { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream,
+      { ...callbacks, onIceDiagnosticsChanged },
+    )
+
+    await client.connect({
+      offerUrl: '/offer',
+      ticket: 'private-ticket',
+      iceServers: [],
+      sessionId: 'session-cleanup-123',
+      iceRoute: { kind: 'direct', transport: null, port: null },
+    })
+    listeners.get('connectionstatechange')?.(new Event('connectionstatechange'))
+    await client.disconnect()
+
+    expect(onIceDiagnosticsChanged).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: 'session-cleanup-123',
+      connectionState: 'failed',
+      iceConnectionState: 'failed',
+    }))
+    expect(onIceDiagnosticsChanged.mock.calls.some(([snapshot]) => snapshot.connectionState === 'closed')).toBe(false)
+  })
+
   it('discards an in-flight stats response after transport disconnects', async () => {
     const reports = new Map([
       ['transport-1', { type: 'transport', selectedCandidatePairId: 'pair-1' }],

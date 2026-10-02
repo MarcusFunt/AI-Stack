@@ -183,6 +183,7 @@ export function createRealtimeVoiceClient(
   let iceCandidateErrorCount = 0
   let lastIceCandidateErrorCode: number | null = null
   let iceDiagnostics: RealtimeIceDiagnostics | null = null
+  let peerMonitoringActive = false
 
   const publishIceDiagnostics = () => {
     if (!iceDiagnostics) return
@@ -211,6 +212,7 @@ export function createRealtimeVoiceClient(
   }
 
   const attachPeer = () => {
+    if (!peerMonitoringActive) return
     const peer = (transport as unknown as { pc?: RTCPeerConnection | null }).pc ?? null
     if (peer === monitoredPeer) return
     detachPeer()
@@ -234,6 +236,7 @@ export function createRealtimeVoiceClient(
   }
 
   const startPeerMonitor = (sessionId: string, route: RealtimeIceRoute) => {
+    peerMonitoringActive = true
     iceCandidateErrorCount = 0
     lastIceCandidateErrorCode = null
     iceDiagnostics = {
@@ -252,6 +255,7 @@ export function createRealtimeVoiceClient(
   }
 
   const stopPeerMonitor = () => {
+    peerMonitoringActive = false
     if (peerPoll !== undefined) clearInterval(peerPoll)
     peerPoll = undefined
     detachPeer()
