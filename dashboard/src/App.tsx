@@ -2,9 +2,10 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   Bot, BrainCircuit, ChevronRight, CircleStop, Cpu, Gauge,
-  Image as ImageIcon, Mic, Play, RefreshCw, Video, Volume2,
+  Image as ImageIcon, Play, RefreshCw, Video,
 } from 'lucide-react'
 import { localAI } from './api'
+import { SpeechPanel } from './SpeechPanel'
 import { AgentLabPanel } from './AgentLabPanel'
 import { MaintenancePanel } from './MaintenancePanel'
 import { navGroups } from './navigation'
@@ -165,85 +166,6 @@ function ChatPanel({ models }: { models: ModelInfo[] }) {
         />
         <button disabled={busy || !input.trim()}><ChevronRight size={18} /></button>
       </form>
-    </section>
-  )
-}
-
-function SpeechPanel() {
-  const [ttsText, setTtsText] = useState(
-    'Hello. This is Local AI running entirely on Marcus Computer.'
-  )
-  const [audioUrl, setAudioUrl] = useState('')
-  const [transcript, setTranscript] = useState('')
-  const [busy, setBusy] = useState<'tts' | 'stt' | ''>('')
-  const [error, setError] = useState('')
-
-  async function speak() {
-    setBusy('tts')
-    setError('')
-    try {
-      const blob = await localAI.speak(ttsText)
-      if (audioUrl) URL.revokeObjectURL(audioUrl)
-      setAudioUrl(URL.createObjectURL(blob))
-    } catch (err) {
-      setError(prettyError(err))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  async function transcribe(file?: File) {
-    if (!file) return
-    setBusy('stt')
-    setError('')
-    try {
-      const result = await localAI.transcribe(file)
-      setTranscript(result.text)
-    } catch (err) {
-      setError(prettyError(err))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  return (
-    <section className="workspace">
-      <div className="workspace-head">
-        <div><span className="eyebrow">AUDIO LAB</span><h2>Listen and speak locally.</h2></div>
-      </div>
-      <div className="split-grid">
-        <div className="tool-card">
-          <div className="tool-title">
-            <Volume2 size={20} />
-            <div><h3>Text to speech</h3><p>Qwen3-TTS · GPU scheduled</p></div>
-          </div>
-          <textarea value={ttsText} onChange={(e) => setTtsText(e.target.value)} />
-          <button className="primary" onClick={speak} disabled={busy !== '' || !ttsText.trim()}>
-            {busy === 'tts' ? <RefreshCw className="spin" size={16} /> : <Volume2 size={16} />}
-            Generate voice
-          </button>
-          {audioUrl && <audio className="audio-player" controls src={audioUrl} autoPlay />}
-        </div>
-        <div className="tool-card">
-          <div className="tool-title">
-            <Mic size={20} />
-            <div><h3>Speech to text</h3><p>Whisper large-v3 · VAD enabled</p></div>
-          </div>
-          <label className="drop-zone">
-            <Mic size={26} />
-            <strong>{busy === 'stt' ? 'Transcribing…' : 'Drop or choose audio'}</strong>
-            <span>WAV, MP3, M4A, OGG and most common containers</span>
-            <input
-              type="file"
-              accept="audio/*"
-              disabled={busy !== ''}
-              onChange={(e) => transcribe(e.target.files?.[0])}
-            />
-          </label>
-          {transcript && <div className="result-box">{transcript}</div>}
-        </div>
-      </div>
-      {error && <div className="error-banner">{error}</div>}
     </section>
   )
 }

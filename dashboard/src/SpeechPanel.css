@@ -1,0 +1,33 @@
+.speech-record-control {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 20px 16px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: radial-gradient(ellipse at 50% 0%, rgba(125, 153, 244, .14), transparent 80%);
+}
+.speech-record-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 16px;
+  border: 1px solid rgba(153, 175, 255, .35);
+  border-radius: 12px;
+  background: rgba(125, 153, 244, .15);
+  color: #dce5ff;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+.speech-record-button:hover { background: rgba(125, 153, 244, .25); }
+.speech-record-button:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 3px; }
+.speech-record-button:disabled { opacity: .55; cursor: default; }
+.speech-record-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: rgba(125, 153, 244, .16); }
+.speech-record-control p { margin: 0; text-align: center; }
+.speech-record-control.is-recording { border-color: rgba(236, 115, 134, .4); }
+.is-recording .speech-record-button { background: rgba(220, 87, 107, .18); border-color: rgba(236, 115, 134, .4); color: #ffdce2; }
+.is-recording .speech-record-icon { background: rgba(220, 87, 107, .25); }

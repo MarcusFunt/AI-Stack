@@ -450,6 +450,30 @@ describe('RealtimeVoicePanel', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
   })
 
+  it('ignores queued transport and transcript events after a remote disconnect', async () => {
+    setupMedia()
+    const { callbacks } = setupClient()
+    render(<RealtimeVoicePanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await screen.findByText('Connected · Speak naturally')
+    const endedCallbacks = callbacks()
+
+    act(() => endedCallbacks?.onDisconnected?.())
+    expect((await screen.findByRole('alert')).textContent).toContain('The voice connection ended')
+    act(() => {
+      endedCallbacks?.onTransportStateChanged?.('connected' as never)
+      endedCallbacks?.onServerMessage?.({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Late remote transcript',
+      } as never)
+    })
+
+    expect(document.querySelector('.voice-state-pill')?.textContent).toBe('Disconnected')
+    expect(screen.queryByText('Connected · Speak naturally')).toBeNull()
+    expect(screen.queryByText('Late remote transcript')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Stop voice test/ })).toBeNull()
+  })
+
   it('preserves separate user and assistant entries across multiple conversation turns', async () => {
     setupMedia()
     const { callbacks } = setupClient()
@@ -477,6 +501,95 @@ describe('RealtimeVoicePanel', () => {
       'YouWhat comes next?',
       'AI AssistantSecond answer.',
     ])
+  })
+
+  it('ignores transcript events from a stopped call after a new call starts', async () => {
+    setupMedia()
+    const { callbacks } = setupClient()
+    render(<RealtimeVoicePanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await screen.findByText('Connected · Speak naturally')
+    const oldCallbacks = callbacks()
+    fireEvent.click(screen.getByRole('button', { name: /Stop voice test/ }))
+    await screen.findAllByText('Call ended')
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await screen.findByText('Connected · Speak naturally')
+
+    act(() => {
+      oldCallbacks?.onServerMessage?.({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Stale previous call',
+      } as never)
+      oldCallbacks?.onServerMessage?.({ type: 'response.created' } as never)
+      oldCallbacks?.onServerMessage?.({ type: 'response.output_text.delta', delta: 'Stale reply' } as never)
+      callbacks()?.onServerMessage?.({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: 'Current call',
+      } as never)
+    })
+
+    expect(screen.queryByText('Stale previous call')).toBeNull()
+    expect(screen.queryByText('Stale reply')).toBeNull()
+    expect(screen.getByRole('log').querySelectorAll('article')).toHaveLength(1)
+    expect(screen.getByText('Current call')).toBeTruthy()
+    expect(screen.getByText('Connected · Speak naturally')).toBeTruthy()
+  })
+
+  it('releases the active call when the panel is unmounted', async () => {
+    const media = setupMedia()
+    const { client } = setupClient()
+    const onCallModeChange = vi.fn()
+    const view = render(<RealtimeVoicePanel onCallModeChange={onCallModeChange} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await screen.findByText('Connected · Speak naturally')
+
+    view.unmount()
+    await act(async () => { await Promise.resolve() })
+
+    expect(client.disconnect).toHaveBeenCalledOnce()
+    expect(media.track.stop).toHaveBeenCalledOnce()
+    expect(onCallModeChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('discards microphone capture that resolves after the panel is unmounted', async () => {
+    const media = setupMedia()
+    let resolveCapture: ((stream: MediaStream) => void) | undefined
+    media.getUserMedia.mockImplementation(() => new Promise<MediaStream>((resolve) => {
+      resolveCapture = resolve
+    }))
+    const view = render(<RealtimeVoicePanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    expect(media.getUserMedia).toHaveBeenCalledOnce()
+
+    view.unmount()
+    await act(async () => {
+      resolveCapture?.(media.stream)
+      await Promise.resolve()
+    })
+
+    expect(media.track.stop).toHaveBeenCalledOnce()
+    expect(mocks.createRealtimeVoiceSession).not.toHaveBeenCalled()
+    expect(mocks.createRealtimeVoiceClient).not.toHaveBeenCalled()
+  })
+
+  it('discards a session that resolves after the panel is unmounted', async () => {
+    const media = setupMedia()
+    let resolveSession: ((value: ReturnType<typeof session>) => void) | undefined
+    mocks.createRealtimeVoiceSession.mockImplementation(() => new Promise((resolve) => {
+      resolveSession = resolve
+    }))
+    const view = render(<RealtimeVoicePanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Start a voice call' }))
+    await waitFor(() => expect(mocks.createRealtimeVoiceSession).toHaveBeenCalledOnce())
+
+    view.unmount()
+    await act(async () => {
+      resolveSession?.(session('abandoned-session', 'abandoned-ticket'))
+      await Promise.resolve()
+    })
+
+    expect(media.track.stop).toHaveBeenCalledOnce()
+    expect(mocks.createRealtimeVoiceClient).not.toHaveBeenCalled()
   })
 
   it('offers an audio retry after autoplay is blocked and clears the warning when playback starts', async () => {

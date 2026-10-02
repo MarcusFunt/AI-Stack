@@ -260,6 +260,7 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
         },
         onDisconnected: () => {
           if (attempt !== attemptRef.current || stateRef.current !== 'connected') return
+          attemptRef.current += 1
           clientRef.current = null
           stopTracks(streamRef.current)
           streamRef.current = null
@@ -270,7 +271,9 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
           updateState('disconnected')
           setErrorMessage('The voice connection ended. Check the network connection and retry.')
         },
-        onServerMessage: handleServerMessage,
+        onServerMessage: (message) => {
+          if (attempt === attemptRef.current) handleServerMessage(message)
+        },
         onRemoteStream: (next) => {
           if (attempt === attemptRef.current) {
             setRemoteStream(next)
@@ -368,6 +371,16 @@ export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePa
   }, [busy, connected, onCallModeChange])
 
   useEffect(() => () => onCallModeChange?.(false), [onCallModeChange])
+
+  useEffect(() => () => {
+    attemptRef.current += 1
+    const client = clientRef.current
+    const stream = streamRef.current
+    clientRef.current = null
+    streamRef.current = null
+    stopTracks(stream)
+    void client?.disconnect().catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!connected) return

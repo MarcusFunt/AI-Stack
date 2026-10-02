@@ -196,7 +196,10 @@ export function createRealtimeVoiceClient(
         stopIcePathMonitor()
         callbacks.onDisconnected()
       },
-      onError: () => callbacks.onTransportStateChanged('error'),
+      onError: () => {
+        stopIcePathMonitor()
+        callbacks.onTransportStateChanged('error')
+      },
       onServerMessage: callbacks.onServerMessage,
       onTrackStarted: (track, participant) => {
         if (track.kind === 'audio' && participant?.local !== true) {

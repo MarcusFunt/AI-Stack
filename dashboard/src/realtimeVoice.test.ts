@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRealtimeVoiceClient, dispatchVoiceControlMessage, readSelectedIceCandidatePath } from './realtimeVoice'
 
 const mocks = vi.hoisted(() => ({
@@ -33,6 +33,47 @@ describe('createRealtimeVoiceClient', () => {
       disconnect: mocks.clientDisconnect,
     } })
     mocks.SmallWebRTCTransport.mockReset().mockImplementation(function (options) { return options })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stops ICE monitoring on client error and discards pending stats', async () => {
+    vi.useFakeTimers()
+    let resolveStats: ((value: Map<string, Record<string, unknown>>) => void) | undefined
+    const getStats = vi.fn(() => new Promise((resolve) => { resolveStats = resolve }))
+    let transportCallbacks: Record<string, (...args: unknown[]) => void> = {}
+    mocks.SmallWebRTCTransport.mockImplementation(function (options) {
+      return { ...options, pc: { getStats } }
+    })
+    mocks.PipecatClient.mockImplementation(function (options) {
+      transportCallbacks = options.callbacks
+      return { connect: mocks.clientConnect, disconnect: mocks.clientDisconnect }
+    })
+    const onIcePathChanged = vi.fn()
+    const onTransportStateChanged = vi.fn()
+    const client = createRealtimeVoiceClient(
+      { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream,
+      { ...callbacks, onIcePathChanged, onTransportStateChanged },
+    )
+
+    transportCallbacks.onTransportStateChanged('connected')
+    expect(getStats).toHaveBeenCalledOnce()
+    transportCallbacks.onError(new Error('transport lost'))
+    resolveStats?.(new Map([
+      ['pair', { type: 'candidate-pair', selected: true, localCandidateId: 'local', remoteCandidateId: 'remote' }],
+      ['local', { type: 'local-candidate', candidateType: 'relay', protocol: 'udp' }],
+      ['remote', { type: 'remote-candidate', candidateType: 'host', protocol: 'udp' }],
+    ]))
+    await vi.advanceTimersByTimeAsync(3_000)
+    const statsCalls = getStats.mock.calls.length
+    const publishedPaths = [...onIcePathChanged.mock.calls]
+    await client.disconnect()
+
+    expect(onTransportStateChanged).toHaveBeenLastCalledWith('error')
+    expect(statsCalls).toBe(1)
+    expect(publishedPaths).toEqual([[null]])
   })
 
   it('reports the selected local and remote ICE candidate types', async () => {
