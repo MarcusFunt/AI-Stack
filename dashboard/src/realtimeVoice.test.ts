@@ -162,6 +162,23 @@ describe('createRealtimeVoiceClient', () => {
     expect(getUserMedia).not.toHaveBeenCalled()
   })
 
+  it('mutes and unmutes the already-captured microphone track', () => {
+    const track = { enabled: true } as MediaStreamTrack
+    const stream = { getAudioTracks: () => [track] } as unknown as MediaStream
+    const client = createRealtimeVoiceClient(stream, callbacks)
+    const options = mocks.SmallWebRTCTransport.mock.calls[0][0] as {
+      mediaManager: { isMicEnabled: boolean }
+    }
+
+    client.setMicrophoneEnabled(false)
+    expect(track.enabled).toBe(false)
+    expect(options.mediaManager.isMicEnabled).toBe(false)
+
+    client.setMicrophoneEnabled(true)
+    expect(track.enabled).toBe(true)
+    expect(options.mediaManager.isMicEnabled).toBe(true)
+  })
+
   it('posts offers to the same-origin proxy and keeps the ticket in a header', async () => {
     const stream = { getAudioTracks: () => [{ enabled: true }] } as unknown as MediaStream
     const client = createRealtimeVoiceClient(stream, callbacks)

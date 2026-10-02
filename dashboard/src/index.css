@@ -1678,6 +1678,25 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .app-topbar { position: static; min-height: 52px; padding: 9px 14px; }
   .topbar-context p, .topbar-chip:last-child { display: none; }
   .main-content { padding: 16px 14px 54px; }
+  .app-shell.voice-page-selected .app-topbar,
+  .app-shell.voice-page-selected .global-status-strip { display: none; }
+  .app-shell.voice-page-selected .main-content { padding: 10px 12px 40px; }
+  .app-shell.voice-call-active {
+    min-height: 100dvh;
+    background:
+      radial-gradient(ellipse at 50% 24%, rgba(100,119,207,.12), transparent 43%),
+      #0d121a;
+  }
+  .app-shell.voice-call-active .sidebar,
+  .app-shell.voice-call-active .app-topbar,
+  .app-shell.voice-call-active .global-status-strip { display: none; }
+  .app-shell.voice-call-active .main-shell { min-height: 100dvh; }
+  .app-shell.voice-call-active .main-content {
+    height: 100dvh;
+    min-height: 100dvh;
+    padding: 0;
+    overflow: hidden;
+  }
   .global-status-strip {
     grid-template-columns: repeat(2,minmax(0,1fr));
     margin-bottom: 16px;

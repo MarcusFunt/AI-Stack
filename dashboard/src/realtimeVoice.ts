@@ -37,6 +37,7 @@ export type RealtimeIcePath = {
 export type RealtimeVoiceClient = {
   connect: (connection: RealtimeVoiceConnection) => Promise<void>
   disconnect: () => Promise<void>
+  setMicrophoneEnabled: (enabled: boolean) => void
 }
 
 export function requestVoiceMicrophone(): Promise<MediaStream> {
@@ -109,7 +110,11 @@ function createCapturedStreamMediaManager(stream: MediaStream) {
   if (!microphoneTrack) throw new Error('The microphone stream has no audio track.')
 
   let microphoneEnabled = microphoneTrack.enabled
-  return {
+  const setMicrophoneEnabled = (enabled: boolean) => {
+    microphoneEnabled = enabled
+    microphoneTrack.enabled = enabled
+  }
+  const mediaManager = {
     supportsScreenShare: false,
     setUserAudioCallback: (_callback: (data: ArrayBuffer) => void) => {},
     setClientOptions: (_options: unknown) => {},
@@ -128,10 +133,7 @@ function createCapturedStreamMediaManager(stream: MediaStream) {
     selectedMic: {},
     selectedCam: {},
     selectedSpeaker: {},
-    enableMic: (enabled: boolean) => {
-      microphoneEnabled = enabled
-      microphoneTrack.enabled = enabled
-    },
+    enableMic: setMicrophoneEnabled,
     enableCam: (_enabled: boolean) => {},
     enableScreenShare: (_enabled: boolean) => {},
     get isCamEnabled() { return false },
@@ -139,12 +141,14 @@ function createCapturedStreamMediaManager(stream: MediaStream) {
     get isSharingScreen() { return false },
     tracks: () => ({ local: { audio: microphoneTrack }, bot: {} }),
   } as unknown as NonNullable<SmallWebRTCTransportConstructorOptions['mediaManager']>
+  return { mediaManager, setMicrophoneEnabled }
 }
 
 export function createRealtimeVoiceClient(
   stream: MediaStream,
   callbacks: RealtimeVoiceCallbacks,
 ): RealtimeVoiceClient {
+  const capturedMedia = createCapturedStreamMediaManager(stream)
   const transport = new class extends SmallWebRTCTransport {
     override handleMessage(message: string) {
       dispatchVoiceControlMessage(
@@ -154,7 +158,7 @@ export function createRealtimeVoiceClient(
       )
     }
   }({
-    mediaManager: createCapturedStreamMediaManager(stream),
+    mediaManager: capturedMedia.mediaManager,
   })
   let candidatePoll: ReturnType<typeof setInterval> | undefined
   let candidateMonitorGeneration = 0
@@ -221,5 +225,6 @@ export function createRealtimeVoiceClient(
       stopIcePathMonitor()
       await client.disconnect()
     },
+    setMicrophoneEnabled: capturedMedia.setMicrophoneEnabled,
   }
 }

@@ -458,6 +458,7 @@ function SystemPanel(props: {
 
 export default function App() {
   const [section, setSection] = useState<Section>('setup')
+  const [voiceCallActive, setVoiceCallActive] = useState(false)
   const [status, setStatus] = useState<SupervisorStatus | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -585,7 +586,7 @@ export default function App() {
     section === 'speech' ? <SpeechPanel /> :
     section === 'voice' ? (
       <Suspense fallback={<div className="workspace"><div className="tool-card">Loading realtime voice test…</div></div>}>
-        <RealtimeVoicePanel />
+        <RealtimeVoicePanel onCallModeChange={setVoiceCallActive} />
       </Suspense>
     ) :
     section === 'vision' ? <VisionPanel /> :
@@ -603,7 +604,7 @@ export default function App() {
   const meta = sectionMeta[section]
 
   return (
-    <div className="app-shell">
+    <div className={'app-shell' + (section === 'voice' ? ' voice-page-selected' : '') + (voiceCallActive ? ' voice-call-active' : '')}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><BrainCircuit size={19} /></div>

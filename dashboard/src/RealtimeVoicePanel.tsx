@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Mic, Square, Volume2 } from 'lucide-react'
+import {
+  AudioLines, ChevronDown, Clock3, Mic, MicOff, PhoneOff, Volume2,
+} from 'lucide-react'
 import { localAI } from './api'
 import {
   createRealtimeVoiceClient,
@@ -13,12 +15,22 @@ import './App.css'
 type VoiceState = 'idle' | 'permission' | 'connecting' | 'connected'
   | 'signaling-failure' | 'ice-timeout' | 'disconnected' | 'stopped'
 
+type ConversationEntry = {
+  id: number
+  role: 'user' | 'assistant'
+  text: string
+}
+
+type RealtimeVoicePanelProps = {
+  onCallModeChange?: (active: boolean) => void
+}
+
 const ICE_TIMEOUT_MS = 30_000
 
 function settingLabel(value: boolean | string | undefined): string {
-  if (value === undefined) return 'unavailable'
-  if (value === true) return 'on'
-  if (value === false) return 'off'
+  if (value === undefined) return 'Unavailable'
+  if (value === true) return 'On'
+  if (value === false) return 'Off'
   return value
 }
 
@@ -30,12 +42,58 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object'
 }
 
-export default function RealtimeVoicePanel() {
+function formatDuration(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0')
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0')
+  return `${minutes}:${seconds}`
+}
+
+function appendAssistantText(
+  entries: ConversationEntry[],
+  text: string,
+  newId: number,
+): ConversationEntry[] {
+  const next = [...entries]
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    if (next[index].role === 'assistant') {
+      next[index] = { ...next[index], text: next[index].text + text }
+      return next
+    }
+  }
+  return [...next, { id: newId, role: 'assistant', text }]
+}
+
+function replaceAssistantText(
+  entries: ConversationEntry[],
+  text: string,
+  newId: number,
+): ConversationEntry[] {
+  const next = [...entries]
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    if (next[index].role === 'assistant') {
+      next[index] = { ...next[index], text }
+      return next
+    }
+  }
+  return [...next, { id: newId, role: 'assistant', text }]
+}
+
+function icePathLabel(icePath: RealtimeIcePath | null, connected: boolean): string {
+  if (!icePath) return connected ? 'Waiting for selected candidate pair' : 'Not connected'
+  return `Local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()}${icePath.localRelayProtocol ? ` via TURN ${icePath.localRelayProtocol.toUpperCase()}` : ''} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
+}
+
+export default function RealtimeVoicePanel({ onCallModeChange }: RealtimeVoicePanelProps) {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [micSettings, setMicSettings] = useState<MediaTrackSettings | null>(null)
-  const [userTranscript, setUserTranscript] = useState('')
-  const [assistantTranscript, setAssistantTranscript] = useState('')
+  const [conversation, setConversation] = useState<ConversationEntry[]>([])
+  const [assistantResponding, setAssistantResponding] = useState(false)
+  const [microphoneMuted, setMicrophoneMuted] = useState(false)
+  const [conversationOpen, setConversationOpen] = useState(false)
+  const [playbackBlocked, setPlaybackBlocked] = useState(false)
+  const [liveAnnouncement, setLiveAnnouncement] = useState('')
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [icePath, setIcePath] = useState<RealtimeIcePath | null>(null)
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const clientRef = useRef<RealtimeVoiceClient | null>(null)
@@ -44,6 +102,9 @@ export default function RealtimeVoicePanel() {
   const attemptRef = useRef(0)
   const stateRef = useRef<VoiceState>('idle')
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const messageIdRef = useRef(0)
+  const shouldAutoScrollRef = useRef(true)
 
   const updateState = (next: VoiceState) => {
     stateRef.current = next
@@ -56,13 +117,31 @@ export default function RealtimeVoicePanel() {
       value.type === 'conversation.item.input_audio_transcription.completed'
       && typeof value.transcript === 'string'
     ) {
-      setUserTranscript(value.transcript)
+      const entry: ConversationEntry = {
+        id: ++messageIdRef.current,
+        role: 'user',
+        text: value.transcript,
+      }
+      setConversation((current) => [...current, entry])
+      setLiveAnnouncement(`You said: ${value.transcript}`)
     } else if (value.type === 'response.output_text.delta' && typeof value.delta === 'string') {
-      setAssistantTranscript((current) => current + value.delta)
-    } else if (value.type === 'response.done' && typeof value.output_text === 'string') {
-      setAssistantTranscript(value.output_text)
+      const id = ++messageIdRef.current
+      setConversation((current) => appendAssistantText(current, value.delta as string, id))
+    } else if (value.type === 'response.done') {
+      if (typeof value.output_text === 'string') {
+        const id = ++messageIdRef.current
+        setConversation((current) => replaceAssistantText(current, value.output_text as string, id))
+        setLiveAnnouncement(`Assistant: ${value.output_text}`)
+      }
+      setAssistantResponding(false)
     } else if (value.type === 'response.created') {
-      setAssistantTranscript('')
+      setAssistantResponding(true)
+      const entry: ConversationEntry = {
+        id: ++messageIdRef.current,
+        role: 'assistant',
+        text: '',
+      }
+      setConversation((current) => [...current, entry])
     }
   }
 
@@ -74,8 +153,12 @@ export default function RealtimeVoicePanel() {
     clientRef.current = null
     streamRef.current = null
     setRemoteStream(null)
+    setPlaybackBlocked(false)
     setIcePath(null)
     setErrorMessage('')
+    setMicrophoneMuted(false)
+    setAssistantResponding(false)
+    setConversationOpen(false)
     try {
       await client?.disconnect()
     } catch {
@@ -91,8 +174,14 @@ export default function RealtimeVoicePanel() {
     const attempt = ++attemptRef.current
     setErrorMessage('')
     setMicSettings(null)
-    setUserTranscript('')
-    setAssistantTranscript('')
+    setConversation([])
+    messageIdRef.current = 0
+    setAssistantResponding(false)
+    setMicrophoneMuted(false)
+    setConversationOpen(false)
+    setPlaybackBlocked(false)
+    setLiveAnnouncement('')
+    setElapsedSeconds(0)
     setRemoteStream(null)
     setIcePath(null)
     updateState('permission')
@@ -107,10 +196,10 @@ export default function RealtimeVoicePanel() {
         updateState('permission')
         const name = isRecord(error) && typeof error.name === 'string' ? error.name : ''
         setErrorMessage(name === 'NotAllowedError' || name === 'PermissionDeniedError'
-          ? 'Microphone access was denied. Allow microphone access and retry.'
+          ? 'Microphone access was denied. Allow microphone access in your browser settings, then try again.'
           : name === 'NotFoundError'
-            ? 'No microphone is available in this browser.'
-            : 'Microphone access could not be started.')
+            ? 'No microphone is available in this browser. Connect a microphone and try again.'
+            : 'Microphone access could not be started. Check your browser settings and try again.')
         return
       }
       if (attempt !== attemptRef.current) {
@@ -136,7 +225,9 @@ export default function RealtimeVoicePanel() {
             clientRef.current = null
             streamRef.current = null
             setRemoteStream(null)
+            setPlaybackBlocked(false)
             setIcePath(null)
+            setMicrophoneMuted(false)
             const cleanup = (async () => {
               try {
                 await activeClient?.disconnect()
@@ -147,7 +238,7 @@ export default function RealtimeVoicePanel() {
               }
               if (attemptRef.current !== cleanupAttempt) return
               updateState('signaling-failure')
-              setErrorMessage('The WebRTC connection reported an error. Retry starts a fresh session.')
+              setErrorMessage('The WebRTC connection reported an error. Retry starts a fresh voice session.')
             })()
             cleanupRef.current = cleanup
             const clearCleanup = () => {
@@ -162,13 +253,18 @@ export default function RealtimeVoicePanel() {
           stopTracks(streamRef.current)
           streamRef.current = null
           setRemoteStream(null)
+          setPlaybackBlocked(false)
           setIcePath(null)
+          setMicrophoneMuted(false)
           updateState('disconnected')
-          setErrorMessage('The voice connection ended.')
+          setErrorMessage('The voice connection ended. Check the network connection and retry.')
         },
         onServerMessage: handleServerMessage,
         onRemoteStream: (next) => {
-          if (attempt === attemptRef.current) setRemoteStream(next)
+          if (attempt === attemptRef.current) {
+            setRemoteStream(next)
+            if (!next) setPlaybackBlocked(false)
+          }
         },
         onIcePathChanged: (path) => {
           if (attempt === attemptRef.current) setIcePath(path)
@@ -213,81 +309,219 @@ export default function RealtimeVoicePanel() {
     }
   }
 
+  const toggleMicrophone = () => {
+    if (!connected) return
+    const nextMuted = !microphoneMuted
+    clientRef.current?.setMicrophoneEnabled(!nextMuted)
+    setMicrophoneMuted(nextMuted)
+  }
+
+  const retryAudioPlayback = async () => {
+    try {
+      await audioRef.current?.play()
+      setPlaybackBlocked(false)
+    } catch {
+      setPlaybackBlocked(true)
+    }
+  }
+
+  const handleTranscriptScroll = () => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    shouldAutoScrollRef.current = transcript.scrollHeight
+      - transcript.scrollTop
+      - transcript.clientHeight < 56
+  }
+
   useEffect(() => {
     const audio = audioRef.current
-    if (audio) audio.srcObject = remoteStream
+    if (!audio) return
+    audio.srcObject = remoteStream
+    if (!remoteStream) return
+    void audio.play().then(() => setPlaybackBlocked(false)).catch(() => setPlaybackBlocked(true))
   }, [remoteStream])
 
-  useEffect(() => () => {
-    attemptRef.current += 1
-    void clientRef.current?.disconnect().catch(() => {})
-    stopTracks(streamRef.current)
-    clientRef.current = null
-    streamRef.current = null
-  }, [])
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (transcript && shouldAutoScrollRef.current) transcript.scrollTop = transcript.scrollHeight
+  }, [conversation, conversationOpen])
 
-  const statusLabels: Record<VoiceState, string> = {
-    idle: 'Idle',
-    permission: 'Requesting microphone',
-    connecting: 'Connecting',
-    connected: 'Connected',
-    'signaling-failure': 'Signaling failed',
-    'ice-timeout': 'ICE connection timed out',
-    disconnected: 'Disconnected',
-    stopped: 'Stopped',
-  }
   const busy = (voiceState === 'permission' || voiceState === 'connecting') && !errorMessage
   const connected = voiceState === 'connected'
+
+  useEffect(() => {
+    onCallModeChange?.(busy || connected)
+  }, [busy, connected, onCallModeChange])
+
+  useEffect(() => () => onCallModeChange?.(false), [onCallModeChange])
+
+  useEffect(() => {
+    if (!connected) return
+    const startedAt = Date.now()
+    const updateElapsed = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000))
+    updateElapsed()
+    const timer = window.setInterval(updateElapsed, 1000)
+    return () => window.clearInterval(timer)
+  }, [connected])
+
+  const statusLabels: Record<VoiceState, string> = {
+    idle: 'Ready for a voice call',
+    permission: 'Requesting microphone',
+    connecting: 'Connecting securely',
+    connected: 'Connected',
+    'signaling-failure': 'Connection failed',
+    'ice-timeout': 'Network connection timed out',
+    disconnected: 'Disconnected',
+    stopped: 'Call ended',
+  }
+  const callStatus = busy
+    ? statusLabels[voiceState]
+    : connected
+      ? assistantResponding ? 'Assistant is replying' : 'Connected · Speak naturally'
+      : statusLabels[voiceState]
+  const callModeClass = busy || connected ? ' voice-call-mode' : ''
+  const conversationClass = conversationOpen ? ' voice-conversation-open' : ''
+
   return (
-    <section className="workspace realtime-voice-workspace">
-      <div className="workspace-head">
-        <div><span className="eyebrow">REALTIME VOICE</span><h2>Test browser voice over WebRTC.</h2></div>
+    <section className={'workspace realtime-voice-workspace' + callModeClass + conversationClass}>
+      <div className="workspace-head voice-page-heading">
+        <div>
+          <span className="eyebrow">REALTIME VOICE</span>
+          <h2>Voice call</h2>
+          <p>Try a natural two-way voice conversation in your browser.</p>
+        </div>
+        <span className={'voice-state-pill voice-state-' + voiceState} role="status" aria-live="polite">
+          {voiceState === 'permission' && errorMessage ? 'Microphone permission required' : statusLabels[voiceState]}
+        </span>
       </div>
+
       <div className="voice-grid">
         <div className="tool-card voice-call-card">
           <div className="voice-card-heading">
-            <div><span className="eyebrow">BROWSER SESSION</span><h3>Microphone and connection</h3></div>
-            <span className={'voice-state-pill voice-state-' + voiceState} role="status" aria-live="polite">
-              {voiceState === 'permission' && errorMessage ? 'Microphone permission required' : statusLabels[voiceState]}
+            <div><span className="eyebrow">BROWSER SESSION</span><h3>Call controls</h3></div>
+            <span className={'voice-state-pill voice-state-' + voiceState} aria-hidden="true">
+              {statusLabels[voiceState]}
             </span>
           </div>
-          <p className="voice-help">The browser asks for microphone access, then negotiates WebRTC through the authenticated Dashboard proxy.</p>
-          <div className="voice-actions">
-            {!busy && !connected && <button className="primary no-margin" onClick={() => void start()}>
-              <Mic size={15} />{voiceState === 'idle' || voiceState === 'stopped' ? 'Start voice test' : 'Retry'}
-            </button>}
-            {(busy || connected) && <button className="danger-button no-margin" onClick={() => void stop()}>
-              <Square size={14} />Stop voice test
-            </button>}
+
+          <div className="voice-call-identity">
+            <div className="voice-call-orb-wrap">
+              <div className={'voice-orb' + (connected ? assistantResponding ? ' is-speaking' : ' is-connected' : busy ? ' is-connecting' : '')} aria-hidden="true">
+                <span className="voice-orb-ring voice-orb-ring-one" />
+                <span className="voice-orb-ring voice-orb-ring-two" />
+                <span className="voice-orb-core"><AudioLines size={34} strokeWidth={1.6} /></span>
+              </div>
+            </div>
+            <h3 className="voice-assistant-name">AI Assistant</h3>
+            <p className="voice-call-status">{callStatus}</p>
+            <p className="voice-call-duration">
+              {connected && <><Clock3 size={14} />{formatDuration(elapsedSeconds)}</>}
+              {busy && <><span className="voice-status-dot" />{voiceState === 'permission' ? 'Waiting for microphone access' : 'Setting up your call'}</>}
+            </p>
           </div>
+
+          <p className="voice-help">Allow microphone access to begin. Your words appear after each turn is recognized, and assistant replies stream as they are generated.</p>
           {errorMessage && <div className="voice-error" role="alert">{errorMessage}</div>}
-          <div className="voice-settings" aria-label="Microphone processing settings">
-            <div><span>Echo cancellation: {settingLabel(micSettings?.echoCancellation)}</span></div>
-            <div><span>Noise suppression: {settingLabel(micSettings?.noiseSuppression)}</span></div>
-            <div><span>Auto gain control: {settingLabel(micSettings?.autoGainControl)}</span></div>
+          {playbackBlocked && connected && (
+            <div className="voice-playback-warning" role="status">
+              <span>Tap to enable assistant audio.</span>
+              <button className="secondary no-margin" onClick={() => void retryAudioPlayback()}>Enable audio</button>
+            </div>
+          )}
+
+          <div className="voice-actions">
+            {connected && (
+              <button
+                className={'voice-round-action voice-mute-action' + (microphoneMuted ? ' is-muted' : '')}
+                onClick={toggleMicrophone}
+                aria-pressed={microphoneMuted}
+                aria-label={microphoneMuted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {microphoneMuted ? <MicOff size={21} /> : <Mic size={21} />}
+                <span>{microphoneMuted ? 'Unmute' : 'Mute'}</span>
+              </button>
+            )}
+
+            {connected && (
+              <button
+                className="voice-round-action voice-conversation-toggle"
+                onClick={() => setConversationOpen((open) => !open)}
+                aria-expanded={conversationOpen}
+                aria-controls="voice-conversation-panel"
+              >
+                <AudioLines size={21} />
+                <span>{conversationOpen ? 'Hide text' : 'Conversation'}</span>
+              </button>
+            )}
+
+            {!busy && !connected && (
+              <button className="primary no-margin voice-start-button" onClick={() => void start()}>
+                <Mic size={18} />{voiceState === 'idle' || voiceState === 'stopped' ? 'Start a voice call' : 'Try again'}
+              </button>
+            )}
+
+            {(busy || connected) && (
+              <button className="danger-button no-margin voice-end-button" onClick={() => void stop()}>
+                <PhoneOff size={19} />
+                <span className="voice-desktop-action-label">Stop voice test</span>
+                <span className="voice-mobile-action-label">End call</span>
+              </button>
+            )}
+          </div>
+
+          <div className="voice-sr-status" role="status" aria-live="polite" aria-atomic="true">
+            {liveAnnouncement}
           </div>
         </div>
 
-        <div className="tool-card voice-transcript-card">
-          <div className="voice-card-heading">
-            <div><span className="eyebrow">LIVE OUTPUT</span><h3>Conversation</h3></div>
-            <Volume2 size={18} aria-hidden="true" />
+        <section
+          className="tool-card voice-transcript-card"
+          id="voice-conversation-panel"
+          aria-label="Conversation and connection details"
+        >
+          <div className="voice-card-heading voice-transcript-heading">
+            <div><span className="eyebrow">SESSION TRANSCRIPT</span><h3>Conversation</h3></div>
+            <button className="voice-conversation-close" onClick={() => setConversationOpen(false)} aria-label="Close conversation">
+              <ChevronDown size={20} />
+            </button>
+            <Volume2 size={19} aria-hidden="true" />
           </div>
-          <div className="voice-transcript" aria-live="polite">
-            {userTranscript && <p><strong>You</strong><span>{userTranscript}</span></p>}
-            {assistantTranscript && <p><strong>Assistant</strong><span>{assistantTranscript}</span></p>}
-            {!userTranscript && !assistantTranscript && <p className="voice-empty">Transcript text appears here during a call.</p>}
+          <div className="voice-transcript" ref={transcriptRef} onScroll={handleTranscriptScroll} role="log" aria-live="off" aria-relevant="additions text">
+            {conversation.map((entry) => (
+              <article className={'voice-message voice-message-' + entry.role} key={entry.id}>
+                <strong>{entry.role === 'user' ? 'You' : 'AI Assistant'}</strong>
+                <p>{entry.text || (assistantResponding ? 'Thinking through a reply…' : 'No text returned for this reply.')}</p>
+              </article>
+            ))}
+            {conversation.length === 0 && (
+              <p className="voice-empty">Your conversation appears here. User text is shown after each turn is recognized.</p>
+            )}
           </div>
-          <audio ref={audioRef} aria-label="Assistant audio" autoPlay controls playsInline />
-          <div className="voice-audio-state"><Volume2 size={14} /> Assistant speech plays through this browser.</div>
-          <div className="voice-audio-state" aria-live="polite">
-            ICE path: {icePath
-              ? `local ${icePath.localType} over ${icePath.localProtocol.toUpperCase()}${icePath.localRelayProtocol ? ` via TURN ${icePath.localRelayProtocol.toUpperCase()}` : ''} → remote ${icePath.remoteType} over ${icePath.remoteProtocol.toUpperCase()}`
-              : 'waiting for selected candidate pair'}
-          </div>
-        </div>
+          <audio
+            ref={audioRef}
+            aria-label="Assistant audio"
+            autoPlay
+            controls
+            playsInline
+            onPlaying={() => setPlaybackBlocked(false)}
+          />
+          <div className="voice-audio-state"><Volume2 size={15} />Assistant speech plays through this browser.</div>
+
+          <details className="voice-details">
+            <summary><span>Microphone &amp; connection details</span><ChevronDown size={16} /></summary>
+            <div className="voice-settings" aria-label="Microphone processing settings">
+              <div><span>Echo cancellation</span><strong>{settingLabel(micSettings?.echoCancellation)}</strong></div>
+              <div><span>Noise suppression</span><strong>{settingLabel(micSettings?.noiseSuppression)}</strong></div>
+              <div><span>Auto gain control</span><strong>{settingLabel(micSettings?.autoGainControl)}</strong></div>
+            </div>
+            <div className="voice-audio-state voice-ice-path" aria-live="polite">
+              <span className="voice-detail-label">Selected ICE path</span>
+              <span>{icePathLabel(icePath, connected)}</span>
+            </div>
+            <p className="voice-privacy-note">The short-lived session ticket stays in the signaling request header. The browser never receives the gateway key or TURN secret.</p>
+          </details>
+        </section>
       </div>
-      <p className="voice-privacy-note">A short-lived session ticket stays in the signaling request header. The test page does not expose the gateway key or TURN secret.</p>
     </section>
   )
 }
