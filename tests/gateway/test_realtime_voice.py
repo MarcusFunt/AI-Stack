@@ -162,6 +162,49 @@ class GatewayRealtimeVoiceTests(unittest.TestCase):
         self.assertEqual(result["offer_url"], "/v1/realtime/sessions/session-123/offer")
         self.assertNotIn("voice:8000", str(result))
 
+    def test_session_turn_url_uses_the_authenticated_tailnet_hostname(self):
+        original_post = self.gateway.httpx.AsyncClient.post
+        original_host_agent = self.gateway.host_agent
+        observed = {}
+
+        async def fake_post(client, url, **_kwargs):
+            return self.gateway.httpx.Response(200, json={
+                "id": "session-123",
+                "client_secret": {"value": "one-use-ticket", "expires_at": 2000},
+                "ice_servers": [{
+                    "urls": "turns:turn-check.invalid:8447?transport=tcp",
+                    "username": "short-lived-username",
+                    "credential": "short-lived-password",
+                }],
+            })
+
+        async def fake_host_agent(method, path, payload=None, timeout=30):
+            observed["request"] = (method, path)
+            return {"voice_turn_enabled": True, "dns_name": "phone-call.tailnet.ts.net"}
+
+        self.gateway.httpx.AsyncClient.post = fake_post
+        self.gateway.host_agent = fake_host_agent
+        try:
+            response = self.client.post(
+                "/v1/realtime/sessions",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                json={"language": "en"},
+            )
+        finally:
+            self.gateway.httpx.AsyncClient.post = original_post
+            self.gateway.host_agent = original_host_agent
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(observed["request"], ("GET", "/tailscale/status"))
+        self.assertEqual(
+            response.json()["ice_servers"][0],
+            {
+                "urls": "turns:phone-call.tailnet.ts.net:8447?transport=tcp",
+                "username": "short-lived-username",
+                "credential": "short-lived-password",
+            },
+        )
+
     def test_offer_proxy_authenticates_bounds_and_forwards_ticket_out_of_url(self):
         observed = {}
         original_post = self.gateway.httpx.AsyncClient.post

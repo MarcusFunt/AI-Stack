@@ -1601,6 +1601,49 @@ async def events(websocket: WebSocket):
         return
 
 
+def _retarget_turn_ice_servers(ice_servers: list, hostname: str) -> None:
+    hostname = hostname.rstrip(".")
+    if not re.fullmatch(
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*",
+        hostname,
+    ):
+        return
+
+    for server in ice_servers:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls")
+        is_list = isinstance(urls, list)
+        candidates = urls if is_list else [urls]
+        if not all(isinstance(url, str) for url in candidates):
+            continue
+        rewritten = [
+            re.sub(
+                r"^(turns?:)[^:/?#]+",
+                lambda match: match.group(1) + hostname,
+                url,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            for url in candidates
+        ]
+        server["urls"] = rewritten if is_list else rewritten[0]
+
+
+def _has_turn_ice_server(ice_servers: list) -> bool:
+    for server in ice_servers:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls")
+        candidates = [urls] if isinstance(urls, str) else urls if isinstance(urls, list) else []
+        if any(
+            isinstance(url, str) and url.lower().startswith(("turn:", "turns:"))
+            for url in candidates
+        ):
+            return True
+    return False
+
+
 @app.post("/v1/realtime/sessions")
 async def create_realtime_session(request: Request):
     raw = await read_body_limited(request, 16 * 1024, "voice session configuration")
@@ -1634,6 +1677,20 @@ async def create_realtime_session(request: Request):
         or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", result["id"])
     ):
         raise HTTPException(502, "realtime voice service returned an invalid session")
+
+    ice_servers = result.get("ice_servers")
+    if isinstance(ice_servers, list) and _has_turn_ice_server(ice_servers):
+        try:
+            network = await host_agent("GET", "/tailscale/status", timeout=3)
+        except HTTPException:
+            network = {}
+        hostname = network.get("dns_name") if isinstance(network, dict) else None
+        if (
+            isinstance(network, dict)
+            and network.get("voice_turn_enabled") is True
+            and isinstance(hostname, str)
+        ):
+            _retarget_turn_ice_servers(ice_servers, hostname)
 
     scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https" else "ws"
     result["ws_url"] = f"{scheme}://{request.url.netloc}/v1/realtime?session_id={result['id']}"

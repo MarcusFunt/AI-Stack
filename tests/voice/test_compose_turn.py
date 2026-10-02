@@ -84,10 +84,11 @@ class ComposeTurnServiceTests(unittest.TestCase):
         self.assertIn('$turnRestartPolicy = "no"', script)
         self.assertIn('$turnRestartPolicy = "unless-stopped"', script)
         enabled_branch = script.split(
-            'if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) {', 1
+            'if ($env:VOICE_TURN_SHARED_SECRET) {', 1
         )[1].split("}", 1)[0]
         self.assertIn('$turnProxyEnabled = "1"', enabled_branch)
         self.assertIn('$turnRestartPolicy = "unless-stopped"', enabled_branch)
+        self.assertIn("$env:VOICE_TURN_HOSTNAME = Get-TailnetDnsName", enabled_branch)
         self.assertIn('SetEnvironmentVariable("TURN_RESTART_POLICY", $turnRestartPolicy, "Process")', script)
         self.assertIn('SetEnvironmentVariable("TURN_RESTART_POLICY", $previousTurnRestartPolicy, "Process")', script)
 
@@ -144,10 +145,40 @@ class ComposeTurnServiceTests(unittest.TestCase):
         script = script_path.read_text(encoding="utf-8")
 
         self.assertIn('if ($Service -ne "coturn") { Start-ControlPlane }', script)
-        self.assertIn("$env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME", script)
+        self.assertIn("if ($env:VOICE_TURN_SHARED_SECRET) {", script)
         self.assertIn('"up","--build","-d","coturn","turn-proxy"', script)
         self.assertIn('"stop","coturn","turn-proxy"', script)
         self.assertIn('SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")', script)
+
+    def test_starting_turn_recreates_voice_with_the_relay_environment(self):
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "ai.ps1"
+        script = script_path.read_text(encoding="utf-8")
+        turn_branch = script.split('elseif ($Service -eq "coturn") {', 1)[1].split(
+            "\n    }\n    elseif ($Service -ne \"gateway\")", 1
+        )[0]
+
+        self.assertIn(
+            'if ($env:VOICE_TURN_SHARED_SECRET) {',
+            turn_branch,
+        )
+        self.assertIn(
+            'Invoke-Compose -CommandArgs @("up","-d","voice")',
+            turn_branch,
+        )
+
+    def test_turn_start_uses_the_authenticated_tailnet_dns_name(self):
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "ai.ps1"
+        script = script_path.read_text(encoding="utf-8")
+        dns_helper = script.split("function Get-TailnetDnsName {", 1)[1].split(
+            "\nfunction ", 1
+        )[0]
+        turn_branch = script.split('elseif ($Service -eq "coturn") {', 1)[1].split(
+            "\n    }\n    elseif ($Service -ne \"gateway\")", 1
+        )[0]
+
+        self.assertIn("/control/network", dns_helper)
+        self.assertIn('os.environ["AI_API_KEY"]', dns_helper)
+        self.assertIn("$env:VOICE_TURN_HOSTNAME = Get-TailnetDnsName", turn_branch)
 
     def test_coturn_keeps_all_capabilities_dropped_except_bind_service(self):
         compose_path = Path(__file__).resolve().parents[2] / "compose.yaml"

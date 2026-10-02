@@ -140,6 +140,13 @@ function Wait-Dashboard {
   throw "dashboard did not become ready at http://127.0.0.1:3000"
 }
 
+function Get-TailnetDnsName {
+  $code = 'import json,os,urllib.request; request=urllib.request.Request("http://127.0.0.1:8000/control/network",headers={"Authorization":"Bearer "+os.environ["AI_API_KEY"]}); print(json.load(urllib.request.urlopen(request,timeout=10)).get("dns_name",""))'
+  $dnsName = (& docker exec ai-stack-gateway python -c $code).Trim()
+  if($LASTEXITCODE -ne 0 -or -not $dnsName) { throw "could not resolve the authenticated Tailnet DNS name" }
+  return $dnsName.TrimEnd(".")
+}
+
 function Test-HostAgent {
   try {
     $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "host_agent.py"))
@@ -299,19 +306,26 @@ switch ($Action) {
     elseif ($Service -eq "coturn") {
       $turnProxyEnabled = "0"
       $turnRestartPolicy = "no"
-      if ($env:VOICE_TURN_SHARED_SECRET -and $env:VOICE_TURN_HOSTNAME) {
+      $previousTurnHostname = $env:VOICE_TURN_HOSTNAME
+      if ($env:VOICE_TURN_SHARED_SECRET) {
         $turnProxyEnabled = "1"
         $turnRestartPolicy = "unless-stopped"
+        $env:VOICE_TURN_HOSTNAME = Get-TailnetDnsName
       }
       $previousTurnRestartPolicy = $env:TURN_RESTART_POLICY
       [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $turnProxyEnabled, "Process")
       [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $turnRestartPolicy, "Process")
       try {
         Invoke-Compose -CommandArgs @("up","--build","-d","coturn","turn-proxy")
+        if ($env:VOICE_TURN_SHARED_SECRET) {
+          # Apply the same runtime ICE settings to voice; Compose recreates it only if config changed.
+          Invoke-Compose -CommandArgs @("up","-d","voice")
+        }
       }
       finally {
         [Environment]::SetEnvironmentVariable("TURN_PROXY_ENABLED", $null, "Process")
         [Environment]::SetEnvironmentVariable("TURN_RESTART_POLICY", $previousTurnRestartPolicy, "Process")
+        [Environment]::SetEnvironmentVariable("VOICE_TURN_HOSTNAME", $previousTurnHostname, "Process")
       }
     }
     elseif ($Service -ne "gateway") { Invoke-Supervisor "POST" "/ensure/$Service" }
