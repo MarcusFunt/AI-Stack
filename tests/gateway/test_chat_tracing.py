@@ -174,12 +174,26 @@ class GatewayChatTracingTests(unittest.TestCase):
                 "/v1/audio/transcriptions",
                 headers=headers,
                 files={"file": ("sample.wav", b"audio bytes", "audio/wav")},
-                data={"language": "en", "response_format": "text"},
+                data={
+                    "language": "en",
+                    "prompt": "Names: Alex and Morgan.",
+                    "temperature": "0.2",
+                    "response_format": "text",
+                    "timestamp_granularities[]": ["segment", "word"],
+                },
             )
             speech = self.client.post(
                 "/v1/audio/speech",
                 headers=headers,
-                json={"model": "local-tts", "input": "hello", "voice": "alloy", "response_format": "wav"},
+                json={
+                    "model": "local-tts",
+                    "input": "hello",
+                    "voice": "Aiden",
+                    "response_format": "wav",
+                    "language": "English",
+                    "instruct": "Warmly, with a short pause before the last word.",
+                    "speed": 1.15,
+                },
             )
             vision = self.client.post(
                 "/v1/vision/analyze",
@@ -197,13 +211,48 @@ class GatewayChatTracingTests(unittest.TestCase):
             ("vlm", "/v1/vision/analyze"),
         ])
         self.assertEqual(observed[0]["invocation"].input.data["upload"]["mime_type"], "audio/wav")
+        self.assertEqual(observed[0]["invocation"].input.data["timestamp_granularities[]"], ["segment", "word"])
+        self.assertIn(b"prompt", observed[0]["body"])
+        self.assertIn(b"temperature", observed[0]["body"])
         self.assertEqual(observed[1]["invocation"].input.text, "hello")
+        self.assertEqual(observed[1]["invocation"].options.data["language"], "English")
+        self.assertTrue(observed[1]["invocation"].options.data["has_expressive_instructions"])
+        self.assertEqual(json.loads(observed[1]["body"])["instruct"], "Warmly, with a short pause before the last word.")
         self.assertEqual(observed[2]["invocation"].input.data["image"]["mime_type"], "image/png")
         self.assertIn(b"audio bytes", observed[0]["body"])
         self.assertIn(b"png bytes", observed[2]["body"])
         self.assertIn("traceparent", transcription.headers)
         self.assertIn("traceparent", speech.headers)
         self.assertIn("traceparent", vision.headers)
+
+    def test_speech_rejects_non_english_language_and_unknown_voice(self):
+        headers = {"Authorization": "Bearer test-only-gateway-key"}
+        non_english = self.client.post(
+            "/v1/audio/speech",
+            headers=headers,
+            json={"model": "local-tts", "input": "hello", "voice": "Aiden", "language": "Chinese"},
+        )
+        unknown_voice = self.client.post(
+            "/v1/audio/speech",
+            headers=headers,
+            json={"model": "local-tts", "input": "hello", "voice": "alloy"},
+        )
+
+        self.assertEqual(non_english.status_code, 400)
+        self.assertIn("English", non_english.json()["detail"])
+        self.assertEqual(unknown_voice.status_code, 400)
+        self.assertIn("voice", unknown_voice.json()["detail"])
+
+    def test_capabilities_describe_audio_api_features(self):
+        response = self.client.get("/v1/capabilities", headers={"Authorization": "Bearer test-only-gateway-key"})
+
+        self.assertEqual(response.status_code, 200)
+        audio = response.json()["audio"]
+        self.assertIn("instruct", audio["speech"]["parameters"])
+        self.assertEqual(audio["speech"]["language"], "English")
+        self.assertIn("prompt", audio["transcription"]["parameters"])
+        self.assertIn("word", audio["transcription"]["timestamp_granularities"])
+        self.assertEqual(audio["transcription"]["response_formats"], ["json", "srt", "text", "verbose_json", "vtt"])
 
     def test_backend_failure_keeps_existing_http_error_semantics(self):
         original = self.gateway.forward_buffered

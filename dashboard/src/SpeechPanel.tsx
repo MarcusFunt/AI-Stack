@@ -3,6 +3,18 @@ import { CircleStop, Mic, RefreshCw, Volume2 } from 'lucide-react'
 import { localAI } from './api'
 import './SpeechPanel.css'
 
+const QWEN_VOICES = [
+  { id: 'Aiden', label: 'Aiden — clear American male' },
+  { id: 'Ryan', label: 'Ryan — dynamic male' },
+  { id: 'Vivian', label: 'Vivian — bright female' },
+  { id: 'Serena', label: 'Serena — warm female' },
+  { id: 'Uncle_Fu', label: 'Uncle Fu — low, mellow male' },
+  { id: 'Dylan', label: 'Dylan — clear male' },
+  { id: 'Eric', label: 'Eric — lively male' },
+  { id: 'Ono_Anna', label: 'Ono Anna — playful female' },
+  { id: 'Sohee', label: 'Sohee — warm female' },
+] as const
+
 function prettyError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
@@ -11,6 +23,8 @@ export function SpeechPanel() {
   const [ttsText, setTtsText] = useState(
     'Hello. This is Local AI running entirely on Marcus Computer.'
   )
+  const [ttsVoice, setTtsVoice] = useState('Aiden')
+  const [ttsInstruct, setTtsInstruct] = useState('')
   const [audioUrl, setAudioUrl] = useState('')
   const [transcript, setTranscript] = useState('')
   const [busy, setBusy] = useState<'tts' | 'stt' | ''>('')
@@ -129,7 +143,7 @@ export function SpeechPanel() {
     setBusy('tts')
     setError('')
     try {
-      const blob = await localAI.speak(ttsText)
+      const blob = await localAI.speak(ttsText, ttsVoice, ttsInstruct)
       const nextAudioUrl = URL.createObjectURL(blob)
       if (!mountedRef.current) {
         URL.revokeObjectURL(nextAudioUrl)
@@ -149,7 +163,7 @@ export function SpeechPanel() {
     setError('')
     try {
       const result = await localAI.transcribe(file)
-      if (mountedRef.current) setTranscript(result.text)
+      if (mountedRef.current) setTranscript(typeof result === 'string' ? result : result.text)
     } catch (err) {
       if (mountedRef.current) setError(prettyError(err))
     } finally {
@@ -166,9 +180,36 @@ export function SpeechPanel() {
         <div className="tool-card">
           <div className="tool-title">
             <Volume2 size={20} />
-            <div><h3>Text to speech</h3><p>Qwen3-TTS · GPU scheduled</p></div>
+            <div><h3>Text to speech</h3><p>Qwen3-TTS CustomVoice · English only</p></div>
           </div>
+          <label className="speech-voice-picker">
+            <span>Voice</span>
+            <select
+              aria-label="Voice"
+              value={ttsVoice}
+              onChange={(event) => setTtsVoice(event.target.value)}
+              disabled={busy === 'tts'}
+            >
+              {QWEN_VOICES.map((voice) => (
+                <option key={voice.id} value={voice.id}>{voice.label}</option>
+              ))}
+            </select>
+            <small>All presets speak English; Aiden and Ryan are native English voices.</small>
+          </label>
           <textarea value={ttsText} onChange={(e) => setTtsText(e.target.value)} />
+          <label className="speech-voice-picker">
+            <span>Expressive instructions</span>
+            <textarea
+              aria-label="Expressive instructions"
+              value={ttsInstruct}
+              onChange={(event) => setTtsInstruct(event.target.value)}
+              placeholder="For example: Speak warmly, with a reflective tone and a brief pause before the final sentence."
+              maxLength={2000}
+              rows={3}
+            />
+            <small>Guide tone, emotion, pacing, and emphasis. The model may interpret specific effects differently.</small>
+          </label>
+          <p className="speech-language-note">English speech only. This setting applies to dashboard, API, and MCP synthesis.</p>
           <button className="primary" onClick={speak} disabled={occupied || !ttsText.trim()}>
             {busy === 'tts' ? <RefreshCw className="spin" size={16} /> : <Volume2 size={16} />}
             Generate voice

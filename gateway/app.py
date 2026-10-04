@@ -79,6 +79,10 @@ mqtt_discovery_published = False
 mqtt_task = None
 TTS_MAX_INPUT_CHARS = int(os.getenv("TTS_MAX_INPUT_CHARS", "20000"))
 TTS_RESPONSE_FORMATS = {"mp3", "wav", "opus", "flac", "pcm"}
+STT_RESPONSE_FORMATS = {"json", "verbose_json", "text", "srt", "vtt"}
+TTS_VOICE_PRESETS = {
+    "Aiden", "Ryan", "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ono_Anna", "Sohee",
+}
 CHAT_MAX_BODY_BYTES = int(os.getenv("CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 TTS_MAX_BODY_BYTES = int(os.getenv("TTS_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
 STT_MAX_UPLOAD_BYTES = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
@@ -820,7 +824,7 @@ async def run_service_self_test(service: str):
             elif service == "tts":
                 response = await client.post(
                     spec["base"] + "/v1/audio/speech",
-                    json={"model": "local-tts", "input": "Self test.", "response_format": "wav"},
+                    json={"model": "local-tts", "input": "Self test.", "voice": "Aiden", "response_format": "wav"},
                 )
                 response.raise_for_status()
                 if len(response.content) < 100:
@@ -1258,6 +1262,27 @@ async def capabilities():
             "realtime": "/v1/realtime/sessions",
             "models": "/v1/models",
             "status": "/v1/system/status",
+        },
+        "audio": {
+            "transcription": {
+                "method": "POST",
+                "parameters": ["file", "model", "language", "prompt", "temperature", "response_format", "timestamp_granularities[]"],
+                "response_formats": sorted(STT_RESPONSE_FORMATS),
+                "timestamp_granularities": ["segment", "word"],
+                "max_file_bytes": 20 * 1024 * 1024,
+                "language": "Optional Whisper language code; omitted means automatic detection.",
+            },
+            "speech": {
+                "method": "POST",
+                "parameters": ["model", "input", "voice", "language", "instruct", "speed", "response_format"],
+                "response_formats": sorted(TTS_RESPONSE_FORMATS),
+                "voices": sorted(TTS_VOICE_PRESETS),
+                "language": "English",
+                "expressive_instructions": (
+                    "Optional free-form delivery guidance for emotion, tone, pace, and prosody. "
+                    "Exact effects such as laughter, sarcasm, or pause timing are model-dependent."
+                ),
+            },
         },
     }
 
@@ -2102,6 +2127,22 @@ async def transcribe(request: Request):
         form = await parse_form_body(request, raw)
     except Exception:
         form = {}
+    if form:
+        response_format = form.get("response_format", "json")
+        if response_format not in STT_RESPONSE_FORMATS:
+            raise HTTPException(400, f"unsupported response_format: {response_format!r}")
+        prompt = form.get("prompt")
+        if prompt is not None and (not isinstance(prompt, str) or len(prompt) > 4000):
+            raise HTTPException(400, "prompt must be a string of at most 4000 characters")
+        try:
+            temperature = float(form.get("temperature", "0"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "temperature must be a number between 0 and 1") from exc
+        if not 0.0 <= temperature <= 1.0:
+            raise HTTPException(400, "temperature must be between 0 and 1")
+        granularities = form.getlist("timestamp_granularities[]") if hasattr(form, "getlist") else []
+        if any(value not in {"segment", "word"} for value in granularities):
+            raise HTTPException(400, "timestamp_granularities[] values must be 'segment' or 'word'")
     invocation = AUDIO_ADAPTER.to_transcription(form, request.state.trace_context)
     request.state.invocation = invocation
     route = INVOCATION_ROUTER.resolve(invocation)
@@ -2137,9 +2178,24 @@ async def speech(request: Request):
     if response_format not in TTS_RESPONSE_FORMATS:
         raise HTTPException(400, f"unsupported response_format: {response_format!r}")
 
-    voice = payload.get("voice")
-    if voice is not None and not isinstance(voice, str):
+    voice = payload.get("voice", "Aiden")
+    if not isinstance(voice, str):
         raise HTTPException(400, "voice must be a string")
+    if voice not in TTS_VOICE_PRESETS:
+        raise HTTPException(400, f"unsupported voice: {voice!r}")
+
+    language = payload.get("language", "English")
+    if not isinstance(language, str) or language.strip().casefold() not in {"english", "en", "en-us", "en-gb"}:
+        raise HTTPException(400, "TTS language is English-only")
+    payload["voice"] = voice
+    payload["language"] = "English"
+
+    instruct = payload.get("instruct")
+    if instruct is not None:
+        if not isinstance(instruct, str):
+            raise HTTPException(400, "instruct must be a string")
+        if len(instruct) > 2000:
+            raise HTTPException(413, "instruct exceeds 2000 characters")
 
     speed = payload.get("speed")
     if speed is not None:

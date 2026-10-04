@@ -7,6 +7,39 @@
   border-radius: 14px;
   background: radial-gradient(ellipse at 50% 0%, rgba(125, 153, 244, .14), transparent 80%);
 }
+.speech-voice-picker {
+  display: grid;
+  gap: 7px;
+  margin: 14px 0;
+  color: #b5c0d1;
+  font-size: 13px;
+}
+.speech-voice-picker select {
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #141b26;
+  color: #e7edf7;
+  font: inherit;
+}
+.speech-voice-picker textarea {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #141b26;
+  color: #e7edf7;
+  font: inherit;
+  resize: vertical;
+}
+.speech-voice-picker textarea:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+.speech-language-note { margin: 4px 0 0; color: #8995a8; font-size: 11px; line-height: 1.4; }
+.speech-voice-picker select:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+.speech-voice-picker select:disabled { opacity: .65; }
+.speech-voice-picker small { color: #8995a8; font-size: 11px; line-height: 1.4; }
 .speech-record-button {
   display: flex;
   align-items: center;

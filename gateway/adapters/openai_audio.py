@@ -38,10 +38,15 @@ class OpenAIAudioAdapter:
     def to_transcription(self, form: Mapping[str, Any], trace_context: TraceContext | None = None) -> Invocation:
         upload = form.get("file")
         metadata = {"upload": _upload_metadata(upload)}
-        for field in ("language", "response_format", "timestamp_granularities[]"):
+        for field in ("language", "response_format"):
             value = form.get(field)
             if isinstance(value, str):
                 metadata[field] = value
+        granularities = getattr(form, "getlist", lambda _name: [])("timestamp_granularities[]")
+        if granularities:
+            metadata["timestamp_granularities[]"] = [
+                value for value in granularities if isinstance(value, str)
+            ]
         return Invocation(
             trace_context=trace_context or TraceContext(),
             operation=InvocationOperation.TRANSCRIBE,
@@ -60,6 +65,13 @@ class OpenAIAudioAdapter:
             options_data["voice"] = voice
         if isinstance(speed, (float, int)) and not isinstance(speed, bool):
             options_data["speed"] = float(speed)
+        language = payload.get("language")
+        if isinstance(language, str):
+            options_data["language"] = language
+        instruct = payload.get("instruct")
+        if isinstance(instruct, str):
+            options_data["has_expressive_instructions"] = bool(instruct.strip())
+            options_data["expressive_instruction_length"] = len(instruct)
         return Invocation(
             trace_context=trace_context or TraceContext(),
             operation=InvocationOperation.SYNTHESIZE,

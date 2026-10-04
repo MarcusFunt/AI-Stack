@@ -24,14 +24,24 @@ class OpenAIAudioAdapterTests(unittest.TestCase):
         self.assertNotIn("audio bytes", repr(invocation))
 
     def test_speech_maps_text_and_response_options(self):
-        invocation = self.adapter.to_speech({"input": "hello", "voice": "alloy", "speed": 1.25, "response_format": "wav"}, self.trace)
+        invocation = self.adapter.to_speech({
+            "input": "hello",
+            "voice": "Aiden",
+            "speed": 1.25,
+            "response_format": "wav",
+            "language": "English",
+            "instruct": "Speak warmly, with a slight pause before the last phrase.",
+        }, self.trace)
 
         self.assertEqual(invocation.operation, InvocationOperation.SYNTHESIZE)
         self.assertEqual(invocation.modality, {Modality.TEXT})
         self.assertEqual(invocation.input.text, "hello")
         self.assertEqual(invocation.options.response_format, "wav")
-        self.assertEqual(invocation.options.data["voice"], "alloy")
+        self.assertEqual(invocation.options.data["voice"], "Aiden")
         self.assertEqual(invocation.options.data["speed"], 1.25)
+        self.assertEqual(invocation.options.data["language"], "English")
+        self.assertTrue(invocation.options.data["has_expressive_instructions"])
+        self.assertEqual(invocation.options.data["expressive_instruction_length"], 57)
 
     def test_vision_maps_prompt_and_image_metadata(self):
         upload = SimpleNamespace(filename="image.png", content_type="image/png", size=88)

@@ -63,7 +63,9 @@ Operational helpers:
 .\scripts\rotate-mcp-credentials.ps1
 ```
 
-The MCP exposes only status, model discovery, API capability discovery, and `ask_local_ai`. It does not expose shell, arbitrary files, Docker, or remote-desktop functions.
+The MCP exposes status, model discovery, API capability discovery, `ask_local_ai`, audio transcription, and English-only speech synthesis. Audio tools use base64 for file/audio payloads; synthesis supports all nine Qwen3-TTS CustomVoice speakers, expressive `instruct` guidance, speed, and output format. It does not expose shell, arbitrary files, Docker, or remote-desktop functions.
+
+See [Audio API](docs/audio-api.md) for REST and MCP request fields, English-only TTS behavior, supported transcript formats, and examples.
 
 ## Realtime voice
 
@@ -189,6 +191,9 @@ cd D:\AI-Stack
 .\scripts\ai.ps1 start wangp
 .\scripts\ai.ps1 stop-all
 ```
+
+To rebuild and recreate a single GPU service after changing its image, use `.\scripts\ai.ps1 create tts`. The targeted create checks that no AI jobs are active and only replaces the named service.
+
 Maintenance:
 
 ```powershell
@@ -279,12 +284,14 @@ Run the isolated regression suite with `.\scripts\ai.ps1 test-agent-lab` and the
 - `local-fast` -> Qwen3.5-9B / llama.cpp
 - `local-reasoning` -> Qwen3.8-27B / llama.cpp hybrid CPU+GPU
 - `local-stt` -> faster-whisper large-v3
-- `local-tts` -> Qwen3-TTS
+- `local-tts` -> Qwen3-TTS CustomVoice, with named speaker selection in the dashboard
 - `local-vlm` -> Qwen3-VL
 - `local-image` -> ComfyUI
 - `local-video` -> WanGP
 
 The registry lives at `config\models.json` and is exposed at `/v1/models`.
+
+The dashboard's Audio Lab lets you choose all nine Qwen3-TTS CustomVoice speaker timbres. Every synthesis request is set to English. Aiden and Ryan are native English voices. The gateway accepts the same speaker name in the OpenAI-compatible `voice` field. Set `TTS_MODEL` to `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` when overriding the model; the named presets require the CustomVoice model variant. See the [official Qwen3-TTS repository](https://github.com/QwenLM/Qwen3-TTS) for voice descriptions and language details.
 ## Updating and rollback
 
 `ai.ps1 update` now:

@@ -43,6 +43,26 @@ describe('SpeechPanel microphone recording', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
+  it('sends the selected Qwen speaker with the speech request', async () => {
+    render(<SpeechPanel />)
+    const voice = screen.getByRole('combobox', { name: /voice/i })
+
+    expect(voice).toHaveValue('Aiden')
+    expect(voice.querySelectorAll('option')).toHaveLength(9)
+    fireEvent.change(voice, { target: { value: 'Ryan' } })
+    fireEvent.change(screen.getByRole('textbox', { name: /expressive instructions/i }), {
+      target: { value: 'Speak playfully, with a pause before the last sentence.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /generate voice/i }))
+
+    await waitFor(() => expect(api.speak).toHaveBeenCalledWith(
+      'Hello. This is Local AI running entirely on Marcus Computer.',
+      'Ryan',
+      'Speak playfully, with a pause before the last sentence.',
+    ))
+    expect(screen.getByText(/English speech only/i)).toBeInTheDocument()
+  })
+
   it('records audio and sends a correctly typed File to transcription after stop', async () => {
     render(<SpeechPanel />)
     await startRecording()

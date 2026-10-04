@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 import logging
 import os
@@ -60,7 +62,8 @@ mcp = FastMCP(
     instructions=(
         "Private bridge to Marcus Computer's Local AI stack. "
         "Use status/models for discovery and ask_local_ai to delegate work "
-        "to the local fast or reasoning model."
+        "to the local fast or reasoning model. The local_ai_transcribe_audio and "
+        "local_ai_synthesize_speech tools expose the audio API; speech synthesis is English-only."
     ),
     stateless_http=True,
     json_response=True,
@@ -83,6 +86,33 @@ async def gateway_request(method: str, path: str, *, json_body=None, trace_conte
         detail = response.text[-1200:]
         raise RuntimeError(f"Local AI gateway returned HTTP {response.status_code}: {detail}")
     return response.json()
+
+
+async def gateway_audio_request(
+    method: str,
+    path: str,
+    *,
+    json_body=None,
+    data=None,
+    files=None,
+    trace_context: TraceContext | None = None,
+):
+    headers = {"Authorization": f"Bearer {AI_API_KEY}"}
+    if trace_context is not None:
+        inject_trace_context(headers, trace_context)
+    async with httpx.AsyncClient(timeout=None) as client:
+        response = await client.request(
+            method,
+            GATEWAY_URL + path,
+            headers=headers,
+            json=json_body,
+            data=data,
+            files=files,
+        )
+    if response.status_code >= 400:
+        detail = response.text[-1200:]
+        raise RuntimeError(f"Local AI gateway returned HTTP {response.status_code}: {detail}")
+    return response
 @mcp.tool(description="Get Local AI gateway, GPU scheduler, and service status.")
 async def local_ai_status(ctx: Context) -> dict:
     return await gateway_request("GET", "/v1/system/status", trace_context=_request_trace_context(ctx))
@@ -137,6 +167,119 @@ async def ask_local_ai(
         return result["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("Local AI returned an unexpected chat response") from exc
+
+
+@mcp.tool(
+    description=(
+        "Transcribe an audio file through Local AI. Provide the file contents as base64; "
+        "optionally select a Whisper language, prompt, temperature, timestamps, and output format."
+    )
+)
+async def local_ai_transcribe_audio(
+    audio_base64: str,
+    filename: str = "audio.wav",
+    content_type: str = "audio/wav",
+    language: str = "",
+    prompt: str = "",
+    temperature: float = 0.0,
+    timestamp_granularities: list[Literal["segment", "word"]] | None = None,
+    response_format: Literal["json", "verbose_json", "text", "srt", "vtt"] = "json",
+    *,
+    ctx: Context,
+) -> dict:
+    if not audio_base64:
+        raise ValueError("audio_base64 must not be empty")
+    if len(audio_base64) > 28_000_000:
+        raise ValueError("audio file exceeds the 20 MiB MCP limit")
+    try:
+        audio = base64.b64decode(audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("audio_base64 must contain valid base64") from exc
+    if not audio:
+        raise ValueError("audio file must not be empty")
+    if len(audio) > 20 * 1024 * 1024:
+        raise ValueError("audio file exceeds the 20 MiB MCP limit")
+    if response_format not in {"json", "verbose_json", "text", "srt", "vtt"}:
+        raise ValueError("unsupported response_format")
+    if len(prompt) > 4000:
+        raise ValueError("prompt exceeds 4000 characters")
+    if not 0.0 <= temperature <= 1.0:
+        raise ValueError("temperature must be between 0 and 1")
+    safe_filename = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()[:128] or "audio.wav"
+    if not isinstance(content_type, str) or not (
+        content_type.startswith("audio/") or content_type == "application/octet-stream"
+    ):
+        raise ValueError("content_type must be an audio media type")
+    form = [
+        ("model", "local-stt"),
+        ("response_format", response_format),
+        ("temperature", str(temperature)),
+    ]
+    if language:
+        form.append(("language", language))
+    if prompt:
+        form.append(("prompt", prompt))
+    if timestamp_granularities:
+        form.extend(("timestamp_granularities[]", value) for value in timestamp_granularities)
+    response = await gateway_audio_request(
+        "POST",
+        "/v1/audio/transcriptions",
+        data=form,
+        files={"file": (safe_filename, audio, content_type)},
+        trace_context=_request_trace_context(ctx),
+    )
+    if response_format in {"text", "srt", "vtt"}:
+        return {"text": response.text}
+    try:
+        return response.json()
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Local AI returned an unexpected transcription response") from exc
+
+
+@mcp.tool(
+    description=(
+        "Generate English speech through the Qwen3-TTS CustomVoice model. "
+        "Use instruct for free-form tone, emotion, pacing, or prosody guidance; "
+        "the returned audio is base64 with a MIME type."
+    )
+)
+async def local_ai_synthesize_speech(
+    input: str,
+    voice: Literal[
+        "Aiden", "Ryan", "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ono_Anna", "Sohee",
+    ] = "Aiden",
+    instruct: str = "",
+    speed: float = 1.0,
+    response_format: Literal["mp3", "wav", "opus", "flac", "pcm"] = "mp3",
+    *,
+    ctx: Context,
+) -> dict:
+    if not input.strip():
+        raise ValueError("input must not be empty")
+    response = await gateway_audio_request(
+        "POST",
+        "/v1/audio/speech",
+        json_body={
+            "model": "local-tts",
+            "input": input,
+            "voice": voice,
+            "language": "English",
+            "instruct": instruct,
+            "speed": speed,
+            "response_format": response_format,
+        },
+        trace_context=_request_trace_context(ctx),
+    )
+    fallback_mime = {
+        "mp3": "audio/mpeg", "wav": "audio/wav", "opus": "audio/opus",
+        "flac": "audio/flac", "pcm": "audio/pcm",
+    }[response_format]
+    return {
+        "language": "English",
+        "voice": voice,
+        "mime_type": response.headers.get("content-type", fallback_mime).split(";", 1)[0],
+        "audio_base64": base64.b64encode(response.content).decode("ascii"),
+    }
 
 
 @mcp.tool(name="ai.system.status", description="Get AI-Stack gateway, GPU scheduler, and service status.")

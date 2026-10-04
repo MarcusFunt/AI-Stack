@@ -92,6 +92,26 @@ export type ApiCapabilities = {
   endpoints: Record<string, string>
 }
 
+export type TranscriptionOptions = {
+  language?: string
+  prompt?: string
+  temperature?: number
+  timestamp_granularities?: Array<'segment' | 'word'>
+  response_format?: 'json' | 'verbose_json' | 'text' | 'srt' | 'vtt'
+}
+
+export type TranscriptionResult = {
+  text: string
+  language: string
+  language_probability: number
+  segments: Array<{
+    start: number
+    end: number
+    text: string
+    words?: Array<{ start: number; end: number; word: string }>
+  }>
+}
+
 export type NetworkStatus = {
   installed: boolean
   online: boolean
@@ -395,13 +415,16 @@ export const localAI = {
     })
   },
 
-  async speak(input: string) {
+  async speak(input: string, voice = 'Aiden', instruct = '') {
     const response = await fetch('/api/v1/audio/speech', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'local-tts',
         input,
+        voice,
+        language: 'English',
+        instruct,
         response_format: 'wav',
       }),
     })
@@ -409,23 +432,24 @@ export const localAI = {
     return response.blob()
   },
 
-  async transcribe(file: File, language?: string) {
+  async transcribe(file: File, options: TranscriptionOptions = {}): Promise<TranscriptionResult | string> {
     const body = new FormData()
     body.append('file', file)
     body.append('model', 'local-stt')
-    body.append('response_format', 'json')
-    if (language) body.append('language', language)
+    body.append('response_format', options.response_format ?? 'json')
+    if (options.language) body.append('language', options.language)
+    if (options.prompt) body.append('prompt', options.prompt)
+    if (options.temperature !== undefined) body.append('temperature', String(options.temperature))
+    options.timestamp_granularities?.forEach((value) => body.append('timestamp_granularities[]', value))
     const response = await fetch('/api/v1/audio/transcriptions', {
       method: 'POST',
       body,
     })
     if (!response.ok) throw new Error(await parseError(response))
-    return response.json() as Promise<{
-      text: string
-      language: string
-      language_probability: number
-      segments: Array<{ start: number; end: number; text: string }>
-    }>
+    if (options.response_format && ['text', 'srt', 'vtt'].includes(options.response_format)) {
+      return response.text()
+    }
+    return response.json() as Promise<TranscriptionResult>
   },
 
   async analyzeVision(file: File, prompt: string) {
