@@ -1,10 +1,28 @@
 # Realtime Voice and Call Architecture Plan
 
-**Status:** implementation plan  
+**Status:** active roadmap; refreshed 2026-10-04
+
 **Scope:** `voice/`, gateway integration, tool broker, observability, evals, dashboard, and later telephony  
 **Primary goal:** evolve the existing AI-Stack realtime voice service into a low-latency, interruptible, model-independent conversational runtime that can serve browser, desktop, robot/device, and telephone clients without creating separate agent implementations.
 
-## 1. Current baseline on `main`
+## Current status and priority
+
+The current branch has shipped the WebSocket v1 runtime, a transport-independent `RealtimeSession` and `RealtimeRuntime`, typed v2 event/command schemas, generation-safe interruption, and a Pipecat SmallWebRTC path exposed by the Dashboard. The v1 WebSocket remains the compatibility transport; v2 is a schema foundation and is not negotiated on the wire. The current branch also contains the speech API/UI, STT format/timestamp, and CustomVoice TTS startup changes being settled alongside this roadmap refresh.
+
+Local TURN proxy acceptance passes. The private Tailnet Serve route on port 8447 is configured with Funnel disabled. Remote TURN acceptance is still open: the host has no online Tailnet peer at the moment, so a second-device call, selected `relay` ICE pair, two-way audio, interruption, reconnect, and cleanup have not been verified. Do not count a direct ICE path as completion; see the [TURN acceptance plan](../docs/superpowers/plans/2026-10-01-turn-loopback-proxy.md).
+
+After the current branch changes are settled, use this order:
+
+1. Complete remote TURN acceptance from a second Tailnet device.
+2. Improve turn-taking quality with hesitation/non-terminal-pause fixtures and a hybrid end-of-turn decision.
+3. Add client playback acknowledgement and measure interruption-to-silence latency.
+4. Add durable background task ownership across disconnect and reconnect.
+5. Expand evaluation to score end-of-turn, interruption, playback, and task lifecycle behavior.
+6. Revisit voice profile scheduling, native speech providers, and LiveKit/SIP after those core behaviors have evidence.
+
+The first five items are the next product milestones. Keep current one-worker GPU scheduling and the gateway/supervisor ownership boundaries intact while implementing them.
+
+## 1. Current baseline on this branch
 
 AI-Stack is not starting from zero. Preserve the working behavior unless a phase below explicitly replaces it.
 
@@ -24,7 +42,7 @@ Current `voice/` implementation already provides:
 - asynchronous reporting to `/internal/voice-evaluations`;
 - unit/integration tests covering sessions, turn detection, metrics, and the realtime app.
 
-These are useful foundations. The next pass should refactor around them rather than replacing them wholesale.
+These are the current foundations. Most of the first internal refactor is now present; use the phase checklists below to distinguish implemented seams from the remaining acceptance work.
 
 ## 2. Target system
 
@@ -767,36 +785,36 @@ P95 values must also be tracked; median-only success is insufficient.
 
 ### Phase 0 - preserve and characterize current system
 
-- [ ] Keep current WebSocket voice tests green.
+- [x] Keep current WebSocket voice tests green.
 - [ ] Add event-sequence fixtures for current behavior.
 - [ ] Add benchmark fixtures for latency/barge-in.
-- [ ] Document current v1 protocol.
-- [ ] Capture baseline p50/p95 timings.
-- [ ] Add generation IDs before deeper refactors.
+- [x] Document current v1 protocol.
+- [x] Emit a bounded rolling p50/p95 summary for available first-token and first-audio timings.
+- [x] Add generation IDs before deeper refactors.
 
 **Done when:** current behavior is reproducible and race regressions can be detected.
 
 ### Phase 1 - internal architecture refactor
 
-- [ ] Introduce transport-independent `RealtimeSession`.
-- [ ] Extract protocol schemas.
-- [ ] Extract runtime/state machine from FastAPI transport.
-- [ ] Formalize cancellation/generation ownership.
-- [ ] Convert `GatewayVoiceProviders` into `CascadedRealtimeProvider`.
-- [ ] Preserve v1 WebSocket compatibility.
+- [x] Introduce transport-independent `RealtimeSession`.
+- [x] Extract protocol schemas.
+- [x] Extract runtime/state machine from FastAPI transport.
+- [x] Formalize cancellation/generation ownership.
+- [ ] Convert `GatewayVoiceProviders` into the explicit `CascadedRealtimeProvider` adapter.
+- [x] Preserve v1 WebSocket compatibility.
 
 **Done when:** the same tests pass through the new runtime abstraction.
 
 ### Phase 2 - WebRTC + Pipecat
 
-- [ ] Add Pipecat integration.
-- [ ] Add local/self-hosted WebRTC transport.
-- [ ] Build minimal browser client.
-- [ ] Add audio format conversion.
+- [x] Add Pipecat integration.
+- [x] Add local/self-hosted WebRTC transport.
+- [x] Build the Dashboard browser client.
+- [x] Add audio format conversion.
 - [ ] Verify browser AEC/noise suppression.
-- [ ] Add transport metrics.
+- [x] Add transport metrics.
 
-**Done when:** browser conversation works over WebRTC without the legacy audio WebSocket.
+**Status:** transport and client implementation are present. Close acceptance only after real browser conversation and the separate remote TURN checks pass; the current automated UI tests use mocked transport behavior.
 
 ### Phase 3 - turn-taking quality
 
@@ -810,10 +828,10 @@ P95 values must also be tracked; median-only success is insufficient.
 
 ### Phase 4 - interruption/playback correctness
 
-- [ ] Add cancellable playback queue.
+- [x] Clear queued WebRTC audio when cancelling a response.
 - [ ] Track playback cursor/acknowledgement.
-- [ ] Reject stale generation events.
-- [ ] Add barge-in stress tests.
+- [x] Reject stale generation events.
+- [x] Add barge-in cancellation regression coverage.
 - [ ] Measure p50/p95 stop latency.
 
 **Done when:** stale speech cannot resume and barge-in latency meets the initial target.
@@ -841,7 +859,8 @@ P95 values must also be tracked; median-only success is insufficient.
 
 ### Phase 7 - richer observability/evaluation
 
-- [ ] Add full timing waterfall.
+- [x] Add stage spans and per-turn first-token/first-audio timing.
+- [ ] Add full client/server timing waterfall, including playback acknowledgement.
 - [ ] Add audio/event recording fixtures.
 - [ ] Add interruption/EOT scoring.
 - [ ] Connect results to eval-router.
@@ -870,26 +889,18 @@ P95 values must also be tracked; median-only success is insufficient.
 
 **Done when:** a phone call and a browser voice session exercise the same `RealtimeSession` and tool/task runtime.
 
-## 27. Suggested first implementation PR
+## 27. Next implementation sequence
 
-The next PR should not attempt Pipecat, LiveKit, semantic EOT, durable tasks, and native S2S simultaneously.
+The original first-PR proposal is superseded: typed schemas, generation identity, runtime extraction, cancellation ownership, v1 compatibility, and the initial WebRTC path are already in this branch. Do not repeat that foundation work as a new milestone.
 
-Recommended first PR scope:
+1. Finish and review the current speech API/UI, STT, and TTS startup changes as separate changesets.
+2. Run the remote TURN acceptance procedure from a second Tailnet device and record the selected ICE candidate pair and call lifecycle results.
+3. Build the turn-taking fixture set first, then compare VAD-only and hybrid end-of-turn decisions against it.
+4. Add a playback acknowledgement event/cursor; use it to make interrupted history reflect audio actually heard, then measure p50/p95 barge-in-to-silence latency.
+5. Define durable `TaskHandle` ownership and disconnect/reconnect semantics before adding more voice tool surface.
+6. Expand eval-router fixtures and Dashboard diagnostics to cover the measured turn, playback, interruption, and task behavior.
 
-1. add `voice/protocol.py` with typed v2 event/command models;
-2. extend session state with response/generation identity;
-3. extract a transport-independent runtime from `voice/app.py`;
-4. wrap the existing gateway path as `CascadedRealtimeProvider`;
-5. preserve the current WebSocket transport;
-6. add regression tests proving:
-   - current happy-path response still works;
-   - barge-in cancels the old generation;
-   - delayed old LLM/TTS output cannot leak into the new response;
-   - interrupted history contains only audible assistant content;
-   - protocol event ordering is stable;
-7. add baseline latency measurements to the eval payload.
-
-That creates the seam needed for WebRTC/Pipecat without destabilizing the working voice path.
+Keep native speech-to-speech providers and LiveKit/SIP behind those acceptance gates. They should reuse the runtime, provider, and task contracts instead of introducing a parallel voice stack.
 
 ## 28. Definition of the final result
 

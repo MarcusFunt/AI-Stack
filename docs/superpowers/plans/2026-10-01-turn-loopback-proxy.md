@@ -36,8 +36,10 @@
 
 - [x] Document that this implementation pass does not enable Tailscale Serve, Funnel, or a manual Tailnet route.
 - [x] Document the post-merge acceptance procedure below.
-- [ ] After PR #13 is merged, enable only the private Tailscale Serve route on port `8447` through the authenticated host-agent setting and verify Funnel remains disabled.
+- [x] After PR #13 is merged, enable only the private Tailscale Serve route on port `8447` through the authenticated host-agent setting and verify Funnel remains disabled.
 - [ ] Connect from a second Tailnet device and confirm the selected browser ICE candidate is `relay` through TURN.
 - [ ] Verify two-way audio, interruption/barge-in, reconnect, stop, and cleanup; then disable the route if no longer needed.
+
+**Current acceptance status (2026-10-04):** the `8447` route is already Tailnet-only with Funnel disabled, and `scripts/test-turn-proxy.ps1` passes its local checks. The host currently has zero online Tailnet peers, so remote relay selection and call lifecycle checks remain outstanding. No route changes were made during this verification.
 
 The local acceptance script does not enable or modify Tailnet routes. A direct ICE path does not satisfy remote relay acceptance.
