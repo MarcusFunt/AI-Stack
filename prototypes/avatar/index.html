@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI-Stack Virtual Animatronic Prototype</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="stage-card">
+      <div class="stage">
+        <div class="glow"></div>
+        <svg id="avatar" viewBox="0 0 760 680" role="img" aria-label="Animated stylized robot avatar">
+          <defs>
+            <linearGradient id="shellGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#f0f4f8"/><stop offset="1" stop-color="#8f9baa"/>
+            </linearGradient>
+            <linearGradient id="darkGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#202a36"/><stop offset="1" stop-color="#0b1017"/>
+            </linearGradient>
+            <filter id="cyanGlow" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="6" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+
+          <g id="body">
+            <ellipse class="shadow" cx="380" cy="618" rx="165" ry="30"/>
+            <g id="torso">
+              <path class="shell" d="M245 520 Q380 470 515 520 L552 620 Q380 660 208 620Z"/>
+              <path class="panel" d="M283 535 Q380 510 477 535 L495 600 Q380 623 265 600Z"/>
+              <rect class="status-slot" x="355" y="562" width="50" height="10" rx="5"/>
+            </g>
+            <g id="neck">
+              <rect class="neck-dark" x="335" y="435" width="90" height="105" rx="28"/>
+              <rect class="neck-ring" x="318" y="462" width="124" height="28" rx="14"/>
+            </g>
+          </g>
+
+          <g id="head">
+            <g id="leftPod"><circle class="pod" cx="176" cy="290" r="77"/><circle class="pod-inner" cx="176" cy="290" r="45"/><path class="pod-led" d="M144 290 A32 32 0 0 0 208 290"/></g>
+            <g id="rightPod"><circle class="pod" cx="584" cy="290" r="77"/><circle class="pod-inner" cx="584" cy="290" r="45"/><path class="pod-led" d="M552 290 A32 32 0 0 0 616 290"/></g>
+            <path class="head-shell" d="M196 132 Q380 45 564 132 Q630 205 610 364 Q582 448 510 478 Q380 520 250 478 Q178 448 150 364 Q130 205 196 132Z"/>
+            <path class="faceplate" d="M210 160 Q380 98 550 160 Q585 205 566 357 Q544 416 492 440 Q380 474 268 440 Q216 416 194 357 Q175 205 210 160Z"/>
+
+            <g id="face">
+              <g id="eyes">
+                <rect id="eyeL" class="eye" x="260" y="226" width="72" height="106" rx="36"/>
+                <rect id="eyeR" class="eye" x="428" y="226" width="72" height="106" rx="36"/>
+              </g>
+              <path id="mouth" class="mouth" d="M320 368 C340 350 420 350 440 368 C420 390 340 390 320 368Z"/>
+              <path id="mouthDetail" class="mouth-detail" d="" />
+              <g id="cheeks">
+                <path class="cheek" d="M237 354 Q255 365 274 354"/>
+                <path class="cheek" d="M486 354 Q505 365 523 354"/>
+              </g>
+            </g>
+
+            <g id="browL" class="brow"><path d="M254 202 Q294 185 336 202"/></g>
+            <g id="browR" class="brow"><path d="M424 202 Q466 185 506 202"/></g>
+          </g>
+        </svg>
+        <div class="state-readout">
+          <strong id="stateLabel">IDLE</strong>
+          <span id="visemeLabel">viseme: REST</span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="controls">
+      <div><span class="eyebrow">AI-STACK AVATAR LAB</span><h1>Virtual animatronic face</h1>
+        <p>Pure SVG + JavaScript. No generated imagery, rig, model, or neural renderer.</p></div>
+
+      <section><h2>Behaviour</h2>
+        <div class="button-grid" id="stateButtons">
+          <button data-state="idle" class="active">Idle</button><button data-state="listening">Listening</button>
+          <button data-state="thinking">Thinking</button><button data-state="speaking">Speaking</button>
+          <button data-state="interrupted">Interrupt</button><button data-state="error">Error</button>
+        </div>
+      </section>
+
+      <section><h2>Viseme test</h2>
+        <div class="visemes" id="visemeButtons"></div>
+      </section>
+
+      <section><h2>Controls</h2>
+        <label>Speech energy <output id="energyOut">0.65</output><input id="energy" type="range" min="0" max="1" value="0.65" step="0.01"/></label>
+        <label>Expression <output id="moodOut">0.25</output><input id="mood" type="range" min="-1" max="1" value="0.25" step="0.01"/></label>
+        <label><input id="cursorGaze" type="checkbox" checked/> Follow pointer with eyes</label>
+      </section>
+
+      <section class="notes"><h2>What is animated</h2>
+        <p>8 interpolated mouth targets, blink timing, independent gaze, brows, head tilt/bob, neck travel, side-pod counter-motion, status glow, and interruption recoil.</p>
+      </section>
+    </aside>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

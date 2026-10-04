@@ -1,0 +1,24 @@
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#eaf4ff;background:#070b11;color-scheme:dark}
+*{box-sizing:border-box} body{margin:0;min-height:100vh;background:radial-gradient(circle at 30% 20%,#132131 0,#090d14 42%,#05070b 100%)}
+button,input{font:inherit}.page{min-height:100vh;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;padding:20px}
+.stage-card,.controls{border:1px solid #253345;background:linear-gradient(180deg,rgba(20,29,40,.92),rgba(8,12,18,.96));box-shadow:0 28px 90px #0008;border-radius:24px}
+.stage-card{display:grid;place-items:center;min-height:calc(100vh - 40px);overflow:hidden}.stage{position:relative;width:min(820px,100%);aspect-ratio:1.08}
+.stage svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}.glow{position:absolute;width:58%;height:34%;left:21%;top:28%;border-radius:50%;background:#36d8ff18;filter:blur(55px)}
+.shadow{fill:#0008}.shell,.head-shell{fill:url(#shellGrad);stroke:#d7e0e8;stroke-width:3}.head-shell{stroke-width:4}
+.panel,.neck-dark{fill:url(#darkGrad);stroke:#313d4b;stroke-width:3}.neck-ring{fill:#5a6877;stroke:#93a1af;stroke-width:3}
+.status-slot{fill:#59e6ff;filter:url(#cyanGlow)}.faceplate{fill:#060b12;stroke:#526273;stroke-width:5}.pod{fill:#8895a4;stroke:#d5dde5;stroke-width:3}
+.pod-inner{fill:#121b25;stroke:#354657;stroke-width:5}.pod-led{fill:none;stroke:#45e4ff;stroke-width:9;stroke-linecap:round;filter:url(#cyanGlow)}
+.eye,.mouth{fill:#6eeaff;filter:url(#cyanGlow)}.mouth-detail{fill:none;stroke:#061019;stroke-width:7;stroke-linecap:round;opacity:.8}
+.cheek{fill:none;stroke:#5edcf0;stroke-width:8;stroke-linecap:round;opacity:.22}.brow path{fill:none;stroke:#66dff3;stroke-width:10;stroke-linecap:round;opacity:.72}
+.state-readout{position:absolute;left:5%;bottom:4%;display:flex;align-items:center;gap:14px;padding:10px 14px;border:1px solid #26394b;background:#080e16bb;border-radius:999px;backdrop-filter:blur(12px)}
+.state-readout strong{font-size:12px;letter-spacing:.16em;color:#83e9ff}.state-readout span{font-size:12px;color:#8fa0b4}
+.controls{padding:24px;display:flex;flex-direction:column;gap:24px;overflow:auto}.eyebrow{font-size:11px;font-weight:800;letter-spacing:.17em;color:#53ddff}
+h1{font-size:28px;margin:7px 0 8px;letter-spacing:-.03em}h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:#9eb0c4;margin:0 0 11px}
+p{color:#91a0b1;line-height:1.55;margin:0}.button-grid,.visemes{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.visemes{grid-template-columns:repeat(4,1fr)}
+button{border:1px solid #2b3b4c;background:#101823;color:#b8c6d5;padding:9px 10px;border-radius:10px;cursor:pointer;transition:.15s ease}
+button:hover{border-color:#48647e;background:#152231}button.active{border-color:#58ddfa;background:#12313a;color:#8cecff;box-shadow:inset 0 0 0 1px #4fe2ff22}
+.visemes button{font-size:11px;padding:8px 3px}label{display:grid;grid-template-columns:1fr auto;gap:7px;color:#b3c0ce;font-size:13px;margin:12px 0}
+label input[type=range]{grid-column:1/-1;width:100%;accent-color:#5de4ff}label input[type=checkbox]{grid-column:auto;width:auto;accent-color:#5de4ff}
+output{font-variant-numeric:tabular-nums;color:#64e4ff}.notes{padding:14px;border:1px solid #203142;border-radius:14px;background:#0a111a}
+.notes p{font-size:12px}.error-mode .eye,.error-mode .mouth{fill:#ff6d78}.error-mode .pod-led,.error-mode .brow path{stroke:#ff6d78}.error-mode .status-slot{fill:#ff6d78}
+@media(max-width:900px){.page{grid-template-columns:1fr;padding:10px}.stage-card{min-height:auto}.controls{max-height:none}.stage{aspect-ratio:1.05}}
