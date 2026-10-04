@@ -355,14 +355,21 @@ switch ($Action) {
   }
   "build" {
     Set-BuildSourceHashes
-    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","tts","vlm","comfyui","wangp")
   }
   "create" {
     Set-BuildSourceHashes
-    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","vlm","comfyui","wangp")
-    Invoke-Compose -CommandArgs @("pull","llm","reasoning")
-    Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
-    Start-ControlPlane
+    if ($Service -in $GpuServices) {
+      Assert-NoActiveJobs
+      Invoke-Compose -CommandArgs @("build",$Service)
+      Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate",$Service)
+      Start-ControlPlane
+    } else {
+      Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","tts","vlm","comfyui","wangp")
+      Invoke-Compose -CommandArgs @("pull","llm","reasoning")
+      Invoke-Compose -CommandArgs @("--profile","gpu","create","--force-recreate","llm","reasoning","stt","tts","vlm","comfyui","wangp")
+      Start-ControlPlane
+    }
   }
   "update" {
     Assert-RootWorktreeClean

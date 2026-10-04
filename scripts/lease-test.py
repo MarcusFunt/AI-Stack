@@ -66,7 +66,7 @@ def cross_service_test():
         payload = {
             "model": "qwen3-tts-base",
             "input": "Lease switching regression test.",
-            "voice": "qwen-default",
+            "voice": "Aiden",
             "response_format": "mp3",
         }
         output["tts"] = request("/v1/audio/speech", payload)

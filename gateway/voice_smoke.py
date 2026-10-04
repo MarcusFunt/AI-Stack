@@ -121,7 +121,7 @@ def _run(client, base_url, api_key):
             json={
                 "model": "local-tts",
                 "input": generated_text,
-                "voice": "qwen-default",
+                "voice": "Aiden",
                 "response_format": "mp3",
             },
         )

@@ -106,7 +106,7 @@ class CascadedRealtimeProvider:
         response = await self.client.post(
             self.gateway_url + "/v1/audio/speech",
             headers=self._headers_for(traceparent),
-            json={"model": "local-tts", "input": text, "response_format": "wav"},
+            json={"model": "local-tts", "input": text, "voice": "Aiden", "response_format": "wav"},
         )
         response.raise_for_status()
         try:

@@ -613,7 +613,7 @@ DEFAULTS = {
     "LLM_MODEL": "/models/daily.gguf", "LLM_CONTEXT": "32768", "LLM_GPU_LAYERS": "999",
     "REASONING_MODEL": "/models/reasoning.gguf", "REASONING_CONTEXT": "8192",
     "REASONING_GPU_LAYERS": "28", "STT_MODEL": "large-v3",
-    "STT_COMPUTE_TYPE": "float16", "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "STT_COMPUTE_TYPE": "float16", "TTS_MODEL": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
     "VLM_MODEL": "Qwen/Qwen3-VL-4B-Instruct",
 }
 

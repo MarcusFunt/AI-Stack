@@ -123,7 +123,7 @@ try:
     tts_payload = {
         "model": "qwen3-tts-base",
         "input": "Local AI stack smoke test.",
-        "voice": "qwen-default",
+        "voice": "Aiden",
         "response_format": "mp3",
     }
     status, _, audio = api(

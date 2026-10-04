@@ -578,10 +578,12 @@ services:
 
   tts:
     <<: *gpu-base
-    image: local/qwen3-tts-openai:0.1.1
+    image: local/qwen3-tts-openai:0.1.2
+    build:
+      context: ./tts
     container_name: ai-stack-tts
     environment:
-      QWEN_MODEL_ID: ${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}
+      QWEN_MODEL_ID: ${TTS_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice}
       QWEN_ATTN_IMPLEMENTATION: sdpa
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       HF_HOME: /data/hf
