@@ -24,6 +24,7 @@ from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabil
 from gateway.eval_client import attach_screening_task, report_invocation_screen
 from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
+from gateway.adapters.embedding import EmbeddingAdapter
 from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.openinference import invocation_attributes
@@ -61,6 +62,7 @@ MODEL_SERVICE = {m["id"].lower(): m["service"] for m in MODELS}
 INVOCATION_ROUTER = InvocationRouter(MODELS, aliases=ALIASES)
 CHAT_ADAPTER = OpenAIChatAdapter()
 AUDIO_ADAPTER = OpenAIAudioAdapter()
+EMBEDDING_ADAPTER = EmbeddingAdapter()
 RESPONSES_ADAPTER = OpenAIResponsesAdapter()
 
 app = FastAPI(title="Marcus Local AI Gateway", version="0.5.0")
@@ -87,6 +89,8 @@ CHAT_MAX_BODY_BYTES = int(os.getenv("CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024))
 TTS_MAX_BODY_BYTES = int(os.getenv("TTS_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
 STT_MAX_UPLOAD_BYTES = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
 VLM_MAX_UPLOAD_BYTES = int(os.getenv("VLM_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
+EMBEDDING_MAX_BODY_BYTES = int(os.getenv("EMBEDDING_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
+EMBEDDING_MAX_UPLOAD_BYTES = int(os.getenv("EMBEDDING_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 COMFY_MAX_BODY_BYTES = int(os.getenv("COMFY_MAX_BODY_BYTES", str(128 * 1024 * 1024)))
 WANGP_MAX_BODY_BYTES = int(os.getenv("WANGP_MAX_BODY_BYTES", str(512 * 1024 * 1024)))
 VOICE_SDP_MAX_BYTES = 128 * 1024
@@ -2210,6 +2214,70 @@ async def speech(request: Request):
     request.state.model_route = route
     body = json.dumps(payload).encode("utf-8")
     return await forward_buffered(route.provider_id, "/v1/audio/speech", request, body)
+
+@app.post("/v1/embeddings/text")
+async def embeddings_text(request: Request):
+    raw = await read_body_limited(request, EMBEDDING_MAX_BODY_BYTES, "embedding request")
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    try:
+        invocation = EMBEDDING_ADAPTER.to_text(payload, request.state.trace_context)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    request.state.invocation = invocation
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, "no configured embedding model") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, "requested model does not support embeddings") from exc
+    request.state.model_route = route
+    return await forward_buffered(
+        route.provider_id,
+        "/v1/embeddings/text",
+        request,
+        body=raw,
+        max_body_bytes=EMBEDDING_MAX_BODY_BYTES,
+        body_label="embedding request",
+    )
+
+
+@app.post("/v1/embeddings/image")
+async def embeddings_image(request: Request):
+    raw = await read_body_limited(request, EMBEDDING_MAX_UPLOAD_BYTES, "embedding image upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception as exc:
+        raise HTTPException(400, "request must be valid multipart form data") from exc
+    try:
+        try:
+            invocation = EMBEDDING_ADAPTER.to_image(form, request.state.trace_context)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    finally:
+        if hasattr(form, "close"):
+            await form.close()
+    request.state.invocation = invocation
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, "no configured embedding model") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, "requested model does not support embeddings") from exc
+    request.state.model_route = route
+    return await forward_buffered(
+        route.provider_id,
+        "/v1/embeddings/image",
+        request,
+        body=raw,
+        max_body_bytes=EMBEDDING_MAX_UPLOAD_BYTES,
+        body_label="embedding image upload",
+    )
+
 
 @app.api_route("/v1/vision/analyze", methods=["POST"])
 async def vision(request: Request):

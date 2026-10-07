@@ -44,6 +44,22 @@ class InvocationRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.model_id, "local-fast")
         self.assertEqual(route.provider_id, "llm")
 
+    def test_embed_operation_uses_existing_embedding_capability(self):
+        router = InvocationRouter(
+            [
+                {"id": "local-visual-embedding", "service": "visual-memory", "capabilities": ["embedding"]}
+            ],
+            aliases={"visual-embedding": "local-visual-embedding"},
+        )
+
+        route = router.resolve(
+            Invocation(operation=InvocationOperation.EMBED, requested_model="visual-embedding")
+        )
+
+        self.assertEqual(route.model_id, "local-visual-embedding")
+        self.assertEqual(route.provider_id, "visual-memory")
+        self.assertIn("embedding", route.capabilities)
+
     def test_rejects_unknown_models_and_unsupported_capabilities(self):
         with self.assertRaises(ModelNotFoundError):
             self.router.resolve(Invocation(requested_model="missing"))

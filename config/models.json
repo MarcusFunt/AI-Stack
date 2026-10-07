@@ -72,6 +72,20 @@
       "start_timeout": 300,
       "idle_timeout": 300
     },
+    "visual-memory": {
+      "container": "ai-stack-visual-memory",
+      "base": "http://visual-memory:8000",
+      "health": "/health",
+      "gpu": false,
+      "resources": {
+        "gpu": false,
+        "gpu_vram_mb": 0,
+        "system_ram_mb": null,
+        "exclusive_gpu": false
+      },
+      "start_timeout": 180,
+      "idle_timeout": 0
+    },
     "comfyui": {
       "container": "ai-stack-comfyui",
       "base": "http://comfyui:8188",
@@ -216,6 +230,15 @@
       ]
     },
     {
+      "id": "local-visual-embedding",
+      "service": "visual-memory",
+      "owned_by": "local",
+      "capabilities": [
+        "embedding"
+      ],
+      "display_name": "EmbeddingGemma 2 Vision+Text"
+    },
+    {
       "id": "local-image",
       "service": "comfyui",
       "owned_by": "local",
@@ -237,6 +260,7 @@
     "fast": "local-fast",
     "llm": "local-fast",
     "reasoning": "local-reasoning",
-    "vision": "local-vlm"
+    "vision": "local-vlm",
+    "visual-embedding": "local-visual-embedding"
   }
 }

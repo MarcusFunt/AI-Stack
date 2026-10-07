@@ -156,6 +156,38 @@ services:
       timeout: 4s
       retries: 6
 
+  visual-memory:
+    build:
+      context: ./visual_memory
+      args:
+        SOURCE_HASH: ${AI_STACK_VISUAL_MEMORY_SOURCE_HASH:-unknown}
+    container_name: ai-stack-visual-memory
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      VISUAL_EMBED_MODEL_PATH: /models/embeddinggemma-2
+      VISUAL_MEMORY_DB_PATH: /data/visual-memory.sqlite3
+      VISUAL_MEMORY_IMAGE_ROOT: /data/images
+      HF_HOME: /cache/huggingface
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./models/embedding:/models:ro
+      - ./data/cache:/cache
+      - ./data/visual-memory:/data
+    networks: [ai]
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
+
   voice:
     build:
       context: .
