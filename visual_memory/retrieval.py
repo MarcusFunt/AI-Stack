@@ -45,6 +45,8 @@ class VisualMemoryEngine:
         namespace: str,
         source: str | None = None,
         session_id: str | None = None,
+        sequence_id: str | None = None,
+        sequence_number: int | None = None,
         timestamp: str | None = None,
         tags: Iterable[str] = (),
         metadata: dict[str, Any] | None = None,
@@ -65,7 +67,8 @@ class VisualMemoryEngine:
         ):
             return self.store.record_duplicate(
                 existing_id, namespace=namespace, source=source, session_id=session_id, timestamp=timestamp,
-                tags=tags, metadata=metadata, duplicate_level="identical",
+                tags=tags, metadata=metadata, sequence_id=sequence_id, sequence_number=sequence_number,
+                duplicate_level="identical",
             )
 
         image = decode_image(image_bytes, max_bytes=MAX_IMAGE_BYTES, max_pixels=MAX_IMAGE_PIXELS)
@@ -81,7 +84,8 @@ class VisualMemoryEngine:
             if not crops:
                 return self.store.record_duplicate(
                     existing_id, namespace=namespace, source=source, session_id=session_id, timestamp=timestamp,
-                    tags=tags, metadata=metadata, duplicate_level="identical",
+                    tags=tags, metadata=metadata, sequence_id=sequence_id, sequence_number=sequence_number,
+                    duplicate_level="identical",
                 )
         else:
             if self.perceptual_duplicate_distance is not None:
@@ -91,7 +95,8 @@ class VisualMemoryEngine:
                 if near_id:
                     return self.store.record_duplicate(
                         near_id, namespace=namespace, source=source, session_id=session_id, timestamp=timestamp,
-                        tags=tags, metadata=metadata, duplicate_level="near_duplicate",
+                        tags=tags, metadata=metadata, sequence_id=sequence_id, sequence_number=sequence_number,
+                        duplicate_level="near_duplicate",
                     )
             if crop_mode == "none":
                 crops = [Crop("full", image.copy(), {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, image_hash)]
@@ -116,16 +121,88 @@ class VisualMemoryEngine:
                     vision_token_budget=budget,
                 )
             )
+        effective_metadata = dict(metadata or {})
+        full_vector = next((payload.vector for payload in payloads if payload.crop_type == "full"), payloads[0].vector)
+        nearest = None
+        if self.vector_index.count:
+            for vector_id, similarity in self.vector_index.search(full_vector, top_k=self.vector_index.count):
+                candidate = self.store.get_vector(vector_id)
+                if candidate is None:
+                    continue
+                candidate_frame = self.store.get_record(candidate["asset_id"])
+                if candidate_frame and candidate_frame["namespace"] == namespace:
+                    nearest = {"frame_id": candidate["asset_id"], "similarity": similarity}
+                    break
+        effective_metadata["visual_memory"] = {
+            **(effective_metadata.get("visual_memory") if isinstance(effective_metadata.get("visual_memory"), dict) else {}),
+            "nearest_neighbor": nearest,
+            "novelty_distance": 1.0 - nearest["similarity"] if nearest else None,
+        }
         result = self.store.index_image(
             image_bytes=image_bytes,
             namespace=namespace,
             source=source,
             session_id=session_id,
+            sequence_id=sequence_id,
+            sequence_number=sequence_number,
+            timestamp=timestamp,
+            tags=tags,
+            metadata=effective_metadata,
+            vectors=payloads,
+            perceptual_hash_value=image_hash,
+        )
+        for vector_id in result.vector_ids:
+            vector_record = self.store.get_vector(vector_id)
+            if vector_record is not None:
+                self.vector_index.add(vector_id, vector_record["vector"])
+        return result
+
+    def index_text(
+        self,
+        text: str,
+        *,
+        namespace: str,
+        source: str | None = None,
+        session_id: str | None = None,
+        sequence_id: str | None = None,
+        sequence_number: int | None = None,
+        timestamp: str | None = None,
+        tags: Iterable[str] = (),
+        metadata: dict[str, Any] | None = None,
+        instruction: str | None = None,
+    ) -> IngestResult:
+        if not isinstance(text, str) or not text.strip() or len(text) > 32_000:
+            raise ValueError("text must be non-empty and at most 32000 characters")
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        existing_id = self.store.find_exact_asset(namespace, content_hash, item_type="text")
+        if existing_id and self.store.has_vectors(existing_id, self.model, self.revision, ["full"]):
+            return self.store.record_duplicate(
+                existing_id,
+                namespace=namespace,
+                source=source,
+                session_id=session_id,
+                timestamp=timestamp,
+                tags=tags,
+                metadata=metadata,
+                sequence_id=sequence_id,
+                sequence_number=sequence_number,
+                duplicate_level="identical",
+            )
+        vectors = self.embedder.embed_text([text], instruction=instruction, dimensions=self.dimension)
+        if len(vectors) != 1:
+            raise ValueError("embedding backend returned the wrong number of vectors")
+        payload = VectorPayload("full", None, normalize_vector(vectors[0], dimension=self.dimension))
+        result = self.store.index_text(
+            text=text,
+            namespace=namespace,
+            source=source,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            sequence_number=sequence_number,
             timestamp=timestamp,
             tags=tags,
             metadata=metadata,
-            vectors=payloads,
-            perceptual_hash_value=image_hash,
+            vectors=[payload],
         )
         for vector_id in result.vector_ids:
             vector_record = self.store.get_vector(vector_id)
@@ -147,11 +224,14 @@ class VisualMemoryEngine:
         include_crops: bool = True,
         top_k: int = 8,
         include_embedding: bool = False,
+        expand_temporal: int = 0,
     ) -> dict[str, Any]:
         if not 1 <= top_k <= 50:
             raise ValueError("top_k must be between 1 and 50")
         if include_embedding and top_k > 10:
             raise ValueError("include_embedding is limited to top_k of 10")
+        if not 0 <= expand_temporal <= 2:
+            raise ValueError("expand_temporal must be between 0 and 2")
         if not include_crops and crop_type not in (None, "full"):
             raise ValueError("crop_type conflicts with include_crops=false")
         if not include_crops:
@@ -186,15 +266,25 @@ class VisualMemoryEngine:
                 "parent_id": None,
                 "crop": None if row["crop_type"] == "full" else {"type": row["crop_type"], "bbox": row["bbox"]},
                 "metadata": {
+                    **row["metadata"],
                     "namespace": row["namespace"],
                     "source": row["source"],
                     "session_id": row["session_id"],
                     "timestamp": row["timestamp"],
                     "tags": row["tags"],
-                    **row["metadata"],
                 },
                 "duplicate_level": row["duplicate_level"],
             }
+            if row["item_type"] == "text":
+                match["text"] = row["text"]
+            if expand_temporal:
+                match["temporal_context"] = [
+                    {"offset": frame["offset"], "frame_id": frame["frame_id"],
+                     "observation_id": frame["observation_id"], "timestamp": frame["timestamp"],
+                     "source": frame["source"], "metadata": frame["metadata"]}
+                    for frame in self.store.temporal_window(row["observation_id"], radius=expand_temporal)
+                    if frame["offset"] != 0
+                ]
             if include_embedding:
                 match["embedding"] = row["vector"]
             matches.append(match)

@@ -87,11 +87,11 @@
 - `VisualContextPack` contains current frame metadata, ranked evidence, selected crops, structured context, and text/code chunks.
 - Search can expand neighboring sequence frames; `build_context_pack(...)` deduplicates parents and selects bounded diverse evidence.
 
-- [ ] Test previous/next sequence links and optional ±2 frame expansion.
-- [ ] Test deterministic parent/crop deduplication, diversity ranking, image/text maxima, and that the current frame is retained.
-- [ ] Implement temporal sequence/session persistence, nearest-neighbor novelty metadata without guessed thresholds, and context-pack selection over top-20 candidates.
-- [ ] Run temporal, retrieval and context-pack tests.
-- [ ] Commit Task 3 as `feat(memory): add temporal visual context packs`.
+- [x] Test previous/next sequence links and optional ±2 frame expansion.
+- [x] Test deterministic parent/crop deduplication, diversity ranking, image/text maxima, and that the current frame is retained.
+- [x] Implement temporal sequence/session persistence, nearest-neighbor novelty metadata without guessed thresholds, and context-pack selection over top-20 candidates.
+- [x] Run temporal, retrieval and context-pack tests.
+- [x] Commit Task 3 as `feat(memory): add temporal visual context packs`.
 
 ### Task 4: Qwen context endpoint and retrieval-assisted gateway orchestration (Phases 3–4)
 

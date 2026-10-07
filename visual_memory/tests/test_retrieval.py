@@ -203,6 +203,68 @@ def test_exact_asset_is_reembedded_when_the_active_model_revision_changes(tmp_pa
     updated_store.close()
 
 
+def test_optional_temporal_expansion_adds_neighboring_frames(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4
+    )
+    engine = VisualMemoryEngine(store, FakeEmbedder(), index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib)
+    engine.index_image(image_bytes("blue"), namespace="game:run", session_id="s1", sequence_id="match-1",
+                       sequence_number=1, crop_mode="none")
+    event = engine.index_image(image_bytes("red"), namespace="game:run", session_id="s1", sequence_id="match-1",
+                               sequence_number=2, crop_mode="none")
+    engine.index_image(image_bytes("green"), namespace="game:run", session_id="s1", sequence_id="match-1",
+                       sequence_number=3, crop_mode="none")
+
+    ordinary = engine.search_text("red", namespace="game:run", top_k=1)
+    expanded = engine.search_text("red", namespace="game:run", top_k=1, expand_temporal=2)
+
+    assert ordinary["matches"][0]["id"] == event.frame_id
+    assert "temporal_context" not in ordinary["matches"][0]
+    assert [frame["offset"] for frame in expanded["matches"][0]["temporal_context"]] == [-1, 1]
+    store.close()
+
+
+def test_indexing_records_nearest_neighbor_similarity_without_a_cutoff(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4
+    )
+    engine = VisualMemoryEngine(store, FakeEmbedder(), index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib)
+    first = engine.index_image(image_bytes("red"), namespace="website:demo", crop_mode="none")
+    second = engine.index_image(image_bytes("blue"), namespace="website:demo", crop_mode="none")
+
+    novelty = store.get_record(second.frame_id)["metadata"]["visual_memory"]
+    assert novelty["nearest_neighbor"]["frame_id"] == first.frame_id
+    assert 0.0 <= novelty["nearest_neighbor"]["similarity"] <= 1.0
+    assert novelty["novelty_distance"] == 1.0 - novelty["nearest_neighbor"]["similarity"]
+    store.close()
+
+
+def test_text_chunks_share_the_image_index_and_exact_repeats_skip_embedding(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4
+    )
+    embedder = FakeEmbedder()
+    engine = VisualMemoryEngine(store, embedder, index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib)
+    kwargs = {
+        "namespace": "code:project-x",
+        "source": "code",
+        "metadata": {"source_path": "src/nav.tsx", "start_line": 12, "end_line": 20},
+    }
+    first = engine.index_text("navigation menu overlaps title", **kwargs)
+    calls = len(embedder.calls)
+    duplicate = engine.index_text("navigation menu overlaps title", **kwargs)
+
+    assert first.embeddings_created == 1
+    assert duplicate.duplicate_level == "identical"
+    assert duplicate.embeddings_created == 0
+    assert len(embedder.calls) == calls
+    matches = engine.search_image(image_bytes("red"), namespace="code:project-x", top_k=2)
+    assert matches["matches"][0]["id"] == first.frame_id
+    assert matches["matches"][0]["text"] == "navigation menu overlaps title"
+    assert matches["matches"][0]["metadata"]["source_path"] == "src/nav.tsx"
+    store.close()
+
+
 def test_search_can_filter_source_session_tags_time_and_crop_and_bound_embedding_output(tmp_path):
     store = VisualMemoryStore(
         tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4

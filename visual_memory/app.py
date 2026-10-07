@@ -8,7 +8,7 @@ from .embeddings import EmbeddingModel, resolve_vision_token_budget
 from .image_processing import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, decode_image
 from .model import EmbeddingGemma2Backend, MODEL_REPO
 from .retrieval import VisualMemoryEngine
-from .schemas import TextEmbeddingsRequest, VisualTextSearchRequest
+from .schemas import TextEmbeddingsRequest, VisualTextIndexRequest, VisualTextSearchRequest
 from .storage import VisualMemoryStore
 
 
@@ -155,6 +155,8 @@ async def index_visual_memory_image(
     namespace: str = Form(..., max_length=256),
     source: str | None = Form(default=None, max_length=128),
     session_id: str | None = Form(default=None, max_length=256),
+    sequence_id: str | None = Form(default=None, max_length=256),
+    sequence_number: int | None = Form(default=None, ge=0),
     timestamp: str | None = Form(default=None, max_length=64),
     metadata_json: str | None = Form(default=None),
     tags_json: str | None = Form(default=None),
@@ -172,6 +174,8 @@ async def index_visual_memory_image(
             namespace=namespace,
             source=source,
             session_id=session_id,
+            sequence_id=sequence_id,
+            sequence_number=sequence_number,
             timestamp=timestamp,
             metadata=metadata,
             tags=tags,
@@ -203,6 +207,42 @@ def search_visual_memory_text(request: VisualTextSearchRequest):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/v1/visual-memory/index/text")
+def index_visual_memory_text(request: VisualTextIndexRequest):
+    if request.start_line is not None and request.end_line is not None and request.end_line < request.start_line:
+        raise HTTPException(400, "end_line must be greater than or equal to start_line")
+    metadata = dict(request.metadata)
+    for key in ("source_path", "language", "start_line", "end_line"):
+        value = getattr(request, key)
+        if value is not None:
+            metadata[key] = value
+    try:
+        engine = get_memory_engine()
+        result = engine.index_text(
+            request.text,
+            namespace=request.namespace,
+            source=request.source,
+            session_id=request.session_id,
+            sequence_id=request.sequence_id,
+            sequence_number=request.sequence_number,
+            timestamp=request.timestamp,
+            tags=request.tags,
+            metadata=metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "frame_id": result.frame_id,
+        "observation_id": result.observation_id,
+        "embeddings_created": result.embeddings_created,
+        "duplicate": result.duplicate_level is not None,
+        "duplicate_level": result.duplicate_level,
+        "content_hash": result.content_hash,
+        "model": engine.model,
+        "revision": engine.revision,
+    }
+
+
 @app.post("/v1/visual-memory/search/image")
 async def search_visual_memory_image(
     image: UploadFile = File(...),
@@ -216,6 +256,7 @@ async def search_visual_memory_image(
     include_crops: bool = Form(default=True),
     top_k: int = Form(default=8, ge=1, le=50),
     include_embedding: bool = Form(default=False),
+    expand_temporal: int = Form(default=0, ge=0, le=2),
 ):
     data = await image.read(MAX_IMAGE_BYTES + 1)
     await image.close()
@@ -232,6 +273,7 @@ async def search_visual_memory_image(
             include_crops=include_crops,
             top_k=top_k,
             include_embedding=include_embedding,
+            expand_temporal=expand_temporal,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

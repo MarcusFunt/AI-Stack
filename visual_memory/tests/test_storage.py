@@ -1,4 +1,5 @@
 from io import BytesIO
+import sqlite3
 
 from PIL import Image
 
@@ -121,4 +122,48 @@ def test_query_filters_namespace_source_session_time_tags_and_crop(tmp_path):
     assert len(rows) == 1
     assert rows[0]["crop_type"] == "center"
     assert rows[0]["namespace"] == "game:run-a"
+    store.close()
+
+
+def test_sequence_links_are_ordered_by_sequence_number_and_stay_within_a_session(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="model-a", revision="rev-a", dimension=4
+    )
+
+    first = store.index_image(image_bytes=image_bytes("red"), namespace="game:run", session_id="session-a",
+                              sequence_id="round-1", sequence_number=1)
+    last = store.index_image(image_bytes=image_bytes("green"), namespace="game:run", session_id="session-a",
+                             sequence_id="round-1", sequence_number=3)
+    middle = store.index_image(image_bytes=image_bytes("blue"), namespace="game:run", session_id="session-a",
+                               sequence_id="round-1", sequence_number=2)
+    unrelated = store.index_image(image_bytes=image_bytes("black"), namespace="game:run", session_id="session-b",
+                                  sequence_id="round-1", sequence_number=1)
+
+    assert store.get_observation(first.observation_id)["next_observation_id"] == middle.observation_id
+    assert store.get_observation(last.observation_id)["previous_observation_id"] == middle.observation_id
+    assert [item["observation_id"] for item in store.temporal_window(middle.observation_id, radius=2)] == [
+        first.observation_id, middle.observation_id, last.observation_id
+    ]
+    assert store.temporal_window(unrelated.observation_id, radius=2)[0]["offset"] == 0
+    store.close()
+
+
+def test_schema_migrates_existing_observations_table_to_sequence_fields(tmp_path):
+    db_path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """CREATE TABLE assets (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, item_type TEXT NOT NULL,
+           content_hash TEXT NOT NULL, perceptual_hash TEXT, image_path TEXT, text_content TEXT, width INTEGER,
+           height INTEGER, metadata_json TEXT NOT NULL, created_at TEXT NOT NULL);
+           CREATE TABLE observations (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, namespace TEXT NOT NULL,
+           source TEXT, session_id TEXT, timestamp TEXT NOT NULL, tags_json TEXT NOT NULL,
+           metadata_json TEXT NOT NULL, duplicate_level TEXT);
+           PRAGMA user_version=1;"""
+    )
+    connection.close()
+
+    store = VisualMemoryStore(db_path, tmp_path / "images", model="model-a", revision="rev-a", dimension=4)
+    columns = {row["name"] for row in store._connection.execute("PRAGMA table_info(observations)").fetchall()}
+    assert {"sequence_id", "sequence_number", "previous_observation_id", "next_observation_id"}.issubset(columns)
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 3
     store.close()

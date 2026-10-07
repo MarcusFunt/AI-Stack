@@ -14,6 +14,7 @@ class FakeResult:
     duplicate_level: str | None = None
     embeddings_created: int = 10
     image_sha256: str = "abc123"
+    content_hash: str = "abc123"
 
 
 class FakeEngine:
@@ -22,6 +23,9 @@ class FakeEngine:
 
     def index_image(self, image_bytes, **kwargs):
         return FakeResult(duplicate_level="identical" if kwargs.get("session_id") == "repeat" else None)
+
+    def index_text(self, text, **kwargs):
+        return FakeResult(duplicate_level="identical" if kwargs.get("metadata", {}).get("source_path") == "repeat" else None)
 
     def search_text(self, query, **kwargs):
         return {"matches": [{"id": "frame-1", "score": 0.9, "metadata": {"namespace": kwargs.get("namespace")}}],
@@ -90,3 +94,25 @@ def test_search_api_rejects_unbounded_raw_embedding_results(monkeypatch):
         json={"query": "button", "top_k": 11, "include_embedding": True},
     )
     assert result.status_code == 400
+
+
+def test_text_index_endpoint_accepts_bounded_project_chunks(monkeypatch):
+    monkeypatch.setattr(app_module, "get_memory_engine", lambda: FakeEngine(), raising=False)
+    client = TestClient(app_module.app)
+
+    result = client.post(
+        "/v1/visual-memory/index/text",
+        json={
+            "text": "navigation menu overlaps title",
+            "namespace": "code:project-x",
+            "source": "code",
+            "source_path": "src/nav.tsx",
+            "language": "typescript",
+            "start_line": 12,
+            "end_line": 20,
+        },
+    )
+
+    assert result.status_code == 200
+    assert result.json()["frame_id"] == "frame-1"
+    assert result.json()["model"] == "google/embeddinggemma-2"
