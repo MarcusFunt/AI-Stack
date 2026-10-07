@@ -476,6 +476,7 @@ class VisualMemoryStore:
             "timestamp": row["timestamp"],
             "tags": json.loads(row["tags_json"] or "[]"),
             "metadata": {**asset_metadata, **observation_metadata},
+            "content_hash": row["content_hash"],
             "image_sha256": row["content_hash"] if row["item_type"] == "image" else None,
             "text": (row["text_content"] or "")[:4000] if row["item_type"] == "text" and "text_content" in row.keys() else None,
             "perceptual_hash": row["perceptual_hash"],
@@ -620,6 +621,7 @@ class VisualMemoryStore:
 
     def find_vectors(
         self, *, namespace: str | None = None, source: str | None = None, session_id: str | None = None,
+        parent_id: str | None = None,
         start_time: str | None = None, end_time: str | None = None, tags: Iterable[str] | None = None,
         crop_type: str | None = None, model: str | None = None, revision: str | None = None,
         dimension: int | None = None, normalization: str | None = None,
@@ -627,6 +629,7 @@ class VisualMemoryStore:
         clauses = []
         params: list[Any] = []
         for column, value in (("a.namespace", namespace), ("o.source", source), ("o.session_id", session_id),
+                              ("a.id", parent_id),
                               ("v.crop_type", crop_type), ("v.embedding_model", model),
                               ("v.embedding_revision", revision), ("v.embedding_dimension", dimension),
                               ("v.normalization_method", normalization)):

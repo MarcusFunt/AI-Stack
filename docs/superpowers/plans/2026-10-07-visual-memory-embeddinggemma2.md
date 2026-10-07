@@ -103,12 +103,12 @@
 - Preserve `POST /v1/vision/analyze` unchanged; add internal `POST /v1/vision/analyze-context` accepting 1 current frame, at most 6 crops, at most 4 references and structured text.
 - Add authenticated gateway `POST /v1/vision/analyze-detailed` and `POST /v1/vision/compare`; all worker calls use configured service routes and supervisor leases.
 
-- [ ] Test legacy vision request remains byte/field-compatible and detailed requests reject excess images, uploads, invalid profiles and invalid JSON context.
-- [ ] Test detailed orchestration returns concrete record IDs/scores/provenance and sends original current/reference image bytes to Qwen exactly once.
-- [ ] Implement multi-image VLM input and `VisualContextPack` rendering without changing the old route.
-- [ ] Implement exact/perceptual checks, text/image retrieval, context ranking and one Qwen call; accept/preserve website DOM/viewport/errors and game scene/frame/telemetry metadata.
-- [ ] Implement reference comparison by record ID or uploaded image, with Qwen receiving both original images.
-- [ ] Run gateway/VLM visual tests plus existing `tests/gateway/test_audio_vision_adapters.py` and `tests/gateway/test_chat_tracing.py`.
+- [x] Test legacy vision request remains byte/field-compatible and detailed requests reject excess images, uploads, invalid profiles and invalid JSON context.
+- [x] Test detailed orchestration returns concrete record IDs/scores/provenance and sends original current/reference image bytes to Qwen exactly once.
+- [x] Implement multi-image VLM input and `VisualContextPack` rendering without changing the old route.
+- [x] Implement exact/perceptual checks, text/image retrieval, context ranking and one Qwen call; accept/preserve website DOM/viewport/errors and game scene/frame/telemetry metadata.
+- [x] Implement reference comparison by record ID or uploaded image, with Qwen receiving both original images.
+- [x] Run gateway/VLM visual tests plus existing `tests/gateway/test_audio_vision_adapters.py` and `tests/gateway/test_chat_tracing.py`.
 - [ ] Commit Task 4 as `feat(vision): add retrieval-assisted Qwen analysis`.
 
 ### Task 5: Safe project indexing, cross-modal retrieval and MCP tools (Phase 5)

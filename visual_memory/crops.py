@@ -5,6 +5,20 @@ from dataclasses import dataclass
 from PIL import Image, ImageStat
 
 
+CROP_BOXES = {
+    "full": (0.0, 0.0, 1.0, 1.0),
+    "top_left": (0.0, 0.0, 0.5, 0.5),
+    "top_right": (0.5, 0.0, 0.5, 0.5),
+    "bottom_left": (0.0, 0.5, 0.5, 0.5),
+    "bottom_right": (0.5, 0.5, 0.5, 0.5),
+    "top_strip": (0.0, 0.0, 1.0, 0.25),
+    "bottom_strip": (0.0, 0.75, 1.0, 0.25),
+    "left_strip": (0.0, 0.0, 0.25, 1.0),
+    "right_strip": (0.75, 0.0, 0.25, 1.0),
+    "center": (0.25, 0.25, 0.5, 0.5),
+}
+
+
 @dataclass(frozen=True)
 class Crop:
     crop_type: str
@@ -31,6 +45,19 @@ def hamming_distance(left: str, right: str) -> int:
     return (int(left, 16) ^ int(right, 16)).bit_count()
 
 
+def crop_by_type(image: Image.Image, crop_type: str, *, min_dimension: int = 1) -> tuple[Image.Image, dict[str, float]]:
+    try:
+        x, y, w, h = CROP_BOXES[crop_type]
+    except KeyError as exc:
+        raise ValueError("unsupported crop type") from exc
+    width, height = image.size
+    left, top = round(x * width), round(y * height)
+    right, bottom = round((x + w) * width), round((y + h) * height)
+    if right - left < min_dimension or bottom - top < min_dimension:
+        raise ValueError("crop is smaller than the minimum dimension")
+    return image.convert("RGB").crop((left, top, right, bottom)), {"x": x, "y": y, "w": w, "h": h}
+
+
 def generate_crops(
     image: Image.Image,
     *,
@@ -44,20 +71,8 @@ def generate_crops(
     if width <= 0 or height <= 0:
         raise ValueError("image must be non-empty")
 
-    specifications = [
-        ("full", 0.0, 0.0, 1.0, 1.0),
-        ("top_left", 0.0, 0.0, 0.5, 0.5),
-        ("top_right", 0.5, 0.0, 0.5, 0.5),
-        ("bottom_left", 0.0, 0.5, 0.5, 0.5),
-        ("bottom_right", 0.5, 0.5, 0.5, 0.5),
-        ("top_strip", 0.0, 0.0, 1.0, 0.25),
-        ("bottom_strip", 0.0, 0.75, 1.0, 0.25),
-        ("left_strip", 0.0, 0.0, 0.25, 1.0),
-        ("right_strip", 0.75, 0.0, 0.25, 1.0),
-        ("center", 0.25, 0.25, 0.5, 0.5),
-    ]
     accepted: list[Crop] = []
-    for crop_type, x, y, w, h in specifications:
+    for crop_type, (x, y, w, h) in CROP_BOXES.items():
         left = round(x * width)
         top = round(y * height)
         right = round((x + w) * width)

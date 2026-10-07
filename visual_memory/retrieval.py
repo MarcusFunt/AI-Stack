@@ -217,6 +217,7 @@ class VisualMemoryEngine:
         namespace: str | None = None,
         source: str | None = None,
         session_id: str | None = None,
+        parent_id: str | None = None,
         start_time: str | None = None,
         end_time: str | None = None,
         tags: Iterable[str] | None = None,
@@ -241,6 +242,7 @@ class VisualMemoryEngine:
             namespace=namespace,
             source=source,
             session_id=session_id,
+            parent_id=parent_id,
             start_time=start_time,
             end_time=end_time,
             tags=tags,
@@ -262,9 +264,11 @@ class VisualMemoryEngine:
                 continue
             match = {
                 "id": row["asset_id"],
+                "vector_id": row["id"],
                 "score": score,
-                "parent_id": None,
+                "parent_id": row["asset_id"] if row["crop_type"] != "full" else None,
                 "crop": None if row["crop_type"] == "full" else {"type": row["crop_type"], "bbox": row["bbox"]},
+                "content_hash": row["content_hash"],
                 "metadata": {
                     **row["metadata"],
                     "namespace": row["namespace"],

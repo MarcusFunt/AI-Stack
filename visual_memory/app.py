@@ -1,14 +1,25 @@
 import json
 import os
 import threading
+from io import BytesIO
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
+from PIL import Image
 
+from .context_pack import build_context_pack
+from .crops import crop_by_type
 from .embeddings import EmbeddingModel, resolve_vision_token_budget
 from .image_processing import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, decode_image
 from .model import EmbeddingGemma2Backend, MODEL_REPO
 from .retrieval import VisualMemoryEngine
-from .schemas import TextEmbeddingsRequest, VisualTextIndexRequest, VisualTextSearchRequest
+from .schemas import (
+    TextEmbeddingsRequest,
+    VisualAssetReadRequest,
+    VisualContextPackRequest,
+    VisualTextIndexRequest,
+    VisualTextSearchRequest,
+)
 from .storage import VisualMemoryStore
 
 
@@ -249,6 +260,7 @@ async def search_visual_memory_image(
     namespace: str | None = Form(default=None, max_length=256),
     source: str | None = Form(default=None, max_length=128),
     session_id: str | None = Form(default=None, max_length=256),
+    parent_id: str | None = Form(default=None, max_length=128),
     start_time: str | None = Form(default=None, max_length=64),
     end_time: str | None = Form(default=None, max_length=64),
     tags_json: str | None = Form(default=None),
@@ -266,6 +278,7 @@ async def search_visual_memory_image(
             namespace=namespace,
             source=source,
             session_id=session_id,
+            parent_id=parent_id,
             start_time=start_time,
             end_time=end_time,
             tags=_json_tags(tags_json),
@@ -276,4 +289,38 @@ async def search_visual_memory_image(
             expand_temporal=expand_temporal,
         )
     except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/v1/visual-memory/context-pack")
+def visual_memory_context_pack(request: VisualContextPackRequest):
+    try:
+        return build_context_pack(**request.model_dump()).to_dict()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/v1/visual-memory/assets/read")
+def read_visual_memory_asset(request: VisualAssetReadRequest):
+    engine = get_memory_engine()
+    record = engine.store.get_record(request.frame_id)
+    if (
+        record is None
+        or record["item_type"] != "image"
+        or (request.namespace is not None and record["namespace"] != request.namespace)
+    ):
+        raise HTTPException(404, "visual image record was not found")
+    try:
+        data = engine.store.read_image(request.frame_id)
+        if request.crop_type is None:
+            return Response(content=data, media_type="image/webp")
+        image = decode_image(data, max_bytes=MAX_IMAGE_BYTES, max_pixels=MAX_IMAGE_PIXELS)
+        crop, _ = crop_by_type(image, request.crop_type)
+        buffer = BytesIO()
+        crop.save(buffer, format="WEBP", lossless=True, method=4)
+        result = buffer.getvalue()
+        if len(result) > MAX_IMAGE_BYTES:
+            raise ValueError("image byte limit exceeded")
+        return Response(content=result, media_type="image/webp")
+    except (KeyError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc

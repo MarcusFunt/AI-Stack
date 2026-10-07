@@ -11,6 +11,7 @@ import wave
 import zlib
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -19,13 +20,22 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.requests import ClientDisconnect
 
-from core.invocation import InvocationSource
+from core.invocation import (
+    Invocation,
+    InvocationInput,
+    InvocationOperation,
+    InvocationSource,
+    ModelPolicy,
+    Modality,
+    Principal,
+)
 from core.router import InvocationRouter, ModelNotFoundError, UnsupportedCapabilityError
 from gateway.eval_client import attach_screening_task, report_invocation_screen
 from gateway.adapters.openai_audio import OpenAIAudioAdapter
 from gateway.adapters.openai_chat import OpenAIChatAdapter
 from gateway.adapters.embedding import EmbeddingAdapter
 from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
+from gateway.visual_memory import VisualAnalysisError, VisualAnalysisOrchestrator
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.openinference import invocation_attributes
 from observability.tracing import (
@@ -89,6 +99,9 @@ CHAT_MAX_BODY_BYTES = int(os.getenv("CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024))
 TTS_MAX_BODY_BYTES = int(os.getenv("TTS_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
 STT_MAX_UPLOAD_BYTES = int(os.getenv("STT_MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
 VLM_MAX_UPLOAD_BYTES = int(os.getenv("VLM_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
+VISUAL_MEMORY_IMAGE_MAX_BYTES = int(os.getenv("VISUAL_MEMORY_IMAGE_MAX_BYTES", str(20 * 1024 * 1024)))
+VISUAL_CONTEXT_MAX_BODY_BYTES = int(os.getenv("VISUAL_CONTEXT_MAX_BODY_BYTES", str(48 * 1024 * 1024)))
+VISUAL_ANALYSIS_REQUEST_MAX_BYTES = int(os.getenv("VISUAL_ANALYSIS_REQUEST_MAX_BYTES", str(42 * 1024 * 1024)))
 EMBEDDING_MAX_BODY_BYTES = int(os.getenv("EMBEDDING_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 EMBEDDING_MAX_UPLOAD_BYTES = int(os.getenv("EMBEDDING_MAX_UPLOAD_BYTES", str(24 * 1024 * 1024)))
 COMFY_MAX_BODY_BYTES = int(os.getenv("COMFY_MAX_BODY_BYTES", str(128 * 1024 * 1024)))
@@ -160,6 +173,8 @@ async def bearer_auth(request: Request, call_next):
         "/v1/audio/transcriptions": ("gateway.audio.transcription", "transcribe", "openai_audio"),
         "/v1/audio/speech": ("gateway.audio.speech", "synthesize", "openai_audio"),
         "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
+        "/v1/vision/analyze-detailed": ("gateway.vision.analyze_detailed", "analyze", "openai_vision"),
+        "/v1/vision/compare": ("gateway.vision.compare", "analyze", "openai_vision"),
         "/v1/realtime/sessions": ("gateway.voice.session", "session.create", "websocket_voice"),
     }
     traced_route = traced_routes.get(request.url.path)
@@ -1000,6 +1015,7 @@ async def forward_buffered(
     body: bytes | None = None,
     max_body_bytes: int | None = None,
     body_label: str = "request body",
+    content_type: str | None = None,
 ):
     if body is not None:
         payload = body
@@ -1022,12 +1038,15 @@ async def forward_buffered(
                     parent=getattr(request.state, "trace_context", None),
                     attributes=provider_span_attributes(request, service, path),
                 ) as span:
+                    headers = upstream_headers(request, service)
+                    if content_type:
+                        headers["Content-Type"] = content_type
                     upstream = await client.request(
                         request.method,
                         SERVICES[service]["base"] + path,
                         params=request.query_params,
                         content=payload,
-                        headers=upstream_headers(request, service),
+                        headers=headers,
                     )
                     span.set_attribute("http.response.status_code", upstream.status_code)
                     span.set_attribute("http.response.body.size", len(upstream.content))
@@ -2277,6 +2296,229 @@ async def embeddings_image(request: Request):
         max_body_bytes=EMBEDDING_MAX_UPLOAD_BYTES,
         body_label="embedding image upload",
     )
+
+
+def _visual_form_text(form, name: str, default: str = "") -> str:
+    value = form.get(name, default)
+    return value if isinstance(value, str) else default
+
+
+def _visual_optional_text(form, name: str, limit: int) -> str | None:
+    value = form.get(name)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > limit:
+        raise HTTPException(400, f"{name} is invalid or too long")
+    return value
+
+
+def _visual_context_json(form) -> dict:
+    raw = _visual_form_text(form, "context_json", "{}")
+    if len(raw.encode("utf-8")) > 64_000:
+        raise HTTPException(413, "context_json exceeds byte limit")
+    try:
+        context = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "context_json must be valid JSON") from exc
+    if not isinstance(context, dict):
+        raise HTTPException(400, "context_json must be a JSON object")
+    return context
+
+
+def _visual_tags(form) -> list[str]:
+    raw = _visual_form_text(form, "tags_json", "[]")
+    if len(raw.encode("utf-8")) > 32_000:
+        raise HTTPException(413, "tags_json exceeds byte limit")
+    try:
+        tags = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "tags_json must be valid JSON") from exc
+    if not isinstance(tags, list) or len(tags) > 100 or any(not isinstance(tag, str) or len(tag) > 256 for tag in tags):
+        raise HTTPException(400, "tags_json must be an array of at most 100 short strings")
+    return tags
+
+
+async def _visual_upload(form, name: str, *, required: bool, limit: int):
+    upload = form.get(name)
+    if upload is None:
+        if required:
+            raise HTTPException(400, f"{name} image is required")
+        return None
+    if isinstance(upload, str) or not callable(getattr(upload, "read", None)):
+        raise HTTPException(400, f"{name} must be an uploaded image")
+    data = await upload.read(limit + 1)
+    if not data:
+        raise HTTPException(400, f"{name} image is empty")
+    if len(data) > limit:
+        raise HTTPException(413, f"{name} image exceeds byte limit")
+    filename = getattr(upload, "filename", None) or f"{name}.img"
+    media_type = getattr(upload, "content_type", None) or "application/octet-stream"
+    return filename, media_type, data
+
+
+def _visual_integer(form, name: str, *, default: int | None, minimum: int, maximum: int) -> int | None:
+    raw = form.get(name)
+    if raw is None or raw == "":
+        return default
+    if not isinstance(raw, str) or not raw.isdecimal():
+        raise HTTPException(400, f"{name} must be an integer")
+    value = int(raw)
+    if not minimum <= value <= maximum:
+        raise HTTPException(400, f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+async def _detailed_visual_analysis(request: Request, *, compare: bool):
+    request_limit = VISUAL_ANALYSIS_REQUEST_MAX_BYTES if compare else VLM_MAX_UPLOAD_BYTES
+    raw = await read_body_limited(request, request_limit, "visual analysis upload")
+    try:
+        form = await parse_form_body(request, raw)
+    except Exception as exc:
+        raise HTTPException(400, "request must be valid multipart form data") from exc
+
+    try:
+        if len(form.getlist("image")) != 1:
+            raise HTTPException(400, "exactly one current image is required")
+        if len(form.getlist("reference")) > 1 or len(form.getlist("reference_id")) > 1:
+            raise HTTPException(400, "compare accepts only one reference")
+        profile = _visual_form_text(form, "analysis_profile", "generic")
+        if profile not in {"generic", "website", "game"}:
+            raise HTTPException(400, "analysis_profile must be generic, website, or game")
+        structured_context = _visual_context_json(form)
+        image = await _visual_upload(form, "image", required=True, limit=VISUAL_MEMORY_IMAGE_MAX_BYTES)
+        assert image is not None
+        reference_image = await _visual_upload(
+            form, "reference", required=False, limit=VISUAL_MEMORY_IMAGE_MAX_BYTES
+        )
+        reference_id = _visual_optional_text(form, "reference_id", 128)
+        reference_namespace = _visual_optional_text(form, "reference_namespace", 256)
+        if compare and bool(reference_id) == bool(reference_image):
+            raise HTTPException(400, "compare requires exactly one of reference_id or reference image")
+        if not compare and (reference_id or reference_image or reference_namespace):
+            raise HTTPException(400, "reference fields are only accepted by /v1/vision/compare")
+
+        namespace = _visual_optional_text(form, "namespace", 256)
+        namespace = namespace or {
+            "generic": "visual:default",
+            "website": "website:default",
+            "game": "game:default",
+        }[profile]
+        code_namespace = _visual_optional_text(form, "code_namespace", 256)
+        source = _visual_optional_text(form, "source", 128) or profile
+        session_id = _visual_optional_text(form, "session_id", 256)
+        sequence_id = _visual_optional_text(form, "sequence_id", 256)
+        sequence_number = _visual_integer(form, "sequence_number", default=None, minimum=0, maximum=2**63 - 1)
+        timestamp = _visual_optional_text(form, "timestamp", 64)
+        tags = _visual_tags(form)
+        prompt = _visual_form_text(form, "prompt", "")
+        if len(prompt) > 16_000:
+            raise HTTPException(413, "prompt exceeds character limit")
+        if compare and not prompt.strip():
+            prompt = "Compare the current image with the selected reference. Describe meaningful differences."
+        reference_prompt = _visual_optional_text(form, "reference_prompt", 16_000)
+        max_new_tokens = _visual_integer(form, "max_new_tokens", default=384, minimum=1, maximum=2048)
+        assert max_new_tokens is not None
+    except Exception:
+        await form.close()
+        raise
+
+    trace_context = getattr(request.state, "trace_context", None)
+
+    def route_for(invocation: Invocation):
+        request.state.invocation = invocation
+        try:
+            route = INVOCATION_ROUTER.resolve(invocation)
+        except ModelNotFoundError as exc:
+            raise HTTPException(404, "no configured model for this visual operation") from exc
+        except UnsupportedCapabilityError as exc:
+            raise HTTPException(400, "configured model does not support this visual operation") from exc
+        request.state.model_route = route
+        return route
+
+    async def memory_call(path: str, body: bytes, content_type: str):
+        modality = Modality.TEXT if path.endswith("/search/text") else Modality.IMAGE
+        invocation = Invocation(
+            trace_context=trace_context,
+            operation=InvocationOperation.EMBED,
+            modality={modality},
+            source=InvocationSource.INTERNAL,
+            principal=Principal(
+                id="gateway-visual-analysis",
+                kind="service",
+                scopes=frozenset({"visual-memory:read", "visual-memory:write"}),
+            ),
+            model_policy=ModelPolicy(capability="embedding"),
+            input=InvocationInput(data={"path": path}),
+        )
+        route = route_for(invocation)
+        is_json = content_type.startswith("application/json")
+        limit = EMBEDDING_MAX_BODY_BYTES if is_json else EMBEDDING_MAX_UPLOAD_BYTES
+        return await forward_buffered(
+            route.provider_id,
+            path,
+            request,
+            body=body,
+            max_body_bytes=limit,
+            body_label="visual memory request",
+            content_type=content_type,
+        )
+
+    async def vlm_call(path: str, body: bytes, content_type: str):
+        filename, media_type, image_bytes = image
+        image_metadata = SimpleNamespace(filename=filename, content_type=media_type, size=len(image_bytes))
+        invocation = AUDIO_ADAPTER.to_vision(
+            {"image": image_metadata, "prompt": prompt, "max_new_tokens": str(max_new_tokens)},
+            trace_context,
+        )
+        route = route_for(invocation)
+        return await forward_buffered(
+            route.provider_id,
+            path,
+            request,
+            body=body,
+            max_body_bytes=VISUAL_CONTEXT_MAX_BODY_BYTES,
+            body_label="contextual vision request",
+            content_type=content_type,
+        )
+
+    orchestrator = VisualAnalysisOrchestrator(memory_call, vlm_call)
+    try:
+        result = await orchestrator.analyze(
+            image_bytes=image[2],
+            image_filename=image[0],
+            image_content_type=image[1],
+            namespace=namespace,
+            source=source,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            sequence_number=sequence_number,
+            timestamp=timestamp,
+            tags=tags,
+            analysis_profile=profile,
+            structured_context=structured_context,
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            code_namespace=code_namespace,
+            reference_id=reference_id,
+            reference_namespace=reference_namespace,
+            reference_image=reference_image,
+            reference_prompt=reference_prompt,
+        )
+        return result
+    except VisualAnalysisError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    finally:
+        await form.close()
+
+
+@app.post("/v1/vision/analyze-detailed")
+async def vision_analyze_detailed(request: Request):
+    return await _detailed_visual_analysis(request, compare=False)
+
+
+@app.post("/v1/vision/compare")
+async def vision_compare(request: Request):
+    return await _detailed_visual_analysis(request, compare=True)
 
 
 @app.api_route("/v1/vision/analyze", methods=["POST"])
