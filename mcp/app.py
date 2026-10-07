@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import json
 import logging
 import os
 import secrets
@@ -36,6 +37,7 @@ MCP_API_KEY = os.getenv("MCP_API_KEY", "").strip()
 MCP_URL_TOKEN = os.getenv("MCP_URL_TOKEN", "").strip()
 AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://gateway:8000").rstrip("/")
+VISUAL_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 if not MCP_API_KEY:
     raise RuntimeError("MCP_API_KEY must be set")
@@ -63,7 +65,8 @@ mcp = FastMCP(
         "Private bridge to Marcus Computer's Local AI stack. "
         "Use status/models for discovery and ask_local_ai to delegate work "
         "to the local fast or reasoning model. The local_ai_transcribe_audio and "
-        "local_ai_synthesize_speech tools expose the audio API; speech synthesis is English-only."
+        "local_ai_synthesize_speech tools expose the audio API; speech synthesis is English-only. "
+        "Visual memory tools index and retrieve images or project text through the authenticated gateway."
     ),
     stateless_http=True,
     json_response=True,
@@ -113,6 +116,78 @@ async def gateway_audio_request(
         detail = response.text[-1200:]
         raise RuntimeError(f"Local AI gateway returned HTTP {response.status_code}: {detail}")
     return response
+
+
+def _decode_visual_image(image_base64: str) -> bytes:
+    if not isinstance(image_base64, str) or not image_base64:
+        raise ValueError("image_base64 must not be empty")
+    if len(image_base64) > 28_000_000:
+        raise ValueError("image exceeds the 20 MiB MCP limit")
+    try:
+        image = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("image_base64 must contain valid base64") from exc
+    if not image:
+        raise ValueError("image must not be empty")
+    if len(image) > VISUAL_IMAGE_MAX_BYTES:
+        raise ValueError("image exceeds the 20 MiB MCP limit")
+    return image
+
+
+def _visual_filename(filename: str) -> str:
+    if not isinstance(filename, str):
+        raise ValueError("filename must be a string")
+    safe = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()[:128]
+    return safe or "image.png"
+
+
+def _visual_content_type(content_type: str) -> str:
+    if not isinstance(content_type, str) or not (
+        content_type.startswith("image/") or content_type == "application/octet-stream"
+    ):
+        raise ValueError("content_type must be an image media type")
+    return content_type
+
+
+def _visual_namespace(namespace: str) -> str:
+    if not isinstance(namespace, str) or not namespace.strip() or len(namespace) > 256:
+        raise ValueError("namespace must be non-empty and at most 256 characters")
+    return namespace.strip()
+
+
+def _visual_sequence_fields(
+    *,
+    session_id: str | None,
+    sequence_id: str | None,
+    sequence_number: int | None,
+    timestamp: str | None,
+    tags: list[str] | None,
+    metadata: dict | None,
+) -> list[tuple[str, str]]:
+    fields = []
+    for name, value, limit in (
+        ("session_id", session_id, 256),
+        ("sequence_id", sequence_id, 256),
+        ("timestamp", timestamp, 64),
+    ):
+        if value is not None:
+            if not isinstance(value, str) or len(value) > limit:
+                raise ValueError(f"{name} is invalid or too long")
+            fields.append((name, value))
+    if sequence_number is not None:
+        if isinstance(sequence_number, bool) or not isinstance(sequence_number, int) or sequence_number < 0:
+            raise ValueError("sequence_number must be a non-negative integer")
+        fields.append(("sequence_number", str(sequence_number)))
+    if tags is not None:
+        if not isinstance(tags, list) or len(tags) > 100 or any(not isinstance(tag, str) or len(tag) > 256 for tag in tags):
+            raise ValueError("tags must contain at most 100 short strings")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("metadata must be an object")
+    if tags:
+        fields.append(("tags_json", json.dumps(tags, ensure_ascii=False, separators=(",", ":"))))
+    if metadata:
+        fields.append(("metadata_json", json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))))
+    return fields
 @mcp.tool(description="Get Local AI gateway, GPU scheduler, and service status.")
 async def local_ai_status(ctx: Context) -> dict:
     return await gateway_request("GET", "/v1/system/status", trace_context=_request_trace_context(ctx))
@@ -234,6 +309,231 @@ async def local_ai_transcribe_audio(
         return response.json()
     except (ValueError, TypeError) as exc:
         raise RuntimeError("Local AI returned an unexpected transcription response") from exc
+
+
+@mcp.tool(
+    description=(
+        "Index one image in the shared visual memory through the authenticated Local AI gateway. "
+        "Provide image bytes as base64 and a namespace; optional sequence fields support temporal recall."
+    )
+)
+async def index_visual_frame(
+    image_base64: str,
+    namespace: str,
+    filename: str = "frame.png",
+    content_type: str = "image/png",
+    source: str = "mcp",
+    session_id: str | None = None,
+    sequence_id: str | None = None,
+    sequence_number: int | None = None,
+    timestamp: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+    *,
+    ctx: Context,
+) -> dict:
+    image = _decode_visual_image(image_base64)
+    namespace = _visual_namespace(namespace)
+    filename = _visual_filename(filename)
+    content_type = _visual_content_type(content_type)
+    if not isinstance(source, str) or not source.strip() or len(source) > 128:
+        raise ValueError("source must be non-empty and at most 128 characters")
+    data = [("namespace", namespace), ("source", source.strip())]
+    data.extend(_visual_sequence_fields(
+        session_id=session_id,
+        sequence_id=sequence_id,
+        sequence_number=sequence_number,
+        timestamp=timestamp,
+        tags=tags,
+        metadata=metadata,
+    ))
+    response = await gateway_audio_request(
+        "POST",
+        "/v1/visual-memory/index",
+        data=data,
+        files={"image": (filename, image, content_type)},
+        trace_context=_request_trace_context(ctx),
+    )
+    try:
+        return response.json()
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Local AI returned an unexpected visual-memory response") from exc
+
+
+@mcp.tool(
+    description=(
+        "Search visual memory using either text or an image. Results come from the shared EmbeddingGemma index "
+        "through the authenticated Local AI gateway."
+    )
+)
+async def search_visual_memory(
+    namespace: str,
+    query: str | None = None,
+    image_base64: str | None = None,
+    filename: str = "query.png",
+    content_type: str = "image/png",
+    top_k: int = 8,
+    source: str | None = None,
+    session_id: str | None = None,
+    tags: list[str] | None = None,
+    include_crops: bool = True,
+    expand_temporal: int = 0,
+    *,
+    ctx: Context,
+) -> dict:
+    namespace = _visual_namespace(namespace)
+    if query is not None and not isinstance(query, str):
+        raise ValueError("query must be a string")
+    has_query = isinstance(query, str) and bool(query.strip())
+    if has_query == bool(image_base64):
+        raise ValueError("provide exactly one non-empty query or image_base64")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        raise ValueError("top_k must be between 1 and 20")
+    if isinstance(expand_temporal, bool) or not isinstance(expand_temporal, int) or not 0 <= expand_temporal <= 2:
+        raise ValueError("expand_temporal must be between 0 and 2")
+    if tags is not None and (
+        not isinstance(tags, list) or len(tags) > 100 or any(not isinstance(tag, str) or len(tag) > 256 for tag in tags)
+    ):
+        raise ValueError("tags must contain at most 100 short strings")
+    if source is not None and (not isinstance(source, str) or len(source) > 128):
+        raise ValueError("source is invalid or too long")
+    if session_id is not None and (not isinstance(session_id, str) or len(session_id) > 256):
+        raise ValueError("session_id is invalid or too long")
+    trace_context = _request_trace_context(ctx)
+    if image_base64:
+        image = _decode_visual_image(image_base64)
+        form = [
+            ("namespace", namespace),
+            ("top_k", str(top_k)),
+            ("include_crops", str(bool(include_crops)).lower()),
+            ("expand_temporal", str(expand_temporal)),
+        ]
+        if source:
+            form.append(("source", source))
+        if session_id:
+            form.append(("session_id", session_id))
+        if tags:
+            form.append(("tags_json", json.dumps(tags, ensure_ascii=False, separators=(",", ":"))))
+        response = await gateway_audio_request(
+            "POST",
+            "/v1/visual-memory/search/image",
+            data=form,
+            files={"image": (_visual_filename(filename), image, _visual_content_type(content_type))},
+            trace_context=trace_context,
+        )
+    else:
+        if not isinstance(query, str) or not query.strip() or len(query) > 32_000:
+            raise ValueError("query must be non-empty and at most 32000 characters")
+        payload = {
+            "query": query.strip(),
+            "namespace": namespace,
+            "top_k": top_k,
+            "include_crops": include_crops,
+            "expand_temporal": expand_temporal,
+        }
+        if source:
+            payload["source"] = source
+        if session_id:
+            payload["session_id"] = session_id
+        if tags:
+            payload["tags"] = tags
+        return await gateway_request(
+            "POST",
+            "/v1/visual-memory/search/text",
+            json_body=payload,
+            trace_context=trace_context,
+        )
+    try:
+        return response.json()
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Local AI returned an unexpected visual-memory response") from exc
+
+
+@mcp.tool(
+    description=(
+        "Analyze an image with retrieval-backed website, game, or generic context. "
+        "Optionally compare it with a saved frame ID or another uploaded image."
+    )
+)
+async def analyze_visual(
+    image_base64: str,
+    filename: str = "image.png",
+    content_type: str = "image/png",
+    analysis_profile: Literal["generic", "website", "game"] = "generic",
+    namespace: str | None = None,
+    context: dict | None = None,
+    prompt: str = "",
+    code_namespace: str | None = None,
+    max_new_tokens: int = 384,
+    reference_id: str | None = None,
+    reference_namespace: str | None = None,
+    reference_image_base64: str | None = None,
+    reference_filename: str = "reference.png",
+    reference_content_type: str = "image/png",
+    *,
+    ctx: Context,
+) -> dict:
+    current = _decode_visual_image(image_base64)
+    filename = _visual_filename(filename)
+    content_type = _visual_content_type(content_type)
+    if not isinstance(analysis_profile, str) or analysis_profile not in {"generic", "website", "game"}:
+        raise ValueError("analysis_profile must be generic, website, or game")
+    if namespace is None:
+        namespace = {"generic": "visual:default", "website": "website:default", "game": "game:default"}[analysis_profile]
+    namespace = _visual_namespace(namespace)
+    if context is not None and not isinstance(context, dict):
+        raise ValueError("context must be an object")
+    context_json = json.dumps(context or {}, ensure_ascii=False, separators=(",", ":"))
+    if len(context_json.encode("utf-8")) > 64_000:
+        raise ValueError("context exceeds the 64 KiB MCP limit")
+    if not isinstance(prompt, str) or len(prompt) > 16_000:
+        raise ValueError("prompt exceeds 16000 characters")
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or not 1 <= max_new_tokens <= 2048:
+        raise ValueError("max_new_tokens must be between 1 and 2048")
+    if reference_id is not None and (not isinstance(reference_id, str) or not reference_id.strip() or len(reference_id) > 128):
+        raise ValueError("reference_id is invalid")
+    if reference_namespace is not None:
+        reference_namespace = _visual_namespace(reference_namespace)
+    if bool(reference_id) and bool(reference_image_base64):
+        raise ValueError("provide only one reference ID or reference image")
+    if reference_namespace and not reference_id:
+        raise ValueError("reference_namespace requires reference_id")
+
+    data = [
+        ("analysis_profile", analysis_profile),
+        ("namespace", namespace),
+        ("context_json", context_json),
+        ("prompt", prompt),
+        ("max_new_tokens", str(max_new_tokens)),
+    ]
+    if code_namespace:
+        data.append(("code_namespace", _visual_namespace(code_namespace)))
+    files = {"image": (filename, current, content_type)}
+    path = "/v1/vision/analyze-detailed"
+    if reference_id:
+        path = "/v1/vision/compare"
+        data.append(("reference_id", reference_id.strip()))
+        if reference_namespace:
+            data.append(("reference_namespace", reference_namespace))
+    elif reference_image_base64:
+        path = "/v1/vision/compare"
+        reference = _decode_visual_image(reference_image_base64)
+        files["reference"] = (
+            _visual_filename(reference_filename),
+            reference,
+            _visual_content_type(reference_content_type),
+        )
+    response = await gateway_audio_request(
+        "POST",
+        path,
+        data=data,
+        files=files,
+        trace_context=_request_trace_context(ctx),
+    )
+    try:
+        return response.json()
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Local AI returned an unexpected visual-analysis response") from exc
 
 
 @mcp.tool(

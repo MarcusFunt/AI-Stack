@@ -122,11 +122,11 @@
 - Host indexer requires explicit project root and namespace, allowlisted text extensions, bounded file/chunk sizes and uploads only to authenticated loopback gateway.
 - Add `index_visual_frame`, `search_visual_memory`, and `analyze_visual` MCP tools that call gateway APIs only.
 
-- [ ] Test traversal/symlink escape, `.env`/`.env.*`, secret-pattern exclusions, binary/oversized file rejection, chunk hash/path/range, and gateway-only upload target.
-- [ ] Test MCP argument validation and gateway forwarding without implementing retrieval inside MCP.
-- [ ] Implement generic text/code record indexing and code search in the shared vector namespace.
-- [ ] Implement gateway-backed MCP tools with image/base64 limits and trace propagation.
-- [ ] Run indexer and MCP tests; run PowerShell parse validation for the wrapper.
+- [x] Test traversal/symlink escape, `.env`/`.env.*`, secret-pattern exclusions, binary/oversized file rejection, chunk hash/path/range, and gateway-only upload target.
+- [x] Test MCP argument validation and gateway forwarding without implementing retrieval inside MCP.
+- [x] Implement generic text/code record indexing and code search in the shared vector namespace.
+- [x] Implement gateway-backed MCP tools with image/base64 limits and trace propagation.
+- [x] Run indexer and MCP tests; run PowerShell parse validation for the wrapper.
 - [ ] Commit Task 5 as `feat(memory): add safe project code retrieval`.
 
 ### Task 6: Metrics, diagnostics, model install, dashboard, benchmark and docs (Phase 6)

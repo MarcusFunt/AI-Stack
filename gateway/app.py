@@ -175,6 +175,10 @@ async def bearer_auth(request: Request, call_next):
         "/v1/vision/analyze": ("gateway.vision.analyze", "analyze", "openai_vision"),
         "/v1/vision/analyze-detailed": ("gateway.vision.analyze_detailed", "analyze", "openai_vision"),
         "/v1/vision/compare": ("gateway.vision.compare", "analyze", "openai_vision"),
+        "/v1/visual-memory/index": ("gateway.visual_memory.index_image", "embed", "visual_memory"),
+        "/v1/visual-memory/index/text": ("gateway.visual_memory.index_text", "embed", "visual_memory"),
+        "/v1/visual-memory/search/image": ("gateway.visual_memory.search_image", "embed", "visual_memory"),
+        "/v1/visual-memory/search/text": ("gateway.visual_memory.search_text", "embed", "visual_memory"),
         "/v1/realtime/sessions": ("gateway.voice.session", "session.create", "websocket_voice"),
     }
     traced_route = traced_routes.get(request.url.path)
@@ -2296,6 +2300,94 @@ async def embeddings_image(request: Request):
         max_body_bytes=EMBEDDING_MAX_UPLOAD_BYTES,
         body_label="embedding image upload",
     )
+
+
+async def _gateway_visual_memory_proxy(request: Request, path: str, *, image_upload: bool):
+    body_limit = EMBEDDING_MAX_UPLOAD_BYTES if image_upload else EMBEDDING_MAX_BODY_BYTES
+    raw = await read_body_limited(request, body_limit, "visual memory request")
+    data: dict = {"path": path}
+    if image_upload:
+        try:
+            form = await parse_form_body(request, raw)
+        except Exception as exc:
+            raise HTTPException(400, "request must be valid multipart form data") from exc
+        try:
+            images = form.getlist("image")
+            if len(images) != 1 or not callable(getattr(images[0], "read", None)):
+                raise HTTPException(400, "exactly one image upload is required")
+            image = images[0]
+            image_bytes = await image.read(VISUAL_MEMORY_IMAGE_MAX_BYTES + 1)
+            if not image_bytes:
+                raise HTTPException(400, "image upload is empty")
+            if len(image_bytes) > VISUAL_MEMORY_IMAGE_MAX_BYTES:
+                raise HTTPException(413, "image upload exceeds byte limit")
+            data["image"] = {
+                "filename": getattr(image, "filename", None),
+                "mime_type": getattr(image, "content_type", None),
+                "size_bytes": len(image_bytes),
+            }
+        finally:
+            await form.close()
+    else:
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "request body must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        for key in ("text", "query"):
+            if isinstance(payload.get(key), str):
+                data[key] = payload[key][:32_000]
+
+    invocation = Invocation(
+        trace_context=getattr(request.state, "trace_context", None),
+        operation=InvocationOperation.EMBED,
+        modality={Modality.IMAGE if image_upload else Modality.TEXT},
+        source=InvocationSource.INTERNAL,
+        principal=Principal(
+            id="gateway-visual-memory-client",
+            kind="api_key",
+            scopes=frozenset({"visual-memory:read", "visual-memory:write"}),
+        ),
+        model_policy=ModelPolicy(capability="embedding"),
+        input=InvocationInput(text=data.get("query") or data.get("text"), data=data),
+    )
+    request.state.invocation = invocation
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, "no configured embedding model") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, "configured model does not support embeddings") from exc
+    request.state.model_route = route
+    return await forward_buffered(
+        route.provider_id,
+        path,
+        request,
+        body=raw,
+        max_body_bytes=body_limit,
+        body_label="visual memory request",
+    )
+
+
+@app.post("/v1/visual-memory/index")
+async def gateway_visual_memory_index_image(request: Request):
+    return await _gateway_visual_memory_proxy(request, "/v1/visual-memory/index", image_upload=True)
+
+
+@app.post("/v1/visual-memory/index/text")
+async def gateway_visual_memory_index_text(request: Request):
+    return await _gateway_visual_memory_proxy(request, "/v1/visual-memory/index/text", image_upload=False)
+
+
+@app.post("/v1/visual-memory/search/image")
+async def gateway_visual_memory_search_image(request: Request):
+    return await _gateway_visual_memory_proxy(request, "/v1/visual-memory/search/image", image_upload=True)
+
+
+@app.post("/v1/visual-memory/search/text")
+async def gateway_visual_memory_search_text(request: Request):
+    return await _gateway_visual_memory_proxy(request, "/v1/visual-memory/search/text", image_upload=False)
 
 
 def _visual_form_text(form, name: str, default: str = "") -> str:
