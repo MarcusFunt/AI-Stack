@@ -5,7 +5,7 @@ param(
   [ValidateSet("launch","start","stop","stop-all","status","build","create","update","rollback","doctor","model-info","smoke","voice-smoke","test-leases","test-proxy","test-agent-lab","test-agent-evaluator","bench-agent-lab","burn-in","bench","logs","down")]
   [string]$Action = "status",
   [Parameter(Position=1)]
-  [ValidateSet("gateway","voice","coturn","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
+  [ValidateSet("gateway","voice","coturn","visual-memory","llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")]
   [string]$Service = "gateway",
   [Parameter(Position=2)]
   [string]$Snapshot = ""
@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $GpuServices = @("llm","reasoning","stt","tts","vlm","comfyui","wangp","lerobot")
-$BuildHashServices = @("docker-control","supervisor","telemetry","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","vlm")
+$BuildHashServices = @("docker-control","supervisor","telemetry","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","vlm","visual-memory")
 Set-Location $Root
 
 function Set-BuildSourceHashes {
@@ -302,7 +302,32 @@ switch ($Action) {
   }
   "start" {
     if ($Service -ne "coturn") { Start-ControlPlane }
-    if ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
+    if ($Service -eq "visual-memory") {
+      Assert-NoActiveJobs
+      $expectedSourceHash = (& python (Join-Path $PSScriptRoot "source_hash.py") "visual-memory").Trim()
+      if($LASTEXITCODE -ne 0 -or -not $expectedSourceHash) { throw "failed to compute visual-memory source hash" }
+      $imageInspect = @(& docker image inspect ai-stack-visual-memory:latest 2>$null | ConvertFrom-Json)
+      $imageSourceHash = ""
+      if($LASTEXITCODE -eq 0 -and $imageInspect) {
+        $imageSourceHash = [string]$imageInspect[0].Config.Labels."io.ai-stack.source-hash"
+      }
+      if($imageSourceHash -ne $expectedSourceHash) {
+        Invoke-Compose -CommandArgs @("build","visual-memory")
+      }
+      Assert-CurrentSupervisorIdle
+      Invoke-Compose -CommandArgs @("restart","docker-control","supervisor")
+      $supervisorReady = $false
+      for($i=0; $i -lt 30; $i++) {
+        try {
+          Invoke-Supervisor "GET" "/status" 10 2>$null | Out-Null
+          $supervisorReady = $true
+          break
+        } catch { Start-Sleep -Seconds 1 }
+      }
+      if(-not $supervisorReady) { throw "supervisor did not become ready after restart" }
+      Invoke-Compose -CommandArgs @("up","-d","visual-memory")
+    }
+    elseif ($Service -eq "voice") { Invoke-Compose -CommandArgs @("up","-d","voice") }
     elseif ($Service -eq "coturn") {
       $turnProxyEnabled = "0"
       $turnRestartPolicy = "no"
@@ -355,7 +380,7 @@ switch ($Action) {
   }
   "build" {
     Set-BuildSourceHashes
-    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","tts","vlm","comfyui","wangp")
+    Invoke-Compose -CommandArgs @("build","docker-control","telemetry","supervisor","gateway","voice","eval-router","dashboard","mcp","agent-lab","agent-evaluator","agent-eval-runner","stt","tts","vlm","comfyui","wangp","visual-memory")
   }
   "create" {
     Set-BuildSourceHashes
