@@ -148,7 +148,7 @@
 - [x] Implement metadata-only, 512-pixel thumbnail, and full-image retention policies across storage, retrieval and gateway analysis; exact duplicates upgrade fidelity without downgrading or redundant embedding.
 - [x] Update docs with the EmbeddingGemma retrieval/Qwen detailed-analysis split, CPU-first reason, context behavior, setup, retention and why embeddings are not Qwen soft tokens.
 - [x] Run applicable service/core/gateway/MCP/dashboard tests and builds, Python syntax checks, `docker compose config`, and `git diff --check`. Do not invoke `scripts/doctor.ps1` or live `scripts/smoke.ps1` in a way that reads `.env`; use isolated test settings for these checks.
-- [ ] Commit Task 6 as `test(memory): add visual retrieval benchmark and docs`.
+- [x] Commit Task 6 as `test(memory): add visual retrieval benchmark and docs`.
 
 ---
 
