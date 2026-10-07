@@ -1,4 +1,7 @@
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 
@@ -113,6 +116,77 @@ def test_hnsw_index_rebuilds_when_missing_corrupt_or_incompatible(tmp_path):
                         index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib)
     assert other.index_path != index_path
     assert other.rebuild_reason == "missing"
+    store.close()
+
+
+def test_hnsw_add_search_and_persist_are_serialized(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4
+    )
+    vector_index = VectorIndex(
+        store, "test-model", "test-revision", dimension=4,
+        index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib,
+    )
+
+    class GuardedIndex:
+        def __init__(self):
+            self.items = {1: [1.0, 0.0, 0.0, 0.0]}
+            self.capacity = 4
+            self._state_lock = threading.Lock()
+            self._active_operations = 0
+            self.overlap_detected = False
+
+        def _run(self, operation):
+            with self._state_lock:
+                self.overlap_detected |= self._active_operations > 0
+                self._active_operations += 1
+            try:
+                time.sleep(0.02)
+                return operation()
+            finally:
+                with self._state_lock:
+                    self._active_operations -= 1
+
+        def get_max_elements(self):
+            return self.capacity
+
+        def add_items(self, vectors, labels):
+            def add():
+                for vector, label in zip(vectors, labels):
+                    self.items[int(label)] = [float(value) for value in vector]
+            self._run(add)
+
+        def save_index(self, path):
+            def save():
+                with open(path, "w", encoding="utf-8") as stream:
+                    json.dump(self.items, stream)
+            self._run(save)
+
+        def knn_query(self, query, k):
+            def search():
+                return [[1]], [[0.0]]
+            return self._run(search)
+
+    guarded_index = GuardedIndex()
+    vector_index._labels = {1}
+    vector_index._index = guarded_index
+    start = threading.Barrier(2)
+
+    def add_vector():
+        start.wait()
+        vector_index.add(2, [0.0, 1.0, 0.0, 0.0])
+
+    def search_vector():
+        start.wait()
+        vector_index.search([1.0, 0.0, 0.0, 0.0], top_k=1)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        add_future = executor.submit(add_vector)
+        search_future = executor.submit(search_vector)
+        add_future.result()
+        search_future.result()
+
+    assert not guarded_index.overlap_detected
     store.close()
 
 

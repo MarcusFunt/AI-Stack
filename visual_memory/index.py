@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -102,12 +104,14 @@ class VectorIndex:
         self._hnswlib = hnswlib_module
         self._index = None
         self._labels: set[int] = set()
+        self._lock = threading.RLock()
         self.rebuild_reason: str | None = None
         self._load_or_rebuild()
 
     @property
     def count(self) -> int:
-        return len(self._labels)
+        with self._lock:
+            return len(self._labels)
 
     def _new_index(self, capacity: int):
         index = self._hnswlib.Index(space="cosine", dim=self.dimension)
@@ -128,86 +132,95 @@ class VectorIndex:
         return hashlib.sha256(packed.encode("ascii")).hexdigest()
 
     def _load_or_rebuild(self) -> None:
-        vectors = self._current_vectors()
-        if not self.index_path.exists() or not self.metadata_path.exists():
-            self.rebuild("missing", vectors=vectors)
-            return
-        try:
-            metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-            if metadata.get("descriptor") != self.descriptor:
-                self.rebuild("incompatible", vectors=vectors)
+        with self._lock:
+            vectors = self._current_vectors()
+            if not self.index_path.exists() or not self.metadata_path.exists():
+                self.rebuild("missing", vectors=vectors)
                 return
-            if metadata.get("count") != len(vectors):
-                self.rebuild("stale", vectors=vectors)
-                return
-            current_labels = [int(vector["id"]) for vector in vectors]
-            if metadata.get("label_digest") != self._label_digest(current_labels):
-                self.rebuild("stale", vectors=vectors)
-                return
-            index = self._new_index(max(1, len(vectors) + 16))
-            index.load_index(str(self.index_path), max_elements=max(1, len(vectors) + 16))
-            if int(index.get_current_count()) != len(vectors):
-                self.rebuild("stale", vectors=vectors)
-                return
-            self._index = index
-            self._labels = {int(vector["id"]) for vector in vectors}
-        except Exception:
-            self.rebuild("corrupt", vectors=vectors)
+            try:
+                metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+                if metadata.get("descriptor") != self.descriptor:
+                    self.rebuild("incompatible", vectors=vectors)
+                    return
+                if metadata.get("count") != len(vectors):
+                    self.rebuild("stale", vectors=vectors)
+                    return
+                current_labels = [int(vector["id"]) for vector in vectors]
+                if metadata.get("label_digest") != self._label_digest(current_labels):
+                    self.rebuild("stale", vectors=vectors)
+                    return
+                index = self._new_index(max(1, len(vectors) + 16))
+                index.load_index(str(self.index_path), max_elements=max(1, len(vectors) + 16))
+                if int(index.get_current_count()) != len(vectors):
+                    self.rebuild("stale", vectors=vectors)
+                    return
+                self._index = index
+                self._labels = {int(vector["id"]) for vector in vectors}
+            except Exception:
+                self.rebuild("corrupt", vectors=vectors)
 
     def rebuild(self, reason: str = "manual", *, vectors: list[dict[str, Any]] | None = None) -> None:
-        vectors = self._current_vectors() if vectors is None else vectors
-        index = self._new_index(max(1, len(vectors) + 16))
-        labels = [int(vector["id"]) for vector in vectors]
-        if vectors:
-            data = np.asarray([vector["vector"] for vector in vectors], dtype=np.float32)
-            index.add_items(data, np.asarray(labels, dtype=np.int64))
-        self._persist(index, labels)
-        self._index = index
-        self._labels = set(labels)
-        self.rebuild_reason = reason
+        with self._lock:
+            vectors = self._current_vectors() if vectors is None else vectors
+            index = self._new_index(max(1, len(vectors) + 16))
+            labels = [int(vector["id"]) for vector in vectors]
+            if vectors:
+                data = np.asarray([vector["vector"] for vector in vectors], dtype=np.float32)
+                index.add_items(data, np.asarray(labels, dtype=np.int64))
+            self._persist(index, labels)
+            self._index = index
+            self._labels = set(labels)
+            self.rebuild_reason = reason
 
     def _persist(self, index, labels) -> None:
-        temp_index = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
-        temp_meta = self.metadata_path.with_suffix(".json.tmp")
-        index.save_index(str(temp_index))
-        os.replace(temp_index, self.index_path)
-        temp_meta.write_text(
-            json.dumps({
-                "descriptor": self.descriptor,
-                "count": len(labels),
-                "label_digest": self._label_digest(labels),
-            }, sort_keys=True), encoding="utf-8"
-        )
-        os.replace(temp_meta, self.metadata_path)
+        with self._lock:
+            temp_index = self.index_path.with_name(f"{self.index_path.name}.{uuid.uuid4().hex}.tmp")
+            temp_meta = self.metadata_path.with_name(f"{self.metadata_path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                index.save_index(str(temp_index))
+                os.replace(temp_index, self.index_path)
+                temp_meta.write_text(
+                    json.dumps({
+                        "descriptor": self.descriptor,
+                        "count": len(labels),
+                        "label_digest": self._label_digest(labels),
+                    }, sort_keys=True), encoding="utf-8"
+                )
+                os.replace(temp_meta, self.metadata_path)
+            finally:
+                temp_index.unlink(missing_ok=True)
+                temp_meta.unlink(missing_ok=True)
 
     def add(self, vector_id: int, vector: list[float]) -> None:
         values = normalize_vector(vector, dimension=self.dimension)
         label = int(vector_id)
-        if label in self._labels:
-            return
-        if self._index is None:
-            self._index = self._new_index(1)
-        capacity = (
-            self._index.get_max_elements()
-            if hasattr(self._index, "get_max_elements")
-            else getattr(self._index, "capacity", 0)
-        )
-        if len(self._labels) >= max(1, capacity):
-            # hnswlib's Python Index exposes resize_index; use its max capacity hint.
-            current = max(1, len(self._labels))
-            self._index.resize_index(max(current + 1, current * 2))
-        self._index.add_items(np.asarray([values], dtype=np.float32), np.asarray([label], dtype=np.int64))
-        self._labels.add(label)
-        self._persist(self._index, self._labels)
+        with self._lock:
+            if label in self._labels:
+                return
+            if self._index is None:
+                self._index = self._new_index(1)
+            capacity = (
+                self._index.get_max_elements()
+                if hasattr(self._index, "get_max_elements")
+                else getattr(self._index, "capacity", 0)
+            )
+            if len(self._labels) >= max(1, capacity):
+                # hnswlib's Python Index exposes resize_index; use its max capacity hint.
+                current = max(1, len(self._labels))
+                self._index.resize_index(max(current + 1, current * 2))
+            self._index.add_items(np.asarray([values], dtype=np.float32), np.asarray([label], dtype=np.int64))
+            self._labels.add(label)
+            self._persist(self._index, self._labels)
 
     def search(self, vector: list[float], *, top_k: int) -> list[tuple[int, float]]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
         values = normalize_vector(vector, dimension=self.dimension)
-        if not self._labels:
-            return []
-        labels, distances = self._index.knn_query(
-            np.asarray([values], dtype=np.float32), k=min(top_k, len(self._labels))
-        )
-        return [(int(label), max(-1.0, min(1.0, 1.0 - float(distance))))
-                for label, distance in zip(labels[0], distances[0])]
+        with self._lock:
+            if not self._labels:
+                return []
+            labels, distances = self._index.knn_query(
+                np.asarray([values], dtype=np.float32), k=min(top_k, len(self._labels))
+            )
+            return [(int(label), max(-1.0, min(1.0, 1.0 - float(distance))))
+                    for label, distance in zip(labels[0], distances[0])]

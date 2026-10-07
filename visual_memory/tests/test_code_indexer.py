@@ -22,6 +22,20 @@ def test_scan_excludes_env_secret_and_non_allowlisted_files(tmp_path):
     assert report["excluded_extension"] == 1
 
 
+def test_scan_excludes_json_formatted_credentials(tmp_path):
+    (tmp_path / "safe.py").write_text("setting = True\n", encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        '{"client_secret":"json-secret-value-123","enabled":true}\n', encoding="utf-8"
+    )
+    (tmp_path / "auth.json").write_text('{"password": "a very secret password"}\n', encoding="utf-8")
+
+    chunks, report = indexer.scan_project(tmp_path)
+
+    assert [chunk.source_path for chunk in chunks] == ["safe.py"]
+    assert "json-secret-value-123" not in "".join(chunk.text for chunk in chunks)
+    assert report["excluded_secret"] == 2
+
+
 def test_scan_skips_binary_oversized_and_symlink_escape(tmp_path, monkeypatch):
     root = tmp_path / "project"
     root.mkdir()

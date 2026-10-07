@@ -36,6 +36,9 @@ SECRET_PATTERNS = (
     re.compile(
         r"(?im)^\s*(?:export\s+)?[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|PRIVATE[_-]?KEY|SECRET|TOKEN)[A-Z0-9_]*\s*[:=]\s*['\"]?[^\s'\"]{8,}"
     ),
+    re.compile(
+        r"""(?i)["'][A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|PRIVATE[_-]?KEY|SECRET|TOKEN)[A-Z0-9_]*["']\s*:\s*["'][^"']{8,}["']"""
+    ),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
