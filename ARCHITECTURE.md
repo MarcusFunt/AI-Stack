@@ -8,6 +8,8 @@ The CPU-only voice service handles realtime session state, VAD, and audio-to-tex
 
 The gateway translates public chat, Responses, audio, vision, and realtime-session requests into canonical invocations. Provider spans carry low-cardinality invocation, model, provider, and service attributes; streaming provider spans stay open through stream cleanup and record first-token timing. The voice service creates a turn span and STT, LLM, and TTS child spans, forwarding each child trace context back through the gateway. Set `OTEL_EXPORTER_OTLP_ENDPOINT` on the gateway and voice service to export spans to an OTLP/HTTP collector.
 
+Visual memory is a separate internal CPU service. EmbeddingGemma 2 embeds text, code, screenshots, and deterministic crops into normalized 768-dimensional vectors; SQLite stores authoritative metadata and vectors, while HNSW is rebuildable. The service has no host port or Docker socket. The gateway retrieves a bounded context pack and sends the actual current image plus selected crops/references to Qwen3-VL for detailed analysis. The pooled embedding is not converted to Qwen soft tokens because it has already lost spatial detail. See [Visual memory](docs/visual-memory.md) for setup, API, retention behavior, and benchmarks.
+
 Inbound MCP model tools extract W3C trace context from the MCP request and forward it to the gateway. Outbound MCP tools are discovered from host-supplied `MCP_SERVERS_JSON`, filtered by exact allowlists, and called only through the permission-checked Tool Broker. `MCP_SERVER_TOKENS_JSON` maps environment-variable names to host-supplied credentials.
 
 This separation deliberately keeps `/var/run/docker.sock` out of the network-facing gateway container.
@@ -62,6 +64,8 @@ Other modalities retain dedicated endpoints:
 - `/v1/audio/transcriptions`
 - `/v1/audio/speech`
 - `/v1/vision/analyze`
+- `/v1/vision/analyze-detailed` and `/v1/vision/compare` (retrieval-assisted Qwen analysis)
+- `/v1/embeddings/*` and `/v1/visual-memory/*` (authenticated retrieval)
 - `/v1/comfy/*`
 - `/v1/wangp/*`
 

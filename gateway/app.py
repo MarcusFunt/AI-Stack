@@ -36,6 +36,7 @@ from gateway.adapters.openai_chat import OpenAIChatAdapter
 from gateway.adapters.embedding import EmbeddingAdapter
 from gateway.adapters.openai_responses import OpenAIResponsesAdapter, ResponsesRequestError, map_chat_stream
 from gateway.visual_memory import VisualAnalysisError, VisualAnalysisOrchestrator
+from gateway.visual_metrics import VISUAL_METRICS
 from observability.propagation import extract_trace_context, inject_trace_context
 from observability.openinference import invocation_attributes
 from observability.tracing import (
@@ -179,6 +180,7 @@ async def bearer_auth(request: Request, call_next):
         "/v1/visual-memory/index/text": ("gateway.visual_memory.index_text", "embed", "visual_memory"),
         "/v1/visual-memory/search/image": ("gateway.visual_memory.search_image", "embed", "visual_memory"),
         "/v1/visual-memory/search/text": ("gateway.visual_memory.search_text", "embed", "visual_memory"),
+        "/v1/visual-memory/status": ("gateway.visual_memory.status", "embed", "visual_memory"),
         "/v1/realtime/sessions": ("gateway.voice.session", "session.create", "websocket_voice"),
     }
     traced_route = traced_routes.get(request.url.path)
@@ -1250,6 +1252,13 @@ async def metrics():
             voice_metrics = voice_response.text.rstrip()
     except Exception:
         voice_metrics = ""
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            memory_response = await client.get(SERVICES["visual-memory"]["base"] + "/metrics")
+            memory_response.raise_for_status()
+            memory_metrics = memory_response.text.rstrip()
+    except Exception:
+        memory_metrics = ""
     status = await supervisor("GET", "/status", timeout=5)
     active_jobs = sum(int(value) for value in status.get("active_jobs", {}).values())
     owner = status.get("gpu_owner") or "idle"
@@ -1262,6 +1271,8 @@ async def metrics():
     lines = [
         machine_metrics,
         voice_metrics,
+        memory_metrics,
+        VISUAL_METRICS.render_prometheus().rstrip(),
         "# TYPE localai_active_jobs gauge",
         f"localai_active_jobs {active_jobs}",
         "# TYPE localai_gpu_owner_info gauge",
@@ -1286,6 +1297,15 @@ async def capabilities():
             "transcription": "/v1/audio/transcriptions",
             "speech": "/v1/audio/speech",
             "vision": "/v1/vision/analyze",
+            "vision_detailed": "/v1/vision/analyze-detailed",
+            "vision_compare": "/v1/vision/compare",
+            "visual_memory": {
+                "status": "/v1/visual-memory/status",
+                "index_image": "/v1/visual-memory/index",
+                "index_text": "/v1/visual-memory/index/text",
+                "search_image": "/v1/visual-memory/search/image",
+                "search_text": "/v1/visual-memory/search/text",
+            },
             "realtime": "/v1/realtime/sessions",
             "models": "/v1/models",
             "status": "/v1/system/status",
@@ -2390,9 +2410,48 @@ async def gateway_visual_memory_search_text(request: Request):
     return await _gateway_visual_memory_proxy(request, "/v1/visual-memory/search/text", image_upload=False)
 
 
+@app.get("/v1/visual-memory/status")
+async def gateway_visual_memory_status(request: Request):
+    invocation = Invocation(
+        trace_context=getattr(request.state, "trace_context", None),
+        operation=InvocationOperation.EMBED,
+        modality={Modality.STRUCTURED},
+        source=InvocationSource.INTERNAL,
+        principal=Principal(id="gateway-visual-memory-status", kind="service", scopes=frozenset({"visual-memory:read"})),
+        model_policy=ModelPolicy(capability="embedding"),
+        input=InvocationInput(data={"diagnostics": True}),
+    )
+    request.state.invocation = invocation
+    try:
+        route = INVOCATION_ROUTER.resolve(invocation)
+    except ModelNotFoundError as exc:
+        raise HTTPException(404, "no configured embedding model") from exc
+    except UnsupportedCapabilityError as exc:
+        raise HTTPException(400, "configured model does not support embeddings") from exc
+    request.state.model_route = route
+    return await forward_buffered(
+        route.provider_id,
+        "/diagnostics",
+        request,
+        max_body_bytes=0,
+        body_label="visual-memory diagnostics request",
+    )
+
+
 def _visual_form_text(form, name: str, default: str = "") -> str:
     value = form.get(name, default)
     return value if isinstance(value, str) else default
+
+
+def _visual_form_bool(form, name: str, default: bool = False) -> bool:
+    value = form.get(name)
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise HTTPException(400, f"{name} must be true or false")
 
 
 def _visual_optional_text(form, name: str, limit: int) -> str | None:
@@ -2476,6 +2535,8 @@ async def _detailed_visual_analysis(request: Request, *, compare: bool):
         profile = _visual_form_text(form, "analysis_profile", "generic")
         if profile not in {"generic", "website", "game"}:
             raise HTTPException(400, "analysis_profile must be generic, website, or game")
+        skip_if_identical_frame = _visual_form_bool(form, "skip_if_identical_frame")
+        retention_policy = _visual_form_text(form, "retention_policy", "full-image")
         structured_context = _visual_context_json(form)
         image = await _visual_upload(form, "image", required=True, limit=VISUAL_MEMORY_IMAGE_MAX_BYTES)
         assert image is not None
@@ -2488,6 +2549,8 @@ async def _detailed_visual_analysis(request: Request, *, compare: bool):
             raise HTTPException(400, "compare requires exactly one of reference_id or reference image")
         if not compare and (reference_id or reference_image or reference_namespace):
             raise HTTPException(400, "reference fields are only accepted by /v1/vision/compare")
+        if compare and skip_if_identical_frame:
+            raise HTTPException(400, "skip_if_identical_frame is only available for detailed analysis")
 
         namespace = _visual_optional_text(form, "namespace", 256)
         namespace = namespace or {
@@ -2595,7 +2658,13 @@ async def _detailed_visual_analysis(request: Request, *, compare: bool):
             reference_namespace=reference_namespace,
             reference_image=reference_image,
             reference_prompt=reference_prompt,
+            skip_if_identical_frame=skip_if_identical_frame,
+            retention_policy=retention_policy,
         )
+        if result.get("analysis_skipped"):
+            VISUAL_METRICS.increment("qwen_escalations_avoided_total")
+        else:
+            VISUAL_METRICS.increment("qwen_escalations_total")
         return result
     except VisualAnalysisError as exc:
         raise HTTPException(exc.status_code, exc.detail) from exc

@@ -138,6 +138,16 @@ class EmbeddingGemma2Backend:
             )
         return self._pool(encoded)[0]
 
+    def embed_multimodal(self, image, text, *, instruction=None, vision_token_budget=560):
+        combined_instruction = " ".join(
+            value.strip() for value in (instruction, text) if isinstance(value, str) and value.strip()
+        )
+        return self.embed_image(
+            image,
+            instruction=combined_instruction or None,
+            vision_token_budget=vision_token_budget,
+        )
+
     def provenance(self) -> dict:
         try:
             transformers_version = importlib.metadata.version("transformers")

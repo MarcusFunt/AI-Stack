@@ -17,6 +17,7 @@ CONTEXTS = {
     "agent-eval-runner": ROOT / "agent_eval",
     "stt": ROOT / "stt",
     "vlm": ROOT / "vlm",
+    "visual-memory": ROOT / "visual_memory",
 }
 SOURCE_INPUTS = {
     service: (context,) for service, context in CONTEXTS.items()

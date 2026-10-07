@@ -20,7 +20,8 @@ from .embeddings import EMBEDDING_DIMENSION, normalize_vector
 
 
 NORMALIZATION_METHOD = "l2-float32-v1"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+IMAGE_RETENTION_POLICIES = {"metadata-only": 0, "thumbnail": 1, "full-image": 2}
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class IngestResult:
     vector_ids: tuple[int, ...]
     image_sha256: str | None
     content_hash: str = ""
+    retention_policy: str | None = None
 
 
 class VisualMemoryStore:
@@ -87,6 +89,7 @@ class VisualMemoryStore:
                     height INTEGER,
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    retention_policy TEXT NOT NULL DEFAULT 'full-image',
                     UNIQUE(namespace, item_type, content_hash)
                 );
                 CREATE TABLE IF NOT EXISTS observations (
@@ -140,6 +143,13 @@ class VisualMemoryStore:
             ):
                 if name not in observation_columns:
                     self._connection.execute(f"ALTER TABLE observations ADD COLUMN {name} {sql_type}")
+            asset_columns = {
+                row["name"] for row in self._connection.execute("PRAGMA table_info(assets)").fetchall()
+            }
+            if "retention_policy" not in asset_columns:
+                self._connection.execute(
+                    "ALTER TABLE assets ADD COLUMN retention_policy TEXT NOT NULL DEFAULT 'full-image'"
+                )
             if current_version < 3:
                 self._connection.execute("DROP INDEX IF EXISTS observations_sequence")
                 self._connection.execute(
@@ -160,6 +170,55 @@ class VisualMemoryStore:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _write_image_representation(self, image: Image.Image, content_hash: str, retention_policy: str) -> str | None:
+        if retention_policy == "metadata-only":
+            return None
+        if retention_policy == "thumbnail":
+            image = image.copy()
+            image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            suffix = ".thumbnail.webp"
+        else:
+            suffix = ".webp"
+        relative = Path(content_hash[:2]) / f"{content_hash}{suffix}"
+        image_path = self.image_root / relative
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        if not image_path.exists():
+            buffer = BytesIO()
+            if retention_policy == "thumbnail":
+                image.save(buffer, format="WEBP", quality=82, method=4)
+            else:
+                image.save(buffer, format="WEBP", lossless=True, method=4)
+            temp_path = image_path.with_name(f"{content_hash}.{uuid.uuid4().hex}{suffix}.tmp")
+            temp_path.write_bytes(buffer.getvalue())
+            os.replace(temp_path, image_path)
+        return relative.as_posix()
+
+    def ensure_image_retention(self, asset_id: str, image_bytes: bytes, retention_policy: str) -> str:
+        if retention_policy not in IMAGE_RETENTION_POLICIES:
+            raise ValueError("retention_policy must be metadata-only, thumbnail, or full-image")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT content_hash, retention_policy FROM assets WHERE id=? AND item_type='image'", (asset_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("image asset does not exist")
+        current = row["retention_policy"] or "full-image"
+        if IMAGE_RETENTION_POLICIES[retention_policy] <= IMAGE_RETENTION_POLICIES.get(current, 2):
+            return current
+        try:
+            with Image.open(BytesIO(image_bytes)) as opened:
+                image = opened.convert("RGB")
+                image.load()
+        except (OSError, ValueError) as exc:
+            raise ValueError("invalid image upload") from exc
+        relative = self._write_image_representation(image, row["content_hash"], retention_policy)
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE assets SET image_path=?, retention_policy=? WHERE id=?",
+                (relative, retention_policy, asset_id),
+            )
+        return retention_policy
 
     def find_exact_asset(self, namespace: str, content_hash: str, *, item_type: str = "image") -> str | None:
         with self._lock:
@@ -279,7 +338,8 @@ class VisualMemoryStore:
         observation_id = str(uuid.uuid4())
         with self._lock:
             row = self._connection.execute(
-                "SELECT content_hash, item_type FROM assets WHERE id=? AND namespace=?", (asset_id, namespace)
+                "SELECT content_hash, item_type, retention_policy FROM assets WHERE id=? AND namespace=?",
+                (asset_id, namespace),
             ).fetchone()
         if row is None:
             raise ValueError("duplicate asset does not exist in the namespace")
@@ -291,6 +351,7 @@ class VisualMemoryStore:
         return IngestResult(
             asset_id, observation_id, duplicate_level, 0, (),
             row["content_hash"] if row["item_type"] == "image" else None, row["content_hash"],
+            row["retention_policy"] if row["item_type"] == "image" else None,
         )
 
     def index_image(
@@ -305,6 +366,7 @@ class VisualMemoryStore:
         metadata: dict[str, Any] | None = None,
         vectors: Iterable[VectorPayload] = (),
         perceptual_hash_value: str | None = None,
+        retention_policy: str = "full-image",
         sequence_id: str | None = None,
         sequence_number: int | None = None,
     ) -> IngestResult:
@@ -312,12 +374,16 @@ class VisualMemoryStore:
             raise ValueError("namespace must be non-empty and at most 256 characters")
         if not image_bytes:
             raise ValueError("image upload is empty")
+        if retention_policy not in IMAGE_RETENTION_POLICIES:
+            raise ValueError("retention_policy must be metadata-only, thumbnail, or full-image")
         content_hash = hashlib.sha256(image_bytes).hexdigest()
         vectors = tuple(vectors)
         existing_id = self.find_exact_asset(namespace, content_hash)
         duplicate_level = "identical" if existing_id else None
+        raced_duplicate = False
         if existing_id:
             asset_id = existing_id
+            actual_retention_policy = self.ensure_image_retention(asset_id, image_bytes, retention_policy)
         else:
             try:
                 with Image.open(BytesIO(image_bytes)) as opened:
@@ -327,15 +393,8 @@ class VisualMemoryStore:
                 raise ValueError("invalid image upload") from exc
             perceptual_hash_value = perceptual_hash_value or perceptual_hash(image)
             asset_id = str(uuid.uuid4())
-            relative = Path(content_hash[:2]) / f"{content_hash}.webp"
-            image_path = self.image_root / relative
-            image_path.parent.mkdir(parents=True, exist_ok=True)
-            if not image_path.exists():
-                buffer = BytesIO()
-                image.save(buffer, format="WEBP", lossless=True, method=4)
-                temp_path = image_path.with_name(f"{content_hash}.{uuid.uuid4().hex}.webp.tmp")
-                temp_path.write_bytes(buffer.getvalue())
-                os.replace(temp_path, image_path)
+            relative = self._write_image_representation(image, content_hash, retention_policy)
+            actual_retention_policy = retention_policy
             width, height = image.size
 
         observation_id = str(uuid.uuid4())
@@ -345,9 +404,12 @@ class VisualMemoryStore:
             if not existing_id:
                 try:
                     self._connection.execute(
-                        "INSERT INTO assets VALUES (?, ?, 'image', ?, ?, ?, NULL, ?, ?, ?, ?)",
-                        (asset_id, namespace, content_hash, perceptual_hash_value, str(relative), width, height,
-                         self._json(metadata), self._now()),
+                        """INSERT INTO assets
+                        (id,namespace,item_type,content_hash,perceptual_hash,image_path,text_content,width,height,
+                         metadata_json,created_at,retention_policy)
+                        VALUES (?,?,'image',?,?,?,NULL,?,?,?,?,?)""",
+                        (asset_id, namespace, content_hash, perceptual_hash_value,
+                         relative, width, height, self._json(metadata), self._now(), retention_policy),
                     )
                 except sqlite3.IntegrityError:
                     existing = self.find_exact_asset(namespace, content_hash)
@@ -355,6 +417,7 @@ class VisualMemoryStore:
                         raise
                     asset_id = existing
                     duplicate_level = "identical"
+                    raced_duplicate = True
             self._insert_observation(
                 observation_id, asset_id, namespace, source, session_id, timestamp, tags, metadata,
                 duplicate_level, sequence_id, sequence_number,
@@ -381,8 +444,11 @@ class VisualMemoryStore:
                         (asset_id, payload.crop_type, self.model, self.revision, self.dimension, self.normalization),
                     ).fetchone()
                     inserted_vector_ids.append(int(row["id"]))
+        if raced_duplicate:
+            actual_retention_policy = self.ensure_image_retention(asset_id, image_bytes, retention_policy)
         return IngestResult(asset_id, observation_id, duplicate_level, new_vector_count,
-                            tuple(dict.fromkeys(inserted_vector_ids)), content_hash, content_hash)
+                            tuple(dict.fromkeys(inserted_vector_ids)), content_hash, content_hash,
+                            actual_retention_policy)
 
     def index_text(
         self,
@@ -482,6 +548,11 @@ class VisualMemoryStore:
             "perceptual_hash": row["perceptual_hash"],
             "width": row["width"],
             "height": row["height"],
+            "retention_policy": (
+                row["retention_policy"]
+                if row["item_type"] == "image" and "retention_policy" in row.keys()
+                else None
+            ),
             "parent_id": None,
             "duplicate_level": row["duplicate_level"],
             "observation_id": row["observation_id"],
@@ -643,6 +714,7 @@ class VisualMemoryStore:
             clauses.append("o.timestamp<=?")
             params.append(end_time)
         sql = """SELECT v.*, a.namespace, a.item_type, a.content_hash, a.perceptual_hash, a.text_content, a.width, a.height,
+            a.retention_policy,
             a.metadata_json, o.id AS observation_id, o.source, o.session_id, o.timestamp, o.tags_json,
             o.metadata_json AS observation_metadata_json, o.duplicate_level, o.sequence_id, o.sequence_number,
             o.previous_observation_id, o.next_observation_id

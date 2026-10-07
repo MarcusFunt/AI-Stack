@@ -44,6 +44,7 @@ class TestDetailedVisualAnalysisGateway:
         cls.environment.start()
         sys.modules.pop("gateway.app", None)
         cls.gateway = importlib.import_module("gateway.app")
+        cls.gateway.VISUAL_METRICS.reset()
         cls.client = TestClient(cls.gateway.app)
 
     @classmethod
@@ -53,6 +54,7 @@ class TestDetailedVisualAnalysisGateway:
 
     def test_detailed_endpoint_retrieves_evidence_and_sends_original_current_image_once(self):
         calls = []
+        qwen_calls_before = self.gateway.VISUAL_METRICS.counter("qwen_escalations_total")
         current_image = png_bytes("red")
         reference_bytes = b"reference-image-bytes"
         crop_bytes = b"selected-crop-bytes"
@@ -125,6 +127,65 @@ class TestDetailedVisualAnalysisGateway:
         assert payload["text_evidence"][0]["metadata"]["source_path"] == "src/header.css"
         assert len([call for call in calls if call[1] == "/v1/vision/analyze-context"]) == 1
         assert all(call[0] in {"visual-memory", "vlm"} for call in calls)
+        assert self.gateway.VISUAL_METRICS.counter("qwen_escalations_total") == qwen_calls_before + 1
+
+    def test_metadata_only_retention_reaches_index_and_missing_images_are_omitted_from_vlm(self):
+        calls = []
+        current_image = png_bytes("blue")
+        original_forward = self.gateway.forward_buffered
+
+        async def fake_forward(service, path, request, body=None, content_type=None, **kwargs):
+            calls.append(path)
+            if path == "/v1/visual-memory/index":
+                form = parse_multipart(body, content_type)
+                assert form["retention_policy"][0][1] == b"metadata-only"
+                return Response(json.dumps({"frame_id": "current-only-metadata", "observation_id": "obs-current",
+                                            "duplicate": False, "model": "google/embeddinggemma-2",
+                                            "revision": "pinned"}), media_type="application/json")
+            if path == "/v1/visual-memory/search/image":
+                form = parse_multipart(body, content_type)
+                parent = form.get("parent_id", [(None, b"")])[0][1].decode()
+                if parent == "current-only-metadata":
+                    matches = [{"id": parent, "vector_id": 11,
+                                "crop": {"type": "center", "bbox": {"x": 0, "y": 0, "w": 1, "h": 1}}}]
+                else:
+                    matches = [{"id": "prior-metadata-only", "score": 0.75,
+                                "metadata": {"namespace": "website:demo"}}]
+                return Response(json.dumps({"matches": matches}), media_type="application/json")
+            if path == "/v1/visual-memory/context-pack":
+                pack = json.loads(body)
+                return Response(json.dumps({
+                    "current_frame": pack["current_frame"], "retrieved": pack["retrieved"],
+                    "crops": pack["crops"], "text_context": [], "temporal_context": [],
+                    "structured_context": pack["structured_context"],
+                }), media_type="application/json")
+            if path == "/v1/visual-memory/assets/read":
+                return Response(b'{"detail":"visual image bytes are not retained"}', status_code=404,
+                                media_type="application/json")
+            if path == "/v1/vision/analyze-context":
+                form = parse_multipart(body, content_type)
+                assert form["current_image"][0][1] == current_image
+                assert "crop_images" not in form
+                assert "reference_images" not in form
+                return Response(json.dumps({"model": "Qwen/Qwen3-VL-4B-Instruct", "text": "Analysis completed."}),
+                                media_type="application/json")
+            raise AssertionError(f"unexpected worker call {service} {path}")
+
+        self.gateway.forward_buffered = fake_forward
+        try:
+            response = self.client.post(
+                "/v1/vision/analyze-detailed",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                data={"analysis_profile": "website", "namespace": "website:demo",
+                      "retention_policy": "metadata-only", "prompt": "Summarize this page."},
+                files={"image": ("current.png", current_image, "image/png")},
+            )
+        finally:
+            self.gateway.forward_buffered = original_forward
+
+        assert response.status_code == 200
+        assert response.json()["analysis"]["text"] == "Analysis completed."
+        assert "/v1/vision/analyze-context" in calls
 
     def test_detailed_endpoint_rejects_invalid_profiles_and_context_without_worker_calls(self):
         calls = []
@@ -148,12 +209,58 @@ class TestDetailedVisualAnalysisGateway:
                 data={"analysis_profile": "game", "context_json": "{"},
                 files={"image": ("current.png", png_bytes(), "image/png")},
             )
+            invalid_skip_policy = self.client.post(
+                "/v1/vision/analyze-detailed",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                data={"analysis_profile": "game", "skip_if_identical_frame": "sometimes"},
+                files={"image": ("current.png", png_bytes(), "image/png")},
+            )
         finally:
             self.gateway.forward_buffered = original_forward
 
         assert invalid_profile.status_code == 400
         assert invalid_context.status_code == 400
+        assert invalid_skip_policy.status_code == 400
         assert calls == []
+
+    def test_explicit_exact_duplicate_policy_skips_qwen_and_records_avoided_escalation(self):
+        calls = []
+        avoided_before = self.gateway.VISUAL_METRICS.counter("qwen_escalations_avoided_total")
+        qwen_before = self.gateway.VISUAL_METRICS.counter("qwen_escalations_total")
+        original_forward = self.gateway.forward_buffered
+
+        async def fake_forward(service, path, request, body=None, content_type=None, **kwargs):
+            calls.append((service, path))
+            assert path == "/v1/visual-memory/index"
+            return Response(json.dumps({
+                "frame_id": "known-frame",
+                "observation_id": "known-observation",
+                "duplicate": True,
+                "duplicate_level": "identical",
+                "model": "google/embeddinggemma-2",
+                "revision": "pinned",
+            }), media_type="application/json")
+
+        self.gateway.forward_buffered = fake_forward
+        try:
+            response = self.client.post(
+                "/v1/vision/analyze-detailed",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+                data={"analysis_profile": "website", "namespace": "website:demo",
+                      "skip_if_identical_frame": "true", "prompt": "Describe the page."},
+                files={"image": ("current.png", png_bytes(), "image/png")},
+            )
+        finally:
+            self.gateway.forward_buffered = original_forward
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["analysis_skipped"] is True
+        assert payload["skip_reason"] == "identical_frame_already_indexed"
+        assert payload["current_frame"]["id"] == "known-frame"
+        assert calls == [("visual-memory", "/v1/visual-memory/index")]
+        assert self.gateway.VISUAL_METRICS.counter("qwen_escalations_avoided_total") == avoided_before + 1
+        assert self.gateway.VISUAL_METRICS.counter("qwen_escalations_total") == qwen_before
 
     def test_compare_accepts_uploaded_reference_and_sends_both_original_images(self):
         calls = []

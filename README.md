@@ -22,11 +22,13 @@ Supervisor     -- internal Docker/GPU lifecycle + semantic state service
   +-- faster-whisper
   +-- Qwen3-TTS
   +-- Qwen3-VL
+  +-- Visual memory (EmbeddingGemma 2, CPU-only)
   +-- ComfyUI
   +-- WanGP
   +-- LeRobot (optional)
 
 Gateway <--> Voice -- internal realtime audio session service (CPU-only)
+Gateway <--> Visual memory -- internal image/text retrieval and persistent index (CPU-only)
 ```
 
 Only one heavyweight GPU service owns the GPU at a time. The gateway, supervisor, telemetry sampler, dashboard, and MCP bridge stay resident.
@@ -66,6 +68,8 @@ Operational helpers:
 The MCP exposes status, model discovery, API capability discovery, `ask_local_ai`, audio transcription, and English-only speech synthesis. Audio tools use base64 for file/audio payloads; synthesis supports all nine Qwen3-TTS CustomVoice speakers, expressive `instruct` guidance, speed, and output format. It does not expose shell, arbitrary files, Docker, or remote-desktop functions.
 
 See [Audio API](docs/audio-api.md) for REST and MCP request fields, English-only TTS behavior, supported transcript formats, and examples.
+
+See [Visual memory](docs/visual-memory.md) for EmbeddingGemma installation, image/text retrieval, safe project indexing, retention limits, diagnostics, and the opt-in benchmark. EmbeddingGemma selects visual evidence; Qwen3-VL receives the actual image for detailed analysis.
 
 ## Realtime voice
 

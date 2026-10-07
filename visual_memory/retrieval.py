@@ -9,7 +9,7 @@ from .embeddings import EMBEDDING_DIMENSION, normalize_vector
 from .image_processing import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, decode_image
 from .index import VectorIndex
 from .model import MODEL_REPO, MODEL_REVISION
-from .storage import IngestResult, NORMALIZATION_METHOD, VectorPayload, VisualMemoryStore
+from .storage import IMAGE_RETENTION_POLICIES, IngestResult, NORMALIZATION_METHOD, VectorPayload, VisualMemoryStore
 
 
 class VisualMemoryEngine:
@@ -53,15 +53,20 @@ class VisualMemoryEngine:
         crop_mode: str = "basic",
         vision_token_budget: int = 560,
         instruction: str | None = None,
+        retention_policy: str = "full-image",
     ) -> IngestResult:
         if crop_mode not in {"none", "basic"}:
             raise ValueError("crop_mode must be none or basic")
         if vision_token_budget not in {280, 560, 1120}:
             raise ValueError("unsupported vision token budget")
+        if retention_policy not in IMAGE_RETENTION_POLICIES:
+            raise ValueError("retention_policy must be metadata-only, thumbnail, or full-image")
         if len(image_bytes) > MAX_IMAGE_BYTES:
             raise ValueError("image byte limit exceeded")
         content_hash = hashlib.sha256(image_bytes).hexdigest()
         existing_id = self.store.find_exact_asset(namespace, content_hash)
+        if existing_id:
+            self.store.ensure_image_retention(existing_id, image_bytes, retention_policy)
         if crop_mode == "none" and existing_id and self.store.has_vectors(
             existing_id, self.model, self.revision, ["full"]
         ):
@@ -150,6 +155,7 @@ class VisualMemoryEngine:
             metadata=effective_metadata,
             vectors=payloads,
             perceptual_hash_value=image_hash,
+            retention_policy=retention_policy,
         )
         for vector_id in result.vector_ids:
             vector_record = self.store.get_vector(vector_id)

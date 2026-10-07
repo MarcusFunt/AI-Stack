@@ -9,6 +9,7 @@ import { SpeechPanel } from './SpeechPanel'
 import { MobileNavigation } from './MobileNavigation'
 import { AgentLabPanel } from './AgentLabPanel'
 import { MaintenancePanel } from './MaintenancePanel'
+import { VisualMemoryStatusPanel } from './VisualMemoryStatusPanel'
 import { navGroups, type NavigationSection } from './navigation'
 import type { ApiCapabilities, ModelInfo, NetworkStatus, Snapshot, SupervisorStatus } from './api'
 import {
@@ -375,6 +376,7 @@ function SystemPanel(props: {
           <p>Gateway stays resident; heavyweight workers are demand-loaded and released after idle timeouts.</p>
         </div>
       </div>
+      <VisualMemoryStatusPanel />
     </section>
   )
 }

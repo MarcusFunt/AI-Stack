@@ -15,6 +15,7 @@ class FakeResult:
     embeddings_created: int = 10
     image_sha256: str = "abc123"
     content_hash: str = "abc123"
+    retention_policy: str | None = "full-image"
 
 
 class FakeEngine:
@@ -22,7 +23,10 @@ class FakeEngine:
     revision = "pinned-revision"
 
     def index_image(self, image_bytes, **kwargs):
-        return FakeResult(duplicate_level="identical" if kwargs.get("session_id") == "repeat" else None)
+        return FakeResult(
+            duplicate_level="identical" if kwargs.get("session_id") == "repeat" else None,
+            retention_policy=kwargs.get("retention_policy", "full-image"),
+        )
 
     def index_text(self, text, **kwargs):
         return FakeResult(duplicate_level="identical" if kwargs.get("metadata", {}).get("source_path") == "repeat" else None)
@@ -45,6 +49,7 @@ def png_bytes():
 
 def test_image_index_endpoint_records_namespace_provenance_and_duplicate_level(monkeypatch):
     monkeypatch.setattr(app_module, "get_memory_engine", lambda: FakeEngine(), raising=False)
+    app_module.METRICS.reset()
     client = TestClient(app_module.app)
 
     first = client.post(
@@ -62,11 +67,29 @@ def test_image_index_endpoint_records_namespace_provenance_and_duplicate_level(m
     assert first.json()["frame_id"] == "frame-1"
     assert first.json()["embeddings_created"] == 10
     assert first.json()["model"] == "google/embeddinggemma-2"
+    assert first.json()["retention_policy"] == "full-image"
     assert duplicate.json()["duplicate"] is True
+    assert app_module.METRICS.counter("index_records_total") == 2
+    assert app_module.METRICS.counter("index_vectors_total") == 20
+    assert app_module.METRICS.counter("duplicate_exact_total") == 1
+
+
+def test_image_index_api_accepts_explicit_metadata_only_retention(monkeypatch):
+    monkeypatch.setattr(app_module, "get_memory_engine", lambda: FakeEngine(), raising=False)
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/v1/visual-memory/index",
+        data={"namespace": "website:ephemeral", "retention_policy": "metadata-only", "crop_mode": "none"},
+        files={"image": ("frame.png", png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["retention_policy"] == "metadata-only"
 
 
 def test_text_and_image_search_endpoints_do_not_include_embeddings_by_default(monkeypatch):
     monkeypatch.setattr(app_module, "get_memory_engine", lambda: FakeEngine(), raising=False)
+    app_module.METRICS.reset()
     client = TestClient(app_module.app)
 
     text_result = client.post(
@@ -83,6 +106,8 @@ def test_text_and_image_search_endpoints_do_not_include_embeddings_by_default(mo
     assert image_result.status_code == 200
     assert "embedding" not in text_result.json()["matches"][0]
     assert text_result.json()["matches"][0]["metadata"]["namespace"] == "website:demo"
+    assert app_module.METRICS.counter("embedding_requests_total") == 2
+    assert app_module.METRICS.percentiles("visual_search_latency_seconds")["p95"] is not None
 
 
 def test_search_api_rejects_unbounded_raw_embedding_results(monkeypatch):

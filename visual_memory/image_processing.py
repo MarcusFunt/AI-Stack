@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import time
 
 from PIL import Image, UnidentifiedImageError
+
+from .metrics import METRICS
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -15,6 +18,7 @@ def decode_image(
     max_bytes: int = MAX_IMAGE_BYTES,
     max_pixels: int = MAX_IMAGE_PIXELS,
 ) -> Image.Image:
+    started = time.perf_counter()
     if not data:
         raise ValueError("image upload is empty")
     if len(data) > max_bytes:
@@ -30,3 +34,5 @@ def decode_image(
         raise
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
         raise ValueError("invalid image upload") from exc
+    finally:
+        METRICS.observe("image_preprocessing_seconds", time.perf_counter() - started)

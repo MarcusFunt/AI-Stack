@@ -93,3 +93,39 @@ class TestGatewayVisualMemoryRoutes:
         assert len(calls) == 1
         assert calls[0][0:2] == ("visual-memory", "/v1/visual-memory/index")
         assert image in calls[0][2]
+
+    def test_visual_memory_status_uses_embedding_registry_route(self):
+        observed = {}
+        original_forward = self.gateway.forward_buffered
+
+        async def fake_forward(service, path, request, **kwargs):
+            observed.update(service=service, path=path, route=request.state.model_route)
+            return Response('{"status":"ok","loaded":false}', media_type="application/json")
+
+        self.gateway.forward_buffered = fake_forward
+        try:
+            response = self.client.get(
+                "/v1/visual-memory/status",
+                headers={"Authorization": "Bearer test-only-gateway-key"},
+            )
+        finally:
+            self.gateway.forward_buffered = original_forward
+
+        assert response.status_code == 200
+        assert response.json()["loaded"] is False
+        assert observed["service"] == "visual-memory"
+        assert observed["path"] == "/diagnostics"
+        assert observed["route"].provider_id == "visual-memory"
+
+    def test_capabilities_advertise_detailed_vision_and_visual_memory_routes(self):
+        response = self.client.get(
+            "/v1/capabilities",
+            headers={"Authorization": "Bearer test-only-gateway-key"},
+        )
+
+        assert response.status_code == 200
+        endpoints = response.json()["endpoints"]
+        assert endpoints["vision"] == "/v1/vision/analyze"
+        assert endpoints["vision_detailed"] == "/v1/vision/analyze-detailed"
+        assert endpoints["vision_compare"] == "/v1/vision/compare"
+        assert endpoints["visual_memory"]["search_text"] == "/v1/visual-memory/search/text"

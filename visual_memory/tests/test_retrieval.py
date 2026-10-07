@@ -156,6 +156,28 @@ def test_indexing_generates_bounded_crop_vectors_and_exact_duplicates_skip_infer
     store.close()
 
 
+def test_exact_duplicate_can_upgrade_image_retention_without_reembedding(tmp_path):
+    store = VisualMemoryStore(
+        tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4
+    )
+    embedder = FakeEmbedder()
+    engine = VisualMemoryEngine(store, embedder, index_dir=tmp_path / "indexes", hnswlib_module=FakeHnswLib)
+    content = image_bytes("red")
+    first = engine.index_image(
+        content, namespace="references:design", crop_mode="none", retention_policy="metadata-only"
+    )
+    calls = len(embedder.calls)
+    duplicate = engine.index_image(
+        content, namespace="references:design", crop_mode="none", retention_policy="full-image"
+    )
+
+    assert first.retention_policy == "metadata-only"
+    assert duplicate.retention_policy == "full-image"
+    assert store.get_record(first.frame_id)["retention_policy"] == "full-image"
+    assert len(embedder.calls) == calls
+    store.close()
+
+
 def test_configured_perceptual_duplicate_reuses_vectors_and_keeps_another_observation(tmp_path):
     store = VisualMemoryStore(
         tmp_path / "memory.sqlite3", tmp_path / "images", model="test-model", revision="test-revision", dimension=4

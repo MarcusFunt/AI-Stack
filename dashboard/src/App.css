@@ -626,3 +626,36 @@
   .voice-orb *, .voice-status-dot { animation: none !important; scroll-behavior: auto; }
   .voice-round-action, .voice-details > summary > svg { transition: none; }
 }
+/* Visual retrieval diagnostics */
+.visual-memory-status { margin-top: 16px; }
+.visual-memory-status .workspace-head { margin-bottom: 14px; }
+.visual-memory-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+.visual-memory-status-grid > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: rgba(255,255,255,.018);
+}
+.visual-memory-status-grid > div > span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.visual-memory-status-grid strong,
+.visual-memory-status-grid code { overflow-wrap: anywhere; font-size: 12px; }
+.visual-memory-status > small { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--muted); }
+@media (max-width: 900px) {
+  .visual-memory-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .visual-memory-status-grid { grid-template-columns: 1fr; }
+}

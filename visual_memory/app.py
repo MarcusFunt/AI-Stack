@@ -1,16 +1,22 @@
+import hashlib
 import json
 import os
+import sqlite3
 import threading
+import time
 from io import BytesIO
+from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import PlainTextResponse, Response
 from PIL import Image
 
 from .context_pack import build_context_pack
 from .crops import crop_by_type
 from .embeddings import EmbeddingModel, resolve_vision_token_budget
 from .image_processing import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, decode_image
+from .metrics import METRICS
 from .model import EmbeddingGemma2Backend, MODEL_REPO
 from .retrieval import VisualMemoryEngine
 from .schemas import (
@@ -26,6 +32,9 @@ from .storage import VisualMemoryStore
 app = FastAPI(title="AI-Stack visual memory")
 backend = EmbeddingGemma2Backend()
 embedding_model = EmbeddingModel(backend)
+DB_PATH = Path(os.getenv("VISUAL_MEMORY_DB_PATH", "/data/visual-memory.sqlite3"))
+IMAGE_ROOT = Path(os.getenv("VISUAL_MEMORY_IMAGE_ROOT", "/data/images"))
+INDEX_PATH = Path(os.getenv("VISUAL_MEMORY_INDEX_PATH", "/data/indexes"))
 _memory_engine = None
 _memory_engine_lock = threading.Lock()
 
@@ -35,11 +44,9 @@ def get_memory_engine() -> VisualMemoryEngine:
     if _memory_engine is None:
         with _memory_engine_lock:
             if _memory_engine is None:
-                db_path = os.getenv("VISUAL_MEMORY_DB_PATH", "/data/visual-memory.sqlite3")
-                image_root = os.getenv("VISUAL_MEMORY_IMAGE_ROOT", "/data/images")
                 store = VisualMemoryStore(
-                    db_path,
-                    image_root,
+                    DB_PATH,
+                    IMAGE_ROOT,
                     model=MODEL_REPO,
                     revision=backend.revision,
                     dimension=embedding_model.dimension,
@@ -47,10 +54,160 @@ def get_memory_engine() -> VisualMemoryEngine:
                 _memory_engine = VisualMemoryEngine(
                     store,
                     embedding_model,
-                    index_dir=os.getenv("VISUAL_MEMORY_INDEX_PATH", "/data/indexes"),
+                    index_dir=INDEX_PATH,
                     perceptual_duplicate_distance=_perceptual_duplicate_distance(),
                 )
     return _memory_engine
+
+
+@app.middleware("http")
+async def collect_visual_memory_metrics(request, call_next):
+    path = request.url.path
+    is_embedding = path in {
+        "/v1/embeddings/text", "/v1/embeddings/image", "/v1/visual-memory/index",
+        "/v1/visual-memory/index/text", "/v1/visual-memory/search/image",
+        "/v1/visual-memory/search/text",
+    }
+    is_search = path in {"/v1/visual-memory/search/image", "/v1/visual-memory/search/text"}
+    if is_embedding:
+        METRICS.increment("embedding_requests_total")
+    started = time.perf_counter()
+    failed = False
+    try:
+        response = await call_next(request)
+        failed = response.status_code >= 400
+        return response
+    except Exception:
+        failed = True
+        raise
+    finally:
+        elapsed = time.perf_counter() - started
+        if is_embedding:
+            METRICS.observe("embedding_latency_seconds", elapsed)
+            if failed:
+                METRICS.increment("embedding_failures_total")
+        if is_search:
+            METRICS.observe("visual_search_latency_seconds", elapsed)
+
+
+def _read_only_database_summary(db_path: Path) -> dict:
+    result = {
+        "available": False,
+        "writable": False,
+        "size_bytes": 0,
+        "records": 0,
+        "observations": 0,
+        "vectors": 0,
+        "compatible_vectors": 0,
+    }
+    result["size_bytes"] = db_path.stat().st_size if db_path.is_file() else 0
+    result["writable"] = bool(
+        os.access(db_path.parent, os.W_OK) and (not db_path.exists() or os.access(db_path, os.W_OK))
+    )
+    if not db_path.is_file():
+        return result
+    try:
+        uri = "file:" + quote(db_path.resolve().as_posix(), safe="/:") + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=2) as connection:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"assets", "observations", "vectors"} <= tables:
+                return result
+            result["records"] = int(connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0])
+            result["observations"] = int(connection.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
+            result["vectors"] = int(connection.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
+            result["available"] = True
+            result["_compatible_labels"] = [
+                int(row[0]) for row in connection.execute(
+                    """SELECT id FROM vectors WHERE embedding_model=? AND embedding_revision=?
+                    AND embedding_dimension=? AND normalization_method=? ORDER BY id""",
+                    (MODEL_REPO, backend.revision, embedding_model.dimension, "l2-float32-v1"),
+                ).fetchall()
+            ]
+    except (OSError, sqlite3.Error, ValueError):
+        return result
+    return result
+
+
+def _diagnostic_index_summary(database: dict) -> dict:
+    descriptor = {
+        "model": MODEL_REPO,
+        "revision": backend.revision,
+        "dimension": embedding_model.dimension,
+        "normalization": "l2-float32-v1",
+        "metric": "cosine",
+        "format_version": 1,
+    }
+    digest = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    index_file = INDEX_PATH / f"visual-{digest}.hnsw"
+    metadata_file = INDEX_PATH / f"visual-{digest}.json"
+    index_size = 0
+    if INDEX_PATH.is_dir():
+        try:
+            index_size = sum(path.stat().st_size for path in INDEX_PATH.glob("visual-*") if path.is_file())
+        except OSError:
+            index_size = 0
+    compatible = False
+    labels = database.pop("_compatible_labels", [])
+    if database["available"] and index_file.is_file() and metadata_file.is_file():
+        try:
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            label_digest = hashlib.sha256(",".join(str(label) for label in sorted(labels)).encode("ascii")).hexdigest()
+            compatible = (
+                metadata.get("descriptor") == descriptor
+                and metadata.get("count") == len(labels)
+                and metadata.get("label_digest") == label_digest
+            )
+        except (OSError, ValueError, TypeError):
+            compatible = False
+    return {
+        "compatible": compatible,
+        "backend": getattr(getattr(_memory_engine, "vector_index", None), "backend_name", "not_initialized"),
+        "size_bytes": index_size,
+    }
+
+
+def diagnostics_snapshot() -> dict:
+    provenance = backend.provenance()
+    database = _read_only_database_summary(DB_PATH)
+    index = _diagnostic_index_summary(database)
+    metric_snapshot = METRICS.snapshot()
+    percentiles = metric_snapshot["percentiles_seconds"]
+    return {
+        "status": "ok",
+        "service": "visual-memory",
+        "model": provenance["model"],
+        "revision": provenance["revision"],
+        "dimension": provenance["dimension"],
+        "device": provenance["device"],
+        "loaded": provenance["loaded"],
+        "model_files_available": provenance["model_files_available"],
+        "process_rss_bytes": _process_rss_bytes(),
+        "database": database,
+        "index": index,
+        "latency_percentiles_ms": {
+            "embedding": {
+                key: None if value is None else round(value * 1000, 3)
+                for key, value in percentiles["embedding_latency_seconds"].items()
+            },
+            "search": {
+                key: None if value is None else round(value * 1000, 3)
+                for key, value in percentiles["visual_search_latency_seconds"].items()
+            },
+        },
+        "metrics": metric_snapshot["counters"],
+    }
+
+
+def _process_rss_bytes() -> int | None:
+    """Read resident memory from procfs when available; report no value elsewhere."""
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as statm:
+            fields = statm.read(128).split()
+        if len(fields) < 2:
+            return None
+        return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def _perceptual_duplicate_distance() -> int | None:
@@ -102,6 +259,27 @@ def health():
         **provenance,
         "vision_token_budgets": {"fast": 280, "balanced": 560, "detail": 1120},
     }
+
+
+@app.get("/diagnostics")
+def diagnostics():
+    return diagnostics_snapshot()
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    return METRICS.render_prometheus()
+
+
+def record_index_metrics(result) -> None:
+    METRICS.increment("index_records_total")
+    METRICS.increment("index_vectors_total", result.embeddings_created)
+    if result.duplicate_level == "identical":
+        METRICS.increment("duplicate_exact_total")
+    elif result.duplicate_level == "near_duplicate":
+        METRICS.increment("duplicate_perceptual_total")
+    elif result.duplicate_level == "embedding":
+        METRICS.increment("duplicate_embedding_total")
 
 
 @app.post("/v1/embeddings/text")
@@ -173,6 +351,7 @@ async def index_visual_memory_image(
     tags_json: str | None = Form(default=None),
     crop_mode: str = Form(default="basic"),
     vision_token_budget: str | None = Form(default=None),
+    retention_policy: str = Form(default="full-image"),
 ):
     data = await image.read(MAX_IMAGE_BYTES + 1)
     await image.close()
@@ -192,10 +371,12 @@ async def index_visual_memory_image(
             tags=tags,
             crop_mode=crop_mode,
             vision_token_budget=token_budget,
+            retention_policy=retention_policy,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     engine = get_memory_engine()
+    record_index_metrics(result)
     return {
         "frame_id": result.frame_id,
         "observation_id": result.observation_id,
@@ -203,6 +384,7 @@ async def index_visual_memory_image(
         "duplicate": result.duplicate_level is not None,
         "duplicate_level": result.duplicate_level,
         "image_sha256": result.image_sha256,
+        "retention_policy": result.retention_policy,
         "model": engine.model,
         "revision": engine.revision,
     }
@@ -242,6 +424,7 @@ def index_visual_memory_text(request: VisualTextIndexRequest):
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    record_index_metrics(result)
     return {
         "frame_id": result.frame_id,
         "observation_id": result.observation_id,
@@ -295,7 +478,10 @@ async def search_visual_memory_image(
 @app.post("/v1/visual-memory/context-pack")
 def visual_memory_context_pack(request: VisualContextPackRequest):
     try:
-        return build_context_pack(**request.model_dump()).to_dict()
+        pack = build_context_pack(**request.model_dump()).to_dict()
+        METRICS.increment("context_pack_images", len(pack.get("crops", [])) + len(pack.get("retrieved", [])))
+        METRICS.increment("context_pack_text_chunks", len(pack.get("text_context", [])))
+        return pack
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -322,5 +508,7 @@ def read_visual_memory_asset(request: VisualAssetReadRequest):
         if len(result) > MAX_IMAGE_BYTES:
             raise ValueError("image byte limit exceeded")
         return Response(content=result, media_type="image/webp")
-    except (KeyError, ValueError) as exc:
+    except KeyError as exc:
+        raise HTTPException(404, "visual image bytes are not retained") from exc
+    except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

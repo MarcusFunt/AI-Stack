@@ -32,6 +32,7 @@
 - Repeated/near-duplicate frames must avoid redundant image/vector writes while preserving temporal references; pin with duplicate and neighbor tests in Task 3.
 - Detailed analysis must include the current image and enforce crop/reference/text limits while legacy analysis stays unchanged; pin with gateway/VLM contract tests in Task 4.
 - Project indexing must reject traversal, symlink escapes, `.env*`, large files, and non-allowlisted extensions; pin with security tests in Task 5.
+- Image retention must support metadata-only, thumbnail, and full-image policies; exact duplicates may upgrade fidelity but must never downgrade or re-embed unnecessarily.
 
 ---
 
@@ -109,7 +110,7 @@
 - [x] Implement exact/perceptual checks, text/image retrieval, context ranking and one Qwen call; accept/preserve website DOM/viewport/errors and game scene/frame/telemetry metadata.
 - [x] Implement reference comparison by record ID or uploaded image, with Qwen receiving both original images.
 - [x] Run gateway/VLM visual tests plus existing `tests/gateway/test_audio_vision_adapters.py` and `tests/gateway/test_chat_tracing.py`.
-- [ ] Commit Task 4 as `feat(vision): add retrieval-assisted Qwen analysis`.
+- [x] Commit Task 4 as `feat(vision): add retrieval-assisted Qwen analysis`.
 
 ### Task 5: Safe project indexing, cross-modal retrieval and MCP tools (Phase 5)
 
@@ -127,7 +128,7 @@
 - [x] Implement generic text/code record indexing and code search in the shared vector namespace.
 - [x] Implement gateway-backed MCP tools with image/base64 limits and trace propagation.
 - [x] Run indexer and MCP tests; run PowerShell parse validation for the wrapper.
-- [ ] Commit Task 5 as `feat(memory): add safe project code retrieval`.
+- [x] Commit Task 5 as `feat(memory): add safe project code retrieval`.
 
 ### Task 6: Metrics, diagnostics, model install, dashboard, benchmark and docs (Phase 6)
 
@@ -140,12 +141,13 @@
 - Benchmark command compares EmbeddingGemma 2 and Qwen3-VL-Embedding-2B on fixture-labelled retrieval and performance workloads without downloading models in CI.
 - Doctor reports service/model/files/database/index readiness and counts without outputting raw vectors or code.
 
-- [ ] Test metric labels omit IDs and private contents; test diagnostics avoid vector/code payloads; add deterministic fake-embedder smoke test.
-- [ ] Implement all lightweight benchmark harness scenarios/metrics as opt-in local jobs; keep GPU/model benchmarking behind an explicit command and check supervisor state before any GPU operation.
-- [ ] Add `hf download` installation pinned to the exact revision and validate models land only under `models/embedding/`.
-- [ ] Add dashboard status for model, revision, device, loaded state, counts, index size and latency percentiles.
-- [ ] Update docs with the EmbeddingGemma retrieval/Qwen detailed-analysis split, CPU-first reason, context behavior, setup, retention and why embeddings are not Qwen soft tokens.
-- [ ] Run applicable service/core/gateway/MCP/dashboard tests and builds, Python syntax checks, `docker compose config`, and `git diff --check`. Do not invoke `scripts/doctor.ps1` or live `scripts/smoke.ps1` in a way that reads `.env`; use isolated test settings for these checks.
+- [x] Test metric labels omit IDs and private contents; test diagnostics avoid vector/code payloads; add deterministic fake-embedder smoke test.
+- [x] Implement all lightweight benchmark harness scenarios/metrics as opt-in local jobs; keep GPU/model benchmarking behind an explicit command and check supervisor state before any GPU operation.
+- [x] Add `hf download` installation pinned to the exact revision and validate models land only under `models/embedding/`.
+- [x] Add dashboard status for model, revision, device, loaded state, counts, index size and latency percentiles.
+- [x] Implement metadata-only, 512-pixel thumbnail, and full-image retention policies across storage, retrieval and gateway analysis; exact duplicates upgrade fidelity without downgrading or redundant embedding.
+- [x] Update docs with the EmbeddingGemma retrieval/Qwen detailed-analysis split, CPU-first reason, context behavior, setup, retention and why embeddings are not Qwen soft tokens.
+- [x] Run applicable service/core/gateway/MCP/dashboard tests and builds, Python syntax checks, `docker compose config`, and `git diff --check`. Do not invoke `scripts/doctor.ps1` or live `scripts/smoke.ps1` in a way that reads `.env`; use isolated test settings for these checks.
 - [ ] Commit Task 6 as `test(memory): add visual retrieval benchmark and docs`.
 
 ---

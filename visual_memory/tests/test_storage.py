@@ -6,11 +6,11 @@ from PIL import Image
 from visual_memory.storage import VectorPayload, VisualMemoryStore
 
 
-def image_bytes(color="red"):
+def image_bytes(color="red", size=(32, 24)):
     from io import BytesIO
 
     stream = BytesIO()
-    Image.new("RGB", (32, 24), color).save(stream, format="PNG")
+    Image.new("RGB", size, color).save(stream, format="PNG")
     return stream.getvalue()
 
 
@@ -60,6 +60,73 @@ def test_exact_duplicate_adds_temporal_reference_without_duplicate_asset_or_vect
     assert repeated.embeddings_created == 0
     assert store.counts() == {"assets": 1, "frames": 2, "vectors": 1}
     assert store.get_observation_ids(original.frame_id) == [original.observation_id, repeated.observation_id]
+    store.close()
+
+
+def test_image_retention_policies_store_full_thumbnail_or_no_image(tmp_path):
+    store = VisualMemoryStore(tmp_path / "memory.sqlite3", tmp_path / "images", model="model-a", revision="rev-a", dimension=4)
+    vector = [VectorPayload("full", None, [1.0, 0.0, 0.0, 0.0], 560)]
+
+    full = store.index_image(
+        image_bytes=image_bytes("red", (1200, 800)), namespace="website:full",
+        vectors=vector, retention_policy="full-image",
+    )
+    thumbnail = store.index_image(
+        image_bytes=image_bytes("blue", (1200, 800)), namespace="website:thumbnail",
+        vectors=vector, retention_policy="thumbnail",
+    )
+    metadata_only = store.index_image(
+        image_bytes=image_bytes("green", (1200, 800)), namespace="website:metadata",
+        vectors=vector, retention_policy="metadata-only",
+    )
+
+    assert store.get_record(full.frame_id)["retention_policy"] == "full-image"
+    assert Image.open(BytesIO(store.read_image(full.frame_id))).size == (1200, 800)
+    thumbnail_image = Image.open(BytesIO(store.read_image(thumbnail.frame_id)))
+    assert store.get_record(thumbnail.frame_id)["retention_policy"] == "thumbnail"
+    assert max(thumbnail_image.size) <= 512
+    assert store.get_record(metadata_only.frame_id)["retention_policy"] == "metadata-only"
+    assert store.get_vector(metadata_only.vector_ids[0])["vector"] == [1.0, 0.0, 0.0, 0.0]
+    try:
+        store.read_image(metadata_only.frame_id)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("metadata-only assets must not persist image bytes")
+    store.close()
+
+
+def test_duplicate_image_retention_can_upgrade_but_never_downgrade(tmp_path):
+    store = VisualMemoryStore(tmp_path / "memory.sqlite3", tmp_path / "images", model="model-a", revision="rev-a", dimension=4)
+    content = image_bytes("red", (1200, 800))
+    first = store.index_image(
+        image_bytes=content, namespace="website:demo",
+        vectors=[VectorPayload("full", None, [1.0, 0.0, 0.0, 0.0], 560)],
+        retention_policy="metadata-only",
+    )
+    upgraded = store.index_image(
+        image_bytes=content, namespace="website:demo", vectors=[], retention_policy="thumbnail",
+    )
+    preserved = store.index_image(
+        image_bytes=content, namespace="website:demo", vectors=[], retention_policy="metadata-only",
+    )
+
+    assert upgraded.duplicate_level == "identical"
+    assert store.get_record(first.frame_id)["retention_policy"] == "thumbnail"
+    assert max(Image.open(BytesIO(store.read_image(first.frame_id))).size) <= 512
+    assert preserved.retention_policy == "thumbnail"
+    store.close()
+
+
+def test_image_retention_policy_rejects_unknown_values(tmp_path):
+    store = VisualMemoryStore(tmp_path / "memory.sqlite3", tmp_path / "images", model="model-a", revision="rev-a", dimension=4)
+
+    try:
+        store.index_image(image_bytes=image_bytes(), namespace="website:demo", retention_policy="forever")
+    except ValueError as error:
+        assert "retention_policy" in str(error)
+    else:
+        raise AssertionError("unsupported image retention should be rejected")
     store.close()
 
 
@@ -165,5 +232,6 @@ def test_schema_migrates_existing_observations_table_to_sequence_fields(tmp_path
     store = VisualMemoryStore(db_path, tmp_path / "images", model="model-a", revision="rev-a", dimension=4)
     columns = {row["name"] for row in store._connection.execute("PRAGMA table_info(observations)").fetchall()}
     assert {"sequence_id", "sequence_number", "previous_observation_id", "next_observation_id"}.issubset(columns)
-    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store._connection.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert "retention_policy" in {row["name"] for row in store._connection.execute("PRAGMA table_info(assets)")}
     store.close()

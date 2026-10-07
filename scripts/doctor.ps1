@@ -5,6 +5,7 @@ Set-Location $Root
 
 function Pass($name,$detail) { Write-Output ("[PASS] " + $name + ": " + $detail) }
 function Fail($name,$detail) { Write-Output ("[FAIL] " + $name + ": " + $detail); $script:Failures++ }
+function Warn($name,$detail) { Write-Output ("[WARN] " + $name + ": " + $detail) }
 $script:Failures = 0
 
 try { $dv = docker --version; Pass "docker" $dv } catch { Fail "docker" $_ }
@@ -14,9 +15,12 @@ try {
   Pass "gpu" $gpu
 } catch { Fail "gpu" $_ }
 
-foreach($key in @("AI_API_KEY","SUPERVISOR_TOKEN","LLAMA_API_KEY","HOST_AGENT_TOKEN","LLM_MODEL","REASONING_MODEL")) {
-  if(Get-Content .env | Where-Object { $_ -like "$key=*" }) { Pass "env:$key" "present" }
-  else { Fail "env:$key" "missing" }
+if(Test-Path -LiteralPath ".env" -PathType Leaf) {
+  Pass "credential-config" "protected Compose environment file exists; entries were not inspected"
+} elseif(@("AI_API_KEY","SUPERVISOR_TOKEN","LLAMA_API_KEY") | Where-Object { -not [Environment]::GetEnvironmentVariable($_) }) {
+  Fail "credential-config" "required credentials are not present in the process environment"
+} else {
+  Pass "credential-config" "required credential names are present in the process environment"
 }
 
 foreach($file in @("models\llm\daily.gguf","models\llm\reasoning.gguf","config\models.json")) {
@@ -26,8 +30,22 @@ foreach($file in @("models\llm\daily.gguf","models\llm\reasoning.gguf","config\m
   } else { Fail "file:$file" "missing" }
 }
 
-try { docker compose --profile gpu config | Out-Null; Pass "compose-config" "valid" }
-catch { Fail "compose-config" $_ }
+$composeVars = Join-Path ([IO.Path]::GetTempPath()) ("ai-stack-doctor-" + [guid]::NewGuid().ToString("N") + ".vars")
+try {
+  [IO.File]::WriteAllLines($composeVars, @(
+    "AI_API_KEY=doctor-placeholder",
+    "SUPERVISOR_TOKEN=doctor-placeholder",
+    "LLAMA_API_KEY=doctor-placeholder",
+    "HOST_AGENT_TOKEN=doctor-placeholder",
+    "MCP_API_KEY=doctor-placeholder",
+    "MCP_URL_TOKEN=doctor-placeholder",
+    "VOICE_TURN_SHARED_SECRET=doctor-placeholder",
+    "VOICE_TURN_HOSTNAME=localhost"
+  ), [Text.Encoding]::ASCII)
+  docker compose --env-file $composeVars --profile gpu config --quiet
+  Pass "compose-config" "valid with isolated placeholder values"
+} catch { Fail "compose-config" $_ }
+finally { if(Test-Path -LiteralPath $composeVars) { Remove-Item -LiteralPath $composeVars -Force } }
 
 try {
   $agent = Invoke-RestMethod -Uri "http://127.0.0.1:8788/health" -TimeoutSec 3
@@ -44,6 +62,29 @@ $running = @(docker ps --format "{{.Names}}" | Where-Object { $_ -match "^ai-sta
 if($running.Count -le 1) { Pass "gpu-exclusivity" ($running -join ",") }
 else { Fail "gpu-exclusivity" ($running -join ",") }
 
+$visualMemoryState = $null
+try { $visualMemoryState = (& docker inspect ai-stack-visual-memory --format "{{.State.Status}}" 2>$null) }
+catch { $visualMemoryState = $null }
+if($visualMemoryState -eq "running") {
+  Pass "visual-memory-container" "running"
+  try {
+    $visualMemoryJson = & docker exec ai-stack-visual-memory python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/diagnostics', timeout=3).read().decode())"
+    $visualMemory = $visualMemoryJson | ConvertFrom-Json
+    $modelSummary = $visualMemory.model + "@" + $visualMemory.revision + "; device=" + $visualMemory.device + "; loaded=" + $visualMemory.loaded
+    if($visualMemory.model_files_available) { Pass "visual-memory-model" $modelSummary }
+    else { Fail "visual-memory-model" ($modelSummary + "; local files missing") }
+    if($visualMemory.database.available -and $visualMemory.database.writable) {
+      Pass "visual-memory-database" ("writable; records=" + $visualMemory.database.records + "; observations=" + $visualMemory.database.observations + "; vectors=" + $visualMemory.database.vectors)
+    } else {
+      Fail "visual-memory-database" ("available=" + $visualMemory.database.available + "; writable=" + $visualMemory.database.writable)
+    }
+    if($visualMemory.index.compatible) { Pass "visual-memory-index" ($visualMemory.index.backend + "; " + $visualMemory.index.size_bytes + " bytes") }
+    else { Warn "visual-memory-index" "index is absent or incompatible and will need a rebuild before retrieval" }
+  } catch { Fail "visual-memory-diagnostics" $_ }
+} else {
+  Warn "visual-memory-container" ("state=" + ($visualMemoryState -join ""))
+}
+
 try {
   $supervisorInfo = @((& docker inspect ai-stack-supervisor) | ConvertFrom-Json)[0]
   $controlInfo = @((& docker inspect ai-stack-docker-control) | ConvertFrom-Json)[0]
@@ -57,10 +98,12 @@ try {
   }
 } catch { Fail "docker-socket-isolation" $_ }
 
-foreach($svc in @("docker-control","telemetry","supervisor","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm","comfyui","wangp")) {
+foreach($svc in @("docker-control","telemetry","supervisor","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm","visual-memory","comfyui","wangp")) {
   $container = "ai-stack-$svc"
-  $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
-  $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
+  try {
+    $containerImage = & docker inspect $container --format "{{.Image}}" 2>$null
+    $latestImage = & docker image inspect ("ai-stack-" + $svc + ":latest") --format "{{.Id}}" 2>$null
+  } catch { continue }
   if(-not $containerImage -or -not $latestImage) { continue }
   if($containerImage -eq $latestImage) { Pass ("image-sync:" + $svc) "current" }
   else { Fail ("image-sync:" + $svc) "container uses an older image; recreate it" }
@@ -81,9 +124,10 @@ try {
   }
 } catch { Fail "agent-lab-sandbox-isolation" $_ }
 
-foreach($svc in @("docker-control","supervisor","telemetry","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm")) {
+foreach($svc in @("docker-control","supervisor","telemetry","gateway","eval-router","dashboard","mcp","agent-lab","stt","vlm","visual-memory")) {
   $currentHash = (& python (Join-Path $PSScriptRoot "source_hash.py") $svc).Trim()
-  $imageJson = & docker image inspect ("ai-stack-" + $svc + ":latest") 2>$null
+  try { $imageJson = & docker image inspect ("ai-stack-" + $svc + ":latest") 2>$null }
+  catch { $imageJson = $null }
   $builtHash = $null
   if($imageJson) {
     $imageInfo = @($imageJson | ConvertFrom-Json)[0]

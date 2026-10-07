@@ -1,17 +1,19 @@
+import argparse
+import binascii
 import json
 import os
-import subprocess
+import struct
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
-
-from env_utils import require_env_value
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-AI_PS1 = os.path.join(ROOT, "scripts", "ai.ps1")
-API_KEY = require_env_value(os.path.join(ROOT, ".env"), "AI_API_KEY")
+API_KEY = os.environ.get("AI_API_KEY", "").strip()
+if not API_KEY:
+    raise RuntimeError("AI_API_KEY must be present in the process environment; smoke.py does not read project environment files")
 BASE = "http://127.0.0.1:8090"
 AUTH = {"Authorization": f"Bearer {API_KEY}"}
 
@@ -55,13 +57,92 @@ def multipart(fields, files):
     parts.append(f"--{boundary}--\r\n".encode())
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
+def _png_chunk(kind, payload):
+    checksum = binascii.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+def visual_memory_fixture_png():
+    width, height = 96, 64
+    rows = []
+    for y in range(height):
+        row = bytearray([0])
+        for x in range(width):
+            if 8 <= y < 26:
+                pixel = (205, 38, 52)
+            elif 18 <= x < 43 and 37 <= y < 58:
+                pixel = (38, 94, 184)
+            elif (x // 8 + y // 8) % 2:
+                pixel = (238, 242, 246)
+            else:
+                pixel = (255, 255, 255)
+            row.extend(pixel)
+        rows.append(bytes(row))
+    header = struct.pack(">2I5B", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+        + _png_chunk(b"IEND", b"")
+    )
+
+def visual_memory_smoke():
+    namespace = "smoke:visual-memory"
+    image = visual_memory_fixture_png()
+    form, content_type = multipart(
+        {
+            "namespace": namespace,
+            "source": "website",
+            "crop_mode": "none",
+            "vision_token_budget": "balanced",
+        },
+        [("image", "visual-memory-smoke.png", "image/png", image)],
+    )
+    status, _, indexed_body = api(
+        "POST", "/v1/visual-memory/index", form,
+        {"Content-Type": content_type}, timeout=600,
+    )
+    indexed = json.loads(indexed_body)
+    assert status == 200 and indexed.get("frame_id"), indexed
+    status, result = json_api("POST", "/v1/visual-memory/search/text", {
+        "query": "red alert banner above a blue panel",
+        "namespace": namespace,
+        "top_k": 1,
+        "include_crops": False,
+    }, timeout=600)
+    assert status == 200 and result.get("matches"), result
+    assert result["matches"][0].get("id") == indexed["frame_id"], result
+    checkpoint("visual-memory", "indexed the generated frame and found it by text")
+
 def start(service):
     code, result = json_api("POST", f"/control/start/{service}")
     assert code == 200, result
     return result
 
+def require_idle_gpu():
+    status, control = json_api("GET", "/control/status", timeout=10)
+    assert status == 200, control
+    active_jobs = sum(int(value) for value in control.get("active_jobs", {}).values())
+    running = control.get("running_gpu_services") or []
+    owner = control.get("gpu_owner")
+    if owner or active_jobs or running:
+        raise RuntimeError(
+            "smoke suite requires an idle GPU with no running heavyweight service; "
+            "active work is preserved and no services were started"
+        )
+
 def checkpoint(name, detail="OK"):
     print(f"[PASS] {name}: {detail}", flush=True)
+
+arguments = argparse.ArgumentParser()
+arguments.add_argument("--visual-memory-only", action="store_true")
+args = arguments.parse_args()
+if args.visual_memory_only:
+    visual_memory_smoke()
+    raise SystemExit(0)
+
+require_idle_gpu()
+checkpoint("gpu-preflight", "idle; no active jobs or heavyweight services")
+
 try:
     status, _, body = request("GET", BASE + "/health", timeout=10)
     assert status == 200 and json.loads(body)["status"] == "ok"
@@ -77,6 +158,8 @@ try:
     status, models = json_api("GET", "/v1/models")
     assert status == 200 and len(models["data"]) >= 7
     checkpoint("model-registry", f'{len(models["data"])} logical models')
+
+    visual_memory_smoke()
 
     payload = {
         "model": "local-fast",
@@ -187,14 +270,4 @@ try:
     checkpoint("wangp", "HTTP 200")
     print("ALL_SMOKE_TESTS_PASSED", flush=True)
 finally:
-    subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", AI_PS1,
-            "stop-all",
-        ],
-        cwd=ROOT,
-        check=False,
-    )
+    print("GPU service release remains with supervisor leases and idle timers.", flush=True)

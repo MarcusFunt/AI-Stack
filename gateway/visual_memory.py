@@ -114,12 +114,15 @@ class VisualAnalysisOrchestrator:
         reference_namespace: str | None = None,
         reference_image: tuple[str, str, bytes] | None = None,
         reference_prompt: str | None = None,
+        skip_if_identical_frame: bool = False,
+        retention_policy: str = "full-image",
     ) -> dict[str, Any]:
         index_fields = {
             "namespace": namespace,
             "source": source,
             "crop_mode": "basic",
             "vision_token_budget": "balanced",
+            "retention_policy": retention_policy,
             "metadata_json": json.dumps(structured_context, ensure_ascii=False, separators=(",", ":")),
         }
         if session_id:
@@ -141,6 +144,32 @@ class VisualAnalysisOrchestrator:
         current_id = indexed.get("frame_id")
         if not isinstance(current_id, str) or not current_id:
             raise VisualAnalysisError(502, "visual memory did not return a frame id")
+        if skip_if_identical_frame and indexed.get("duplicate_level") == "identical":
+            current_frame = {
+                "id": current_id,
+                "observation_id": indexed.get("observation_id"),
+                "namespace": namespace,
+                "source": source,
+                "session_id": session_id,
+                "timestamp": timestamp,
+                "analysis_profile": analysis_profile,
+            }
+            return {
+                "analysis": None,
+                "analysis_skipped": True,
+                "skip_reason": "identical_frame_already_indexed",
+                "current_frame": current_frame,
+                "context_pack": None,
+                "evidence": [],
+                "crop_evidence": [],
+                "text_evidence": [],
+                "duplicate": {"duplicate": True, "level": "identical"},
+                "model_provenance": {
+                    "embedding_model": indexed.get("model"),
+                    "embedding_revision": indexed.get("revision"),
+                    "analysis_model": None,
+                },
+            }
 
         crop_search_body, crop_search_type = encode_multipart(
             {"namespace": namespace, "parent_id": current_id, "include_crops": "true", "top_k": "50"},
@@ -260,7 +289,12 @@ class VisualAnalysisOrchestrator:
             crop_type = crop_data.get("type")
             parent_id = crop.get("parent_id")
             if isinstance(crop_type, str) and isinstance(parent_id, str):
-                data = await self._read_asset(parent_id, crop_type, namespace)
+                try:
+                    data = await self._read_asset(parent_id, crop_type, namespace)
+                except VisualAnalysisError as exc:
+                    if exc.status_code == 404:
+                        continue
+                    raise
                 crop_files.append(("crop_images", f"{parent_id}-{crop_type}.webp", "image/webp", data))
 
         reference_files: list[tuple[str, str, str, bytes]] = []
@@ -273,7 +307,12 @@ class VisualAnalysisOrchestrator:
             else:
                 metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
                 item_namespace = reference_namespace if item_id == reference_id and reference_namespace else metadata.get("namespace") or namespace
-                data = await self._read_asset(item_id, namespace=item_namespace)
+                try:
+                    data = await self._read_asset(item_id, namespace=item_namespace)
+                except VisualAnalysisError as exc:
+                    if exc.status_code == 404:
+                        continue
+                    raise
                 filename, media_type = f"{item_id}.webp", "image/webp"
             reference_files.append(("reference_images", filename, media_type, data))
 

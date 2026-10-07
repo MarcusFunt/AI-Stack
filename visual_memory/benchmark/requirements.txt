@@ -1,0 +1,2 @@
+# Optional, offline-only Qwen3-VL-Embedding-2B challenger; never installed in runtime images.
+sentence-transformers[image]>=5.0.0

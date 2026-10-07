@@ -54,6 +54,23 @@ def test_embedding_model_normalizes_text_and_image_embeddings():
     assert backend.image_budgets == [280]
 
 
+def test_multimodal_embedding_passes_image_and_associated_text_to_backend():
+    image = object()
+
+    class Backend:
+        def embed_multimodal(self, passed_image, text, *, instruction=None, vision_token_budget):
+            assert passed_image is image
+            assert text == "Find the primary action button"
+            assert vision_token_budget == 1120
+            return [3.0, 4.0] + [0.0] * 766
+
+    model = EmbeddingModel(Backend())
+    vector = model.embed_multimodal(image, "Find the primary action button", vision_token_budget="detail")
+
+    assert len(vector) == 768
+    assert vector[:2] == [0.6, 0.8]
+
+
 @pytest.mark.parametrize(
     ("value", "expected_mode", "expected_budget"),
     [(280, "fast", 280), (560, "balanced", 560), (1120, "detail", 1120), (None, "balanced", 560)],

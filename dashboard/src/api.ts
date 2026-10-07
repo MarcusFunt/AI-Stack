@@ -264,6 +264,34 @@ export type DoctorCheck = {
   detail: string
 }
 
+export type VisualMemoryStatus = {
+  status: string
+  service: string
+  model: string
+  revision: string
+  dimension: number
+  device: string
+  loaded: boolean
+  model_files_available: boolean
+  database: {
+    available: boolean
+    writable: boolean
+    size_bytes: number
+    records: number
+    observations: number
+    vectors: number
+  }
+  index: {
+    compatible: boolean
+    backend: string
+    size_bytes: number
+  }
+  latency_percentiles_ms: {
+    embedding: { p50: number | null; p95: number | null }
+    search: { p50: number | null; p95: number | null }
+  }
+}
+
 export type RuntimeSettings = {
   mqtt: {
     enabled: boolean
@@ -322,6 +350,7 @@ export const localAI = {
   },
   capabilities: () => request<ApiCapabilities>('/v1/capabilities'),
   doctor: () => request<{ status: string; checks: DoctorCheck[] }>('/control/doctor'),
+  visualMemoryStatus: () => request<VisualMemoryStatus>('/v1/visual-memory/status'),
   platformHealth: () => request<PlatformHealth>('/control/platform-health'),
   openCode: () => request<OpenCodeStatus>('/control/opencode'),
   startOpenCode: () => request<{ ok: boolean; status: OpenCodeStatus }>(
