@@ -69,13 +69,13 @@
 - `VisualMemoryStore` persists records and normalized float32 vectors in SQLite; `VectorIndex` loads or rebuilds HNSW from those vectors.
 - Index/search endpoints: `POST /v1/visual-memory/index`, `/index/text`, `/search/text`, and `/search/image`.
 
-- [ ] Test crop order/coordinates and rejection of empty, low-variance, and near-identical crops.
-- [ ] Test record/vector persistence over reopen, namespace/session/source/time/tag/crop filters, HNSW rebuild after missing/corrupt/incompatible index, and incompatible model isolation.
-- [ ] Test exact and perceptual duplicate handling and bounded optional embedding output.
-- [ ] Implement schema migrations, SQLite transactions, image SHA-256/perceptual hashes, content-addressed compressed image persistence, vectors-as-SQLite-payload, and HNSW index metadata keyed by repo/revision/dimension/normalization.
-- [ ] Implement deterministic crop embedding, indexing, text/image search, and exact duplicate reuse; keep final near-duplicate thresholds configurable and uncalibrated until benchmarks.
-- [ ] Run `python -m pytest visual_memory/tests -q` and `python -m pytest tests/visual_memory -q`.
-- [ ] Commit Task 2 as `feat(memory): add persistent visual vector index`.
+- [x] Test crop order/coordinates and rejection of empty, low-variance, and near-identical crops.
+- [x] Test record/vector persistence over reopen, namespace/session/source/time/tag/crop filters, HNSW rebuild after missing/corrupt/incompatible index, and incompatible model isolation.
+- [x] Test exact and perceptual duplicate handling and bounded optional embedding output.
+- [x] Implement schema migrations, SQLite transactions, image SHA-256/perceptual hashes, content-addressed compressed image persistence, vectors-as-SQLite-payload, and HNSW index metadata keyed by repo/revision/dimension/normalization.
+- [x] Implement deterministic crop embedding, indexing, text/image search, and exact duplicate reuse; keep final near-duplicate thresholds configurable and uncalibrated until benchmarks.
+- [x] Run `python -m pytest visual_memory/tests -q` and `python -m pytest tests/visual_memory -q`.
+- [x] Commit Task 2 as `feat(memory): add persistent visual vector index`.
 
 ### Task 3: Temporal memory, selection and pure-data context packs (Phases 2–4)
 
