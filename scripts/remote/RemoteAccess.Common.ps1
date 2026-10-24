@@ -1129,6 +1129,36 @@ function Test-RemoteAccessRdcListener {
     return $true
 }
 
+function Test-RemoteAccessRdcInstallTaskState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('absent', 'active-identical', 'conflict')][string]$InstallState,
+        [bool]$TaskPresent,
+        [bool]$TaskValid
+    )
+
+    if ($InstallState -eq 'conflict') { return $false }
+    if ($InstallState -eq 'absent' -and $TaskPresent) { return $false }
+    if ($InstallState -eq 'active-identical' -and $TaskPresent -and -not $TaskValid) { return $false }
+    return $true
+}
+
+function Test-RemoteAccessRdcRollbackTaskState {
+    [CmdletBinding()]
+    param(
+        [bool]$TaskPresent,
+        [bool]$TaskMatchesManifest,
+        [bool]$TaskManaged,
+        [AllowNull()][string]$ExpectedTaskPath,
+        [AllowNull()][string]$ActualTaskPath
+    )
+
+    if (-not $TaskPresent) { return $true }
+    if (-not $TaskManaged -or -not $TaskMatchesManifest) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ExpectedTaskPath) -or [string]::IsNullOrWhiteSpace($ActualTaskPath)) { return $false }
+    return ($ActualTaskPath -ieq $ExpectedTaskPath)
+}
+
 function Get-RemoteAccessRdcInstallPlan {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Preflight)
@@ -1180,7 +1210,10 @@ function Get-RemoteAccessRdcRollbackPlan {
         [AllowNull()][string]$CurrentBinaryHash,
         [AllowNull()][string]$CurrentConfigHash,
         [bool]$TaskMatchesManifest,
-        [bool]$FirewallMatchesManifest
+        [bool]$FirewallMatchesManifest,
+        [bool]$TaskPresent = $false,
+        [bool]$ProcessRunning = $false,
+        [bool]$ProcessStateKnown = $true
     )
 
     $blockers = New-Object 'System.Collections.Generic.List[string]'
@@ -1201,6 +1234,8 @@ function Get-RemoteAccessRdcRollbackPlan {
     }
     if (-not $TaskMatchesManifest) { $blockers.Add('rdc-task-scope-changed') }
     if (-not $FirewallMatchesManifest) { $blockers.Add('rdc-firewall-scope-changed') }
+    if (-not $ProcessStateKnown) { $blockers.Add('rdc-process-state-unknown') }
+    elseif ($ProcessRunning -and -not $TaskPresent) { $blockers.Add('rdc-orphan-process-running') }
     $managed = New-Object 'System.Collections.Generic.List[string]'
     foreach ($name in @('task', 'firewall', 'config', 'binary')) {
         if ((Get-RemoteAccessField (Get-RemoteAccessField $resources $name) 'managed') -eq $true) { $managed.Add($name) }

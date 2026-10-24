@@ -53,6 +53,43 @@ function Get-RdcRollbackTaskFacts {
     }
 }
 
+function Get-RdcRollbackProcessFacts {
+    param([Parameter(Mandatory = $true)][string]$RdcPath)
+
+    $running = $false
+    $known = $true
+    $processes = New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $candidates = @(Get-Process -ErrorAction Stop | Where-Object { [string]$_.ProcessName -ieq 'rdc' })
+    } catch {
+        return [pscustomobject]@{ known = $false; running = $false; processes = @() }
+    }
+    foreach ($process in $candidates) {
+        try {
+            $path = [string]$process.Path
+            if ([string]::IsNullOrWhiteSpace($path)) { $known = $false; continue }
+            if ([IO.Path]::GetFullPath($path) -ieq [IO.Path]::GetFullPath($RdcPath)) {
+                $running = $true
+                $processes.Add($process)
+            }
+        } catch { $known = $false }
+    }
+    return [pscustomobject]@{ known = $known; running = $running; processes = @($processes.ToArray()) }
+}
+
+function Wait-RdcRollbackProcessesStopped {
+    param([Parameter(Mandatory = $true)][string]$RdcPath, [ValidateRange(1, 60)][int]$TimeoutSeconds = 15)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $facts = Get-RdcRollbackProcessFacts -RdcPath $RdcPath
+        if (-not $facts.known) { throw 'The rdc process state could not be verified.' }
+        if (-not $facts.running) { return $true }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Get-RdcRollbackManifest {
     param([string]$Path, [string]$ProgramRoot, [string]$UserSid, [string]$ExpectedBinary, [string]$ExpectedConfig)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -114,6 +151,8 @@ if (-not $manifest) {
 
 $taskName = if ($manifest) { [string]$manifest.task_name } else { 'dev.rdc.daemon.' + $env:USERNAME }
 $taskFacts = Get-RdcRollbackTaskFacts -TaskName $taskName -UserSid $userSid -RdcPath $binaryPath -ExpectedTaskPath ([string]$manifest.resources.task.task_path) -TaskManaged ([bool]$manifest.resources.task.managed)
+$processFacts = Get-RdcRollbackProcessFacts -RdcPath $binaryPath
+$taskMatches = Test-RemoteAccessRdcRollbackTaskState -TaskPresent ([bool]$taskFacts.present) -TaskMatchesManifest ([bool]$taskFacts.matches) -TaskManaged ([bool]$manifest.resources.task.managed) -ExpectedTaskPath ([string]$manifest.resources.task.task_path) -ActualTaskPath ([string]$taskFacts.task.TaskPath)
 $firewallRuleName = 'AIStack-RemoteAccess-Rdc'
 $firewallRule = Get-NetFirewallRule -Name $firewallRuleName -ErrorAction SilentlyContinue
 $firewallMatches = -not $firewallRule
@@ -129,7 +168,7 @@ $binaryHash = $null
 $configHash = $null
 if (Test-Path -LiteralPath $binaryPath -PathType Leaf) { $binaryHash = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash }
 if (Test-Path -LiteralPath $configPath -PathType Leaf) { $configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash }
-$rollbackPlan = Get-RemoteAccessRdcRollbackPlan -Manifest $manifest -CurrentBinaryHash $binaryHash -CurrentConfigHash $configHash -TaskMatchesManifest $taskFacts.matches -FirewallMatchesManifest $firewallMatches
+$rollbackPlan = Get-RemoteAccessRdcRollbackPlan -Manifest $manifest -CurrentBinaryHash $binaryHash -CurrentConfigHash $configHash -TaskMatchesManifest $taskMatches -FirewallMatchesManifest $firewallMatches -TaskPresent ([bool]$taskFacts.present) -ProcessRunning ([bool]$processFacts.running) -ProcessStateKnown ([bool]$processFacts.known)
 $planBlockers = @($rollbackPlan.blockers)
 if (-not $manifest) { $planBlockers += 'no-feature-manifest' }
 if ($manifest -and $manifest.state -eq 'rolled_back') { $planBlockers += 'already-rolled-back' }
@@ -157,30 +196,39 @@ if (-not $PSCmdlet.ShouldProcess('feature-managed rdc desktop resources', 'Remov
 try {
     $script:manifest = $manifest
     $script:manifestPath = $manifestPath
+    $expectedTaskPath = [string]$manifest.resources.task.task_path
+    $currentTaskFacts = Get-RdcRollbackTaskFacts -TaskName $taskName -UserSid $userSid -RdcPath $binaryPath -ExpectedTaskPath $expectedTaskPath -TaskManaged ([bool]$manifest.resources.task.managed)
+    $currentTaskMatches = Test-RemoteAccessRdcRollbackTaskState -TaskPresent ([bool]$currentTaskFacts.present) -TaskMatchesManifest ([bool]$currentTaskFacts.matches) -TaskManaged ([bool]$manifest.resources.task.managed) -ExpectedTaskPath $expectedTaskPath -ActualTaskPath ([string]$currentTaskFacts.task.TaskPath)
+    $currentProcesses = Get-RdcRollbackProcessFacts -RdcPath $binaryPath
+    if (-not $currentProcesses.known) { throw 'The rdc process state could not be verified after confirmation.' }
+    if (-not $currentTaskMatches) { throw 'The rdc task changed after confirmation; refusing to remove it.' }
+    if (-not $currentTaskFacts.present -and $currentProcesses.running) { throw 'An orphan rdc process appeared after confirmation; refusing to remove its files.' }
+    $taskFacts = $currentTaskFacts
     if ($manifest.resources.task.managed -eq $true) {
-        if ($taskFacts.present -and -not $manifest.resources.task.task_path) {
-            $manifest.resources.task.task_path = [string]$taskFacts.task.TaskPath
-            Save-RdcRollbackManifest
-        } elseif (-not $taskFacts.present) {
+        if (-not $taskFacts.present) {
             $manifest.resources.task.managed = $false
-            Save-RdcRollbackManifest
         }
     }
     $manifest.state = 'rolling_back'
     Save-RdcRollbackManifest
 
     if ($taskFacts.present) {
-        if (-not $taskFacts.matches) { throw 'The rdc task changed after preflight; refusing to remove it.' }
-        $processes = @(Get-Process -Name 'rdc' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($binaryPath)) })
-        if ($processes.Count -gt 0) {
-            $uninstallOutput = @(& $binaryPath service uninstall 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw 'rdc service uninstall failed; inspect the signed-in user session.' }
-        } else {
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+        $taskPath = [string]$manifest.resources.task.task_path
+        if ([string]::IsNullOrWhiteSpace($taskPath)) { throw 'The exact manifest task path is unavailable; refusing to unregister by name alone.' }
+        if ([string]$taskFacts.task.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+            if (-not (Wait-RdcRollbackProcessesStopped -RdcPath $binaryPath -TimeoutSeconds 15)) { throw 'The rdc daemon remained running after its task was stopped.' }
+        }
+        $taskBeforeUnregister = Get-RdcRollbackTaskFacts -TaskName $taskName -UserSid $userSid -RdcPath $binaryPath -ExpectedTaskPath $taskPath -TaskManaged $true
+        $taskBeforeUnregisterMatches = Test-RemoteAccessRdcRollbackTaskState -TaskPresent ([bool]$taskBeforeUnregister.present) -TaskMatchesManifest ([bool]$taskBeforeUnregister.matches) -TaskManaged $true -ExpectedTaskPath $taskPath -ActualTaskPath ([string]$taskBeforeUnregister.task.TaskPath)
+        if (-not $taskBeforeUnregisterMatches) { throw 'The rdc task identity or path changed before unregister; refusing to remove it.' }
+        if ($taskBeforeUnregister.present) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false -ErrorAction Stop
         }
         $remainingTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { [string]$_.TaskName -ieq $taskName })
         if ($remainingTasks.Count -gt 0) { throw 'The feature-owned rdc task remains registered after uninstall.' }
     }
+    if (-not (Wait-RdcRollbackProcessesStopped -RdcPath $binaryPath -TimeoutSeconds 15)) { throw 'The rdc daemon is still running; refusing to remove its files.' }
     $manifest.resources.task.managed = $false
     Save-RdcRollbackManifest
 
@@ -201,6 +249,8 @@ try {
     Save-RdcRollbackManifest
 
     if (Test-Path -LiteralPath $binaryPath -PathType Leaf) {
+        $finalProcesses = Get-RdcRollbackProcessFacts -RdcPath $binaryPath
+        if (-not $finalProcesses.known -or $finalProcesses.running) { throw 'The rdc daemon is running or its state is unknown; refusing to remove its binary.' }
         if ((Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash -ne [string]$manifest.resources.binary.sha256) { throw 'The managed rdc binary changed after preflight; refusing to remove it.' }
         Remove-Item -LiteralPath $binaryPath -Force -ErrorAction Stop
     }

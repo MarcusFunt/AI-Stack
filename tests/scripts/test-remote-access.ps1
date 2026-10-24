@@ -455,6 +455,9 @@ Assert-Equal (Test-RemoteAccessRdcTask -Task $elevatedArgumentRdcTask) $false 'A
 $scopeOverrideRdcTask = $validRdcTask.Clone()
 $scopeOverrideRdcTask.arguments = 'serve --allow "*"'
 Assert-Equal (Test-RemoteAccessRdcTask -Task $scopeOverrideRdcTask) $false 'A task adding command-line identity grants must be rejected'
+Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $true -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath '\') $true 'Rollback may remove a freshly verified task at the manifest path'
+Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $true -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath '\Unexpected\') $false 'Rollback must reject a task whose path changed after confirmation'
+Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $false -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath $null) $true 'A missing managed task may be cleaned up when no matching daemon process remains'
 Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '100.64.12.34'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $true 'rdc readiness requires its own listener on a tailnet address'
 Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '0.0.0.0'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $false 'rdc readiness must reject a wildcard listener'
 
@@ -509,6 +512,10 @@ $repeatWithoutAdmin.firewall_rule_present = $true
 $repeatWithoutAdmin.firewall_admin_context = $false
 Assert-Equal (Get-RemoteAccessRdcInstallPlan $repeatWithoutAdmin).ready $true 'A healthy repeated install needs no administrator token when its firewall rule already exists'
 
+Assert-Equal (Test-RemoteAccessRdcInstallTaskState -InstallState 'active-identical' -TaskPresent $false -TaskValid $false) $true 'A missing feature-managed task may be repaired during an identical reinstall'
+Assert-Equal (Test-RemoteAccessRdcInstallTaskState -InstallState 'active-identical' -TaskPresent $true -TaskValid $false) $false 'A changed feature-managed task must block reinstall'
+Assert-Equal (Test-RemoteAccessRdcInstallTaskState -InstallState 'absent' -TaskPresent $true -TaskValid $false) $false 'An unmanaged task must block initial registration'
+
 $dryRunTaskRegistrations = 0
 $dryRunElevationAttempts = 0
 Invoke-RemoteAccessRdcMutation -Apply:$false -Mutation { $dryRunTaskRegistrations++; $dryRunElevationAttempts++ } | Out-Null
@@ -532,5 +539,7 @@ Assert-Equal ($changedRdcRollback.blockers -contains 'rdc-binary-changed') $true
 $driftedRdcRollback = Get-RemoteAccessRdcRollbackPlan -Manifest $rdcRollbackManifest -CurrentBinaryHash 'binary-hash' -CurrentConfigHash 'config-hash' -TaskMatchesManifest $false -FirewallMatchesManifest $false
 Assert-Equal ($driftedRdcRollback.blockers -contains 'rdc-task-scope-changed') $true 'rdc rollback must refuse a task that no longer matches its manifest'
 Assert-Equal ($driftedRdcRollback.blockers -contains 'rdc-firewall-scope-changed') $true 'rdc rollback must refuse a firewall rule that no longer matches its manifest'
+$orphanRdcProcess = Get-RemoteAccessRdcRollbackPlan -Manifest $rdcRollbackManifest -CurrentBinaryHash 'binary-hash' -CurrentConfigHash 'config-hash' -TaskMatchesManifest $true -FirewallMatchesManifest $true -TaskPresent $false -ProcessRunning $true
+Assert-Equal ($orphanRdcProcess.blockers -contains 'rdc-orphan-process-running') $true 'rdc rollback must block file removal while its daemon runs without a registered task'
 
 Write-Output 'PASS: remote-access status fixtures are sanitized and fail closed.'

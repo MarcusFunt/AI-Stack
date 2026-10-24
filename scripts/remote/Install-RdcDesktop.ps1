@@ -409,8 +409,7 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
     if (-not $latestSshManifest -or $latestSshManifest.schema_version -ne 1 -or $latestSshManifest.component -ne 'ssh' -or $latestSshManifest.state -ne 'active') { throw 'The active SSH recovery manifest changed after review.' }
     $expectedTaskPath = if ($manifestCheck.manifest) { [string]$manifestCheck.manifest.resources.task.task_path } else { $null }
     $liveTaskFacts = Get-RdcTaskFacts -UserSid $userSid -RdcPath $rdcPath -TaskName $taskName -ExpectedTaskPath $expectedTaskPath
-    if ($featureState -eq 'absent' -and $liveTaskFacts.present) { throw 'An unmanaged task appeared after review; no existing task was overwritten.' }
-    if ($featureState -eq 'active-identical' -and -not $liveTaskFacts.valid) { throw 'The managed rdc task changed after review.' }
+    if (-not (Test-RemoteAccessRdcInstallTaskState -InstallState $featureState -TaskPresent ([bool]$liveTaskFacts.present) -TaskValid ([bool]$liveTaskFacts.valid))) { throw 'The rdc task appeared or changed after review; no existing task was overwritten.' }
     $taskFacts = $liveTaskFacts
     $latestBinding = Get-RdcTailnetBinding -Address $BindAddress
     if (-not $latestBinding -or $latestBinding.address -ine $tailscaleBinding.address -or $latestBinding.alias -ine $tailscaleBinding.alias) { throw 'The Tailscale listener address or interface changed after review.' }
@@ -499,8 +498,7 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
 
         $expectedTaskPath = if ($manifest.resources.task.task_path) { [string]$manifest.resources.task.task_path } else { $null }
         $taskFacts = Get-RdcTaskFacts -UserSid $userSid -RdcPath $rdcPath -TaskName $taskName -ExpectedTaskPath $expectedTaskPath
-        if ($featureState -eq 'absent' -and $taskFacts.present) { throw 'An unmanaged task appeared before registration; refusing to replace it.' }
-        if ($featureState -eq 'active-identical' -and -not $taskFacts.valid) { throw 'The managed rdc task changed before startup.' }
+        if (-not (Test-RemoteAccessRdcInstallTaskState -InstallState $featureState -TaskPresent ([bool]$taskFacts.present) -TaskValid ([bool]$taskFacts.valid))) { throw 'The rdc task appeared or changed before registration; refusing to replace it.' }
         if (-not $taskFacts.valid) {
             $installOutput = @(& $rdcPath service install 2>&1)
             if ($LASTEXITCODE -ne 0) { throw 'rdc service install failed; inspect the signed-in desktop locally.' }
