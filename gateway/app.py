@@ -10,6 +10,7 @@ import time
 import wave
 import zlib
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -661,7 +662,93 @@ def publish_home_assistant(settings, root):
     mqtt_discovery_published = True
 
 
-def publish_mqtt_snapshot(snapshot, settings):
+REMOTE_ACCESS_MQTT_CACHE_TTL = 15.0
+REMOTE_ACCESS_MQTT_CACHE = {"expires_at": 0.0, "status": None, "loaded": False}
+
+
+def _remote_access_enum(value, allowed):
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    return normalized if normalized in allowed else "unknown"
+
+
+def _remote_access_timestamp(value):
+    if not isinstance(value, str):
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+
+
+def _remote_access_count(value, maximum):
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if result < 0 or result > maximum:
+        return None
+    return result
+
+
+def remote_access_mqtt_summary(status, checked_at=None):
+    status = status if isinstance(status, dict) else {}
+    tailnet = status.get("tailnet") if isinstance(status.get("tailnet"), dict) else {}
+    ssh = status.get("ssh") if isinstance(status.get("ssh"), dict) else {}
+    desktop = status.get("desktop") if isinstance(status.get("desktop"), dict) else {}
+    denied = desktop.get("denied_by_category") if isinstance(desktop.get("denied_by_category"), dict) else {}
+    host = status.get("host") if isinstance(status.get("host"), dict) else {}
+    audit = status.get("last_audit") if isinstance(status.get("last_audit"), dict) else {}
+    return {
+        "checked_at_utc": _remote_access_timestamp(checked_at or datetime.now(timezone.utc).isoformat()),
+        "observed_at_utc": _remote_access_timestamp(status.get("observed_at_utc")),
+        "tailnet_state": _remote_access_enum(tailnet.get("state"), {"connected", "disconnected", "unknown"}),
+        "unattended_state": _remote_access_enum(tailnet.get("unattended"), {"enabled", "disabled", "unknown"}),
+        "ssh_state": _remote_access_enum(ssh.get("service"), {"running", "stopped", "missing", "unknown"}),
+        "ssh_firewall_state": _remote_access_enum(ssh.get("firewall"), {"tailnet-only", "broad", "unknown"}),
+        "desktop_task": _remote_access_enum(desktop.get("task"), {"ready", "running", "absent", "unknown"}),
+        "desktop_session": _remote_access_enum(desktop.get("session"), {"interactive", "signed-out", "locked", "unknown"}),
+        "desktop_rdc": _remote_access_enum(desktop.get("rdc"), {"ready", "unavailable", "not-checked", "unknown"}),
+        "human_fallback": _remote_access_enum(status.get("human_fallback"), {"ready", "disabled", "unknown"}),
+        "denied_by_category": {
+            "authorization": _remote_access_count(denied.get("authorization"), 1000000),
+            "view_only": _remote_access_count(denied.get("view_only"), 1000000),
+            "other": _remote_access_count(denied.get("other"), 1000000),
+        },
+        "uptime_seconds": _remote_access_count(host.get("uptime_seconds"), 630720000),
+        "last_boot_utc": _remote_access_timestamp(host.get("last_boot_utc")),
+        "last_audit": {
+            "timestamp": _remote_access_timestamp(audit.get("timestamp")),
+            "category": _remote_access_enum(audit.get("category"), {"authorization", "view_only", "other"}),
+        },
+    }
+
+
+async def remote_access_status_for_mqtt():
+    now = time.monotonic()
+    if REMOTE_ACCESS_MQTT_CACHE["loaded"] and now < REMOTE_ACCESS_MQTT_CACHE["expires_at"]:
+        return REMOTE_ACCESS_MQTT_CACHE["status"]
+    try:
+        status = await host_agent("GET", "/remote-access/status", timeout=12)
+        if not isinstance(status, dict):
+            status = None
+    except Exception:
+        status = None
+    REMOTE_ACCESS_MQTT_CACHE.update({
+        "expires_at": time.monotonic() + REMOTE_ACCESS_MQTT_CACHE_TTL,
+        "status": status,
+        "loaded": True,
+    })
+    return status
+
+
+def publish_mqtt_snapshot(snapshot, settings, remote_access=None):
     if not mqtt_client or not mqtt_connected:
         return
     root = "localai/marcus-computer"
@@ -680,6 +767,8 @@ def publish_mqtt_snapshot(snapshot, settings):
         "system": system,
     }
     mqtt_client.publish(root + "/status", json.dumps(summary), retain=True)
+    remote_summary = remote_access_mqtt_summary(remote_access)
+    mqtt_client.publish(root + "/remote-access/status", json.dumps(remote_summary), retain=True)
     values = {
         "gpu/utilization": gpu.get("utilization_percent", 0),
         "gpu/vram_used_mb": gpu.get("vram_used_mib", 0),
@@ -711,7 +800,8 @@ async def mqtt_publisher_loop():
         interval = max(1.0, min(60.0, float(settings.get("publish_interval", 2.0))))
         if settings.get("enabled") and mqtt_connected and time.monotonic() - last_publish >= interval:
             try:
-                publish_mqtt_snapshot(await build_snapshot(), settings)
+                remote_access = await remote_access_status_for_mqtt()
+                publish_mqtt_snapshot(await build_snapshot(), settings, remote_access=remote_access)
                 last_publish = time.monotonic()
             except Exception as exc:
                 global mqtt_last_error
@@ -1518,6 +1608,11 @@ async def control_settings_update(request: Request):
 @app.get("/control/network")
 async def control_network():
     return await host_agent("GET", "/tailscale/status", timeout=20)
+
+
+@app.get("/control/remote-access")
+async def control_remote_access():
+    return await host_agent("GET", "/remote-access/status", timeout=15)
 
 
 @app.post("/control/network/tailscale")
