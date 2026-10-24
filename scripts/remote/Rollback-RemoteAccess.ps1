@@ -33,7 +33,9 @@ function Get-ValidatedRollbackManifest {
         }
     }
     $sid = [string]$manifest.account.sid
-    if ($sid -notmatch '^S-1-5-21-(?:\d+-){2}\d+$') { throw 'invalid-account-sid' }
+    if (-not (Test-RemoteAccessLocalAccountSid $sid)) { throw 'invalid-account-sid' }
+    $localAccounts = @(Get-CimInstance -ClassName Win32_UserAccount -Filter "SID = '$sid'" -ErrorAction Stop)
+    if ($localAccounts.Count -ne 1 -or -not (Test-RemoteAccessLocalAccountIdentity -Sid $sid -ExpectedName ([string]$manifest.account.name) -LocalAccount $localAccounts[0].LocalAccount -ActualName ([string]$localAccounts[0].Name))) { throw 'local-account-mismatch' }
     $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid
     $registeredProfile = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $profileKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath)
     if ([IO.Path]::GetFullPath([string]$manifest.account.profile_path) -ine [IO.Path]::GetFullPath($registeredProfile)) { throw 'profile-mismatch' }
@@ -260,7 +262,7 @@ try {
     }
 
     $manifest.state = 'rolled_back'
-    $manifest.rolled_back_at_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Set-RemoteAccessManifestProperty -Manifest $manifest -Name 'rolled_back_at_utc' -Value ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
     Save-RollbackManifest
     [pscustomobject]@{ component = 'ssh'; state = 'rolled_back'; restored_resources = [string[]]$actions; snapshot_retained = $true } | ConvertTo-Json -Depth 5
 } catch {

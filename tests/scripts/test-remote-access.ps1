@@ -194,6 +194,8 @@ $broadPortRule = @(@{
 $broadPortFirewall = ConvertTo-RemoteAccessFirewallState -Rules $broadPortRule -DefaultInboundAction 'Block' -ListenerProgramPaths @()
 Assert-Equal $broadPortFirewall 'broad' 'A port 22 allow from any remote address must be reported as broad'
 Assert-Equal (ConvertTo-RemoteAccessFirewallState -Rules $broadPortRule -DefaultInboundAction 'Block' -ListenerProgramPaths @() -Port 2222) 'unknown' 'A rule for a different port must not be treated as SSH exposure'
+Assert-Equal (ConvertTo-RemoteAccessFirewallState -Rules ([object[]]@()) -DefaultInboundAction 'Block' -ListenerProgramPaths @()) 'blocked' 'A successful firewall inspection with no allow rules and block-by-default is blocked'
+Assert-Equal (ConvertTo-RemoteAccessFirewallState -Rules ([object[]]@()) -DefaultInboundAction 'unknown' -ListenerProgramPaths @()) 'unknown' 'An unknown default firewall action cannot be reported as blocked'
 
 $alternatePortRule = @(@{
     local_port = @('2222')
@@ -222,6 +224,22 @@ $scopedPortRule = @(@{
 $scopedFirewall = ConvertTo-RemoteAccessFirewallState -Rules $scopedPortRule -DefaultInboundAction 'Block' -ListenerProgramPaths @('C:\Windows\System32\OpenSSH\sshd.exe')
 Assert-Equal $scopedFirewall 'tailnet-only' 'A port allow scoped to Tailscale addresses and interface must be reported tailnet-only'
 Assert-Equal (ConvertTo-RemoteAccessFirewallState -Rules @() -DefaultInboundAction 'Allow' -ListenerProgramPaths @()) 'broad' 'An inbound-allow firewall default must be reported as broad'
+Assert-Equal ((ConvertFrom-RemoteAccessFirewallLocalPorts '*') -join ',') 'Any' 'The COM wildcard port representation must normalize to any port'
+Assert-Equal ((ConvertFrom-RemoteAccessFirewallLocalPorts '') -join ',') 'Any' 'An empty COM port filter must normalize to any port'
+Assert-Equal ((ConvertFrom-RemoteAccessFirewallLocalPorts '  ') -join ',') 'Any' 'A whitespace COM port filter must normalize to any port'
+Assert-Equal ((ConvertFrom-RemoteAccessFirewallLocalPorts '22,2200-2300') -join ',') '22,2200-2300' 'Explicit COM ports and ranges must remain precise'
+Assert-Equal (Get-RemoteAccessFirewallProfileState @([pscustomobject]@{ Enabled = $true; DefaultInboundAction = 'Block' })) 'blocked' 'A successfully inspected enabled block-by-default profile is safe to add a scoped rule to'
+Assert-Equal (Get-RemoteAccessFirewallProfileState @([pscustomobject]@{ Enabled = $false; DefaultInboundAction = 'Block' }, [pscustomobject]@{ Enabled = $true; DefaultInboundAction = 'Block' })) 'unknown' 'A disabled profile must not be ignored when proving firewall enforcement'
+Assert-Equal (Get-RemoteAccessFirewallProfileState @([pscustomobject]@{ Enabled = $true; DefaultInboundAction = 'Allow' })) 'broad' 'An enabled allow-by-default profile must be classified as broad'
+$portQueryFailed = Get-RemoteAccessPortUseState -ListenerQuery { throw 'CIM unavailable' } -FeatureOwnsListener $false -ExpectedProcessName 'sshd'
+Assert-Equal $portQueryFailed $null 'A failed listener query must remain unknown rather than report a free port'
+$portQueryEmpty = Get-RemoteAccessPortUseState -ListenerQuery { @() } -FeatureOwnsListener $false -ExpectedProcessName 'sshd'
+Assert-Equal $portQueryEmpty $false 'A successful empty listener query may report a free port'
+$scopedAndWildcardComRules = @(
+    @{ local_port = @('2222'); protocol = '6'; program = 'Any'; service = ''; remote_addresses = @('100.64.10.20'); interface_aliases = @('Tailscale') },
+    @{ local_port = ConvertFrom-RemoteAccessFirewallLocalPorts '*'; protocol = '6'; program = 'Any'; service = ''; remote_addresses = @('Any'); interface_aliases = @() }
+)
+Assert-Equal (ConvertTo-RemoteAccessFirewallState -Rules $scopedAndWildcardComRules -DefaultInboundAction 'Block' -ListenerProgramPaths @() -Port 2222) 'broad' 'A COM wildcard allow must override an otherwise scoped firewall rule'
 
 Assert-Equal (Test-RemoteAccessTailnetAddress '100.64.10.2') $true 'Tailscale CGNAT addresses must be recognized'
 Assert-Equal (Test-RemoteAccessTailnetAddress '100.1.10.2') $false 'Unrelated 100.0.0.0/8 addresses must not be treated as tailnet-only'
@@ -270,10 +288,11 @@ function New-SshPreflightFixture {
         port = 22
         alternate_port_approved = $false
         port_in_use = $false
+        host_key_path_safe = $true
         custom_sshd_config = $false
         authorized_key_exists = $false
         service_state = 'missing'
-        firewall_state = 'unknown'
+        firewall_state = 'blocked'
         firewall_default_allow = $false
         firewall_admin_context = $true
         firewall_rule_present = $false
@@ -331,6 +350,17 @@ $existingKey.authorized_key_exists = $true
 $existingKeyPlan = Get-RemoteSshInstallPlan $existingKey
 Assert-Equal ($existingKeyPlan.actions -contains 'keep-authorized-key') $true 'An existing authorized key must not be duplicated or replaced'
 
+$unknownSshFirewall = New-SshPreflightFixture
+$unknownSshFirewall.firewall_state = 'unknown'
+$unknownSshFirewallPlan = Get-RemoteSshInstallPlan $unknownSshFirewall
+Assert-Equal $unknownSshFirewallPlan.ready $false 'Unavailable firewall inspection must stop SSH preflight before any mutation'
+Assert-Equal ($unknownSshFirewallPlan.actions -contains 'create-scoped-firewall-rule') $false 'Unknown firewall inspection must not authorize a scoped-rule mutation'
+$blockedSshFirewall = New-SshPreflightFixture
+$blockedSshFirewall.firewall_state = 'blocked'
+$blockedSshFirewallPlan = Get-RemoteSshInstallPlan $blockedSshFirewall
+Assert-Equal $blockedSshFirewallPlan.ready $true 'A fully inspected block-by-default policy may proceed to create the scoped SSH rule'
+Assert-Equal ($blockedSshFirewallPlan.actions -contains 'create-scoped-firewall-rule') $true 'A verified blocked firewall policy should plan the exact SSH allow rule'
+
 $healthyService = New-SshPreflightFixture
 $healthyService.service_state = 'running'
 $healthyServicePlan = Get-RemoteSshInstallPlan $healthyService
@@ -350,7 +380,7 @@ Assert-Equal ((Get-RemoteSshInstallPlan $broadFinalize).actions -contains 'disab
 
 $managedConfig = New-RemoteSshManagedConfig -Port 2222 -WindowsAccount 'AIStackAgent' -ListenAddresses @('100.64.10.2', 'fd7a:115c:a1e0::2')
 Assert-Equal $managedConfig.Contains('Port 2222') $true 'Managed sshd config must use the selected port'
-Assert-Equal $managedConfig.Contains('AllowUsers AIStackAgent') $true 'Managed sshd config must restrict logins to the approved account'
+Assert-Equal $managedConfig.Contains('AllowUsers aistackagent') $true 'Managed sshd config must use Windows OpenSSH lowercase account syntax'
 Assert-Equal $managedConfig.Contains('PasswordAuthentication no') $true 'Managed sshd config must be key-only before opening its listener'
 Assert-Equal $managedConfig.Contains('ListenAddress 100.64.10.2') $true 'Managed sshd config must bind to the host tailnet address'
 Assert-Equal $managedConfig.Contains('ListenAddress fd7a:115c:a1e0::2') $true 'Managed sshd config must preserve a verified IPv6 tailnet listener when present'
@@ -377,6 +407,8 @@ $knownDefaultRule = @{
 Assert-Equal (Test-RemoteSshDefaultFirewallRule -Rule $knownDefaultRule) $true 'Only the exact known Windows OpenSSH default rule may be classified as the feature rule'
 $knownDefaultRule.enabled = $false
 Assert-Equal (Test-RemoteSshDefaultFirewallRule -Rule $knownDefaultRule -AllowDisabled) $true 'The exact feature-managed Windows rule may be recognized after disabling it'
+Assert-Equal (Test-RemoteSshDefaultRuleForApply -Rule $knownDefaultRule -Resource @{ managed = $true; existed_before = $false }) $true 'An exact feature-owned disabled default rule must remain valid during idempotent reapply'
+Assert-Equal (Test-RemoteSshDefaultRuleForApply -Rule $knownDefaultRule -Resource @{ managed = $false; existed_before = $true }) $false 'A disabled pre-existing default rule must not be treated as feature-owned'
 $knownDefaultRule.enabled = $true
 $lookalikeDefaultRule = $knownDefaultRule.Clone()
 $lookalikeDefaultRule.name = 'Custom-SSH-Allow'
@@ -405,6 +437,23 @@ $ownedManifest = @{ resources = @{ sshd_config = @{ managed = $true }; ssh_servi
 Assert-Equal (Test-RemoteAccessResourceOwned -Manifest $ownedManifest -Name 'sshd_config') $true 'Rollback may restore a resource recorded as feature-managed'
 Assert-Equal (Test-RemoteAccessResourceOwned -Manifest $ownedManifest -Name 'ssh_service') $false 'Rollback must preserve an unchanged pre-existing service'
 Assert-Equal (Test-RemoteAccessResourceOwned -Manifest $ownedManifest -Name 'unlisted_resource') $false 'Rollback must refuse resources absent from the feature manifest'
+$validLocalAccountSid = 'S-1-5-21-100-200-300-1001'
+Assert-Equal (Test-RemoteAccessLocalAccountSid $validLocalAccountSid) $true 'A complete local account SID including its RID must pass rollback validation'
+Assert-Equal (Test-RemoteAccessLocalAccountSid 'S-1-5-21-100-200-300') $false 'A machine-domain SID without an account RID must be rejected'
+Assert-Equal (Test-RemoteAccessLocalAccountSid 'S-1-5-18') $false 'A built-in service SID must not be accepted as the approved SSH account'
+Assert-Equal (Test-RemoteAccessLocalAccountIdentity -Sid $validLocalAccountSid -ExpectedName 'operator' -LocalAccount $true -ActualName 'OPERATOR') $true 'Rollback must bind the full local SID to its local account record'
+Assert-Equal (Test-RemoteAccessLocalAccountIdentity -Sid $validLocalAccountSid -ExpectedName 'operator' -LocalAccount $false -ActualName 'operator') $false 'A domain account record must not satisfy the local SSH identity check'
+Assert-Equal (Test-RemoteAccessLocalAccountIdentity -Sid $validLocalAccountSid -ExpectedName 'operator' -LocalAccount $true -ActualName 'other') $false 'Rollback must reject an account-name mismatch even when a SID-shaped value is supplied'
+$roundTrippedSshManifest = '{"state":"rolling_back"}' | ConvertFrom-Json
+Set-RemoteAccessManifestProperty -Manifest $roundTrippedSshManifest -Name 'rolled_back_at_utc' -Value '2026-10-24T12:00:00Z'
+Assert-Equal $roundTrippedSshManifest.rolled_back_at_utc '2026-10-24T12:00:00Z' 'Rollback completion fields must be added to a JSON-round-tripped PSCustomObject'
+Assert-Equal (Get-RemoteAccessManifestFailureState -PreviousState 'active' -MutationStarted $false) 'active' 'A failed reapply before host mutation must preserve an active manifest'
+Assert-Equal (Get-RemoteAccessManifestFailureState -PreviousState 'active' -MutationStarted $true) 'applying' 'A failed reapply after a host mutation must remain visibly applying'
+$hostKeyPlan = Get-RemoteSshHostKeySetupPlan -DirectorySafe $true -ExistingHostKeys @()
+Assert-Equal $hostKeyPlan.ready $true 'A safe missing OpenSSH key directory can be initialized during explicit apply'
+Assert-Equal $hostKeyPlan.create_directory $true 'First-use SSH setup must explicitly create its protected data directory'
+Assert-Equal ($hostKeyPlan.missing_keys -contains 'ssh_host_ed25519_key') $true 'First-use SSH setup must plan a missing host identity key before configuration validation'
+Assert-Equal (Get-RemoteSshHostKeySetupPlan -DirectorySafe $false -ExistingHostKeys @()).ready $false 'An unsafe or reparse-point SSH key directory must block bootstrap'
 $rollbackPlan = Get-RemoteAccessRollbackPlan -Manifest $ownedManifest -Component Ssh
 Assert-Equal $rollbackPlan.ready $true 'Rollback plan should include resources recorded as feature-managed'
 Assert-Equal ($rollbackPlan.managed_resources -contains 'sshd_config') $true 'Rollback plan should restore a feature-managed config'
@@ -476,6 +525,12 @@ Assert-Equal (Test-RemoteAccessRdcTask -Task $scopeOverrideRdcTask) $false 'A ta
 Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $true -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath '\') $true 'Rollback may remove a freshly verified task at the manifest path'
 Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $true -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath '\Unexpected\') $false 'Rollback must reject a task whose path changed after confirmation'
 Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $false -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath '\' -ActualTaskPath $null) $true 'A missing managed task may be cleaned up when no matching daemon process remains'
+$applyingRdcManifest = '{"state":"applying","resources":{"task":{"managed":true,"task_path":null}}}' | ConvertFrom-Json
+$registeredRdcTaskFacts = [pscustomobject]@{ valid = $true; task = [pscustomobject]@{ TaskPath = '\' } }
+Set-RemoteAccessRdcTaskPath -Manifest $applyingRdcManifest -TaskFacts $registeredRdcTaskFacts | Out-Null
+$persistedRdcManifest = ($applyingRdcManifest | ConvertTo-Json -Depth 6) | ConvertFrom-Json
+Assert-Equal $persistedRdcManifest.resources.task.task_path '\' 'The validated task path must be persisted immediately after registration for partial-install rollback'
+Assert-Equal (Test-RemoteAccessRdcRollbackTaskState -TaskPresent $true -TaskMatchesManifest $true -TaskManaged $true -ExpectedTaskPath $persistedRdcManifest.resources.task.task_path -ActualTaskPath '\') $true 'A task registered before listener failure must remain identifiable by rollback'
 Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '100.64.12.34'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $true 'rdc readiness requires its own listener on a tailnet address'
 Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '0.0.0.0'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $false 'rdc readiness must reject a wildcard listener'
 
@@ -493,7 +548,7 @@ function New-RdcInstallFixture {
         ssh_manifest_active = 'active'
         ssh_acceptance_attested = $true
         boot_recovery_ready = $true
-        firewall_state = 'unknown'
+        firewall_state = 'blocked'
         firewall_default_allow = $false
         firewall_admin_context = $true
         install_state = 'absent'
@@ -511,6 +566,9 @@ Assert-Equal ((Get-RemoteAccessRdcInstallPlan $unacceptedSshRdc).blockers -conta
 $unsafeFirewallRdc = New-RdcInstallFixture
 $unsafeFirewallRdc.firewall_state = 'broad'
 Assert-Equal ((Get-RemoteAccessRdcInstallPlan $unsafeFirewallRdc).blockers -contains 'rdc-firewall-already-broad') $true 'A broad existing rule for the rdc port must block task startup'
+$unknownFirewallRdc = New-RdcInstallFixture
+$unknownFirewallRdc.firewall_state = 'unknown'
+Assert-Equal (Get-RemoteAccessRdcInstallPlan $unknownFirewallRdc).ready $false 'Unavailable rdc firewall inspection must block installation before a manifest or resource is created'
 $safeRdc = New-RdcInstallFixture
 $safeRdcPlan = Get-RemoteAccessRdcInstallPlan $safeRdc
 Assert-Equal $safeRdcPlan.ready $true 'A verified interactive standard-user desktop may be planned after SSH acceptance'

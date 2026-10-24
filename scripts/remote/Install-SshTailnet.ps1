@@ -106,6 +106,116 @@ function Assert-RestrictedFileAcl {
     }
 }
 
+function Test-OpenSshSystemOnlyAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $allowed = @('S-1-5-18', 'S-1-5-32-544')
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -notin $allowed) { return $false }
+    }
+    return $true
+}
+
+function Set-OpenSshSystemOnlyAcl {
+    param([Parameter(Mandatory = $true)][string]$Path, [switch]$Directory)
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($existing in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($existing) }
+    foreach ($sidText in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidText)
+        if ($Directory) {
+            $access = New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        } else {
+            $access = New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, 'Allow')
+        }
+        [void]$acl.AddAccessRule($access)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+}
+
+function Get-RemoteSshHostKeyInventory {
+    $directoryPath = Join-Path $env:ProgramData 'ssh'
+    $directoryExists = Test-Path -LiteralPath $directoryPath -PathType Container
+    $existingKeys = New-Object 'System.Collections.Generic.List[object]'
+    $safe = $true
+    if (Test-Path -LiteralPath $directoryPath) {
+        $directoryItem = Get-Item -LiteralPath $directoryPath -Force -ErrorAction Stop
+        if (-not $directoryItem.PSIsContainer -or ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $safe = $false }
+        elseif (-not (Test-OpenSshSystemOnlyAcl -Path $directoryPath)) { $safe = $false }
+    }
+    foreach ($name in @('ssh_host_ecdsa_key', 'ssh_host_ed25519_key', 'ssh_host_rsa_key')) {
+        $path = Join-Path $directoryPath $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { $safe = $false; continue }
+        if (-not (Test-OpenSshSystemOnlyAcl -Path $path)) { $safe = $false; continue }
+        $existingKeys.Add(@{ name = $name; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash })
+    }
+    return [pscustomobject]@{ directory_path = $directoryPath; directory_exists = $directoryExists; directory_safe = $safe; existing_keys = @($existingKeys.ToArray()) }
+}
+
+function Initialize-RemoteSshHostKeys {
+    param([Parameter(Mandatory = $true)][object]$Manifest, [Parameter(Mandatory = $true)][string]$ManifestPath, [Parameter(Mandatory = $true)][object]$BeforeState)
+
+    $directoryPath = [string]$BeforeState.directory_path
+    $resource = Get-RemoteAccessField (Get-RemoteAccessField $Manifest 'resources') 'ssh_host_keys'
+    if ($null -eq $resource) { throw 'The SSH host-key ownership resource is missing from the protected manifest.' }
+    if (-not (Test-Path -LiteralPath $directoryPath -PathType Container)) {
+        $script:hostMutationStarted = $true
+        New-Item -ItemType Directory -Path $directoryPath -ErrorAction Stop | Out-Null
+        Set-OpenSshSystemOnlyAcl -Path $directoryPath -Directory
+        $resource.directory_created = $true
+        Save-Manifest -Manifest $Manifest -Path $ManifestPath
+    } elseif (-not (Test-OpenSshSystemOnlyAcl -Path $directoryPath)) {
+        throw 'The OpenSSH data directory ACL changed after review; refusing to generate host keys.'
+    }
+
+    $beforeByName = @{}
+    foreach ($item in @(Get-RemoteAccessField $resource 'before')) { $beforeByName[[string]$item.name] = [string]$item.sha256 }
+    $createdByName = @{}
+    foreach ($item in @(Get-RemoteAccessField $resource 'created')) { $createdByName[[string]$item.name] = [string]$item.sha256 }
+    $required = @('ssh_host_ecdsa_key', 'ssh_host_ed25519_key', 'ssh_host_rsa_key')
+    foreach ($name in $required) {
+        $path = Join-Path $directoryPath $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($beforeByName.ContainsKey($name) -and $beforeByName[$name] -ne $hash) { throw 'A pre-existing OpenSSH host key changed after review; refusing to replace it.' }
+        if ($createdByName.ContainsKey($name) -and $createdByName[$name] -ne $hash) { throw 'A feature-generated OpenSSH host key changed after setup; refusing to overwrite it.' }
+        if (-not $beforeByName.ContainsKey($name) -and -not $createdByName.ContainsKey($name)) {
+            $script:hostMutationStarted = $true
+            Set-OpenSshSystemOnlyAcl -Path $path
+            $createdByName[$name] = $hash
+        }
+    }
+
+    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $directoryPath $_) -PathType Leaf) })
+    if ($missing.Count -gt 0) {
+        $resource.generating = [string[]]$missing
+        $script:hostMutationStarted = $true
+        Save-Manifest -Manifest $Manifest -Path $ManifestPath
+        $keygenPath = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'
+        if (-not (Test-Path -LiteralPath $keygenPath -PathType Leaf)) { throw 'The in-box ssh-keygen binary is unavailable; no sshd listener was started.' }
+        Push-Location (Split-Path -Parent $keygenPath)
+        try { & $keygenPath -A 2>$null; $keygenExit = $LASTEXITCODE } finally { Pop-Location }
+        if ($keygenExit -ne 0) { throw 'OpenSSH host-key generation failed; sshd was not started.' }
+        foreach ($name in $missing) {
+            $path = Join-Path $directoryPath $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'OpenSSH did not generate every required host key; sshd was not started.' }
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A generated OpenSSH host key is a reparse point; refusing to continue.' }
+            Set-OpenSshSystemOnlyAcl -Path $path
+            $createdByName[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+    }
+    $resource.created = @($createdByName.Keys | Sort-Object | ForEach-Object { @{ name = $_; sha256 = $createdByName[$_] } })
+    $resource.managed = ($resource.directory_created -eq $true -or @($resource.created).Count -gt 0)
+    $resource.generating = @()
+    Save-Manifest -Manifest $Manifest -Path $ManifestPath
+}
+
 function Test-AuthorizedKeyPresent {
     param([string]$Path, [Parameter(Mandatory = $true)][object]$Key)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -151,12 +261,11 @@ function Get-SshdServiceState {
 
 function Get-SshFirewallDefaultAllowState {
     try {
-        $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.Enabled })
-        if (-not $profiles) { return $null }
-        $actions = @($profiles | ForEach-Object { $_.DefaultInboundAction.ToString() } | Sort-Object -Unique)
-        if ($actions -contains 'Allow') { return $true }
-        if (@($actions | Where-Object { $_ -ne 'Block' }).Count -gt 0) { return $null }
-        return $false
+        $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+        $state = Get-RemoteAccessFirewallProfileState -Profiles $profiles
+        if ($state -eq 'broad') { return $true }
+        if ($state -eq 'blocked') { return $false }
+        return $null
     } catch {
         return $null
     }
@@ -164,23 +273,7 @@ function Get-SshFirewallDefaultAllowState {
 
 function Get-SshdPortInUse {
     param([int]$SelectedPort, [bool]$FeatureOwnsService)
-    try {
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $SelectedPort -ErrorAction SilentlyContinue)
-        if (-not $listeners) { return $false }
-        if ($FeatureOwnsService) {
-            $allSshd = $true
-            foreach ($listener in $listeners) {
-                try {
-                    $process = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
-                    if ($process.ProcessName -ine 'sshd') { $allSshd = $false }
-                } catch { $allSshd = $false }
-            }
-            if ($allSshd) { return $false }
-        }
-        return $true
-    } catch {
-        return $null
-    }
+    return Get-RemoteAccessPortUseState -ListenerQuery { param($port) Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop } -Port $SelectedPort -FeatureOwnsListener $FeatureOwnsService -ExpectedProcessName 'sshd'
 }
 
 function Get-TailscaleInterfaceFacts {
@@ -242,7 +335,8 @@ function Save-InitialManifest {
         [object]$Tailscale,
         [string]$SshdConfigPath,
         [string]$AuthorizedKeysPath,
-        [string]$SnapshotPath
+        [string]$SnapshotPath,
+        [Parameter(Mandatory = $true)][object]$HostKeys
     )
 
     New-Item -ItemType Directory -Path $SnapshotPath -Force | Out-Null
@@ -288,6 +382,7 @@ function Save-InitialManifest {
             ssh_capability = @{ managed = ([string]$capability.State -ne 'Installed'); was_installed = ([string]$capability.State -eq 'Installed') }
             sshd_config = @{ managed = $true; existed = $configExists; configured = $false; backup_path = $configBackup; package_default_backup = $null; path = $SshdConfigPath; sddl = $configSddl; sha256 = $null }
             authorized_keys = @{ managed = $true; existed = $keysExist; backup_path = $keysBackup; sddl = $keysSddl; path = $AuthorizedKeysPath; directory_existed = $keyDirectoryExists; directory_path = $keyDirectory; sha256_after = $null }
+            ssh_host_keys = @{ managed = $false; path = $HostKeys.directory_path; directory_existed = [bool]$HostKeys.directory_exists; directory_created = $false; before = @($HostKeys.existing_keys); created = @(); generating = @() }
             ssh_service = @{ managed = $true; before = $service }
             ssh_firewall_v4 = @{ managed = $false; name = 'AIStack-RemoteAccess-SSH-v4'; expected = $null }
             ssh_firewall_v6 = @{ managed = $false; name = 'AIStack-RemoteAccess-SSH-v6'; expected = $null }
@@ -436,6 +531,8 @@ $tailscale = $null
 $accountIsStandard = $false
 $publicKeyValid = $false
 $manifestScopeMatches = $null
+$hostKeyFacts = $null
+$hostKeyPlan = $null
 
 try {
     $manifest = Get-FeatureManifest -Path $manifestPath
@@ -444,6 +541,8 @@ try {
     $clientKey = Read-PublicKeyLine -Path $PublicKeyPath
     $keyPath = (Resolve-Path -LiteralPath $PublicKeyPath).Path
     $publicKeyValid = $true
+    $hostKeyFacts = Get-RemoteSshHostKeyInventory
+    $hostKeyPlan = Get-RemoteSshHostKeySetupPlan -DirectorySafe $hostKeyFacts.directory_safe -DirectoryExists $hostKeyFacts.directory_exists -ExistingHostKeys @($hostKeyFacts.existing_keys | ForEach-Object { [string]$_.name })
     $profilePath = $account.profile_path
     $authorizedKeysPath = Get-AuthorizedKeyPath -ProfilePath $profilePath
     $directoryPath = Split-Path -Parent $authorizedKeysPath
@@ -463,6 +562,7 @@ try {
         account_is_standard = $accountIsStandard
         public_key_valid = $publicKeyValid
         manifest_scope_matches = $manifestScopeMatches
+        host_key_path_safe = [bool]$hostKeyPlan.ready
         trusted_client_addresses = @($TrustedClientAddresses)
         port = $Port
         alternate_port_approved = ($ConfirmAlternatePort -or $Port -eq 22)
@@ -482,6 +582,7 @@ try {
         account_is_standard = $accountIsStandard
         public_key_valid = $publicKeyValid
         manifest_scope_matches = $manifestScopeMatches
+        host_key_path_safe = $false
         trusted_client_addresses = @($TrustedClientAddresses)
         port = $Port
         alternate_port_approved = ($ConfirmAlternatePort -or $Port -eq 22)
@@ -516,20 +617,26 @@ if (-not (Test-CurrentProcessAdministrator)) { Write-Error 'Run the explicit app
 if ($FinalizeFirewall -and -not $ConfirmSecondDeviceKeyLogin) { Write-Error 'Firewall finalization requires -ConfirmSecondDeviceKeyLogin; no local changes were made.'; exit 1 }
 if (-not $PSCmdlet.ShouldProcess('Windows OpenSSH on this host', 'Apply the approved tailnet-scoped SSH plan')) { return }
 
+$previousManifestState = if ($manifest) { [string]$manifest.state } else { $null }
+$hostMutationStarted = $false
 $startedSshd = $false
 try {
     Assert-ProtectedStateDirectory -Path $stateRoot
     if (-not $manifest) {
         $snapshotPath = Join-Path $stateRoot ('snapshots\ssh-' + [Guid]::NewGuid().ToString('N'))
-        $manifest = Save-InitialManifest -Root $stateRoot -ManifestPath $manifestPath -Account $account -KeyPath $keyPath -Preflight $preflight -Tailscale $tailscale -SshdConfigPath $sshdConfigPath -AuthorizedKeysPath $authorizedKeysPath -SnapshotPath $snapshotPath
+        $manifest = Save-InitialManifest -Root $stateRoot -ManifestPath $manifestPath -Account $account -KeyPath $keyPath -Preflight $preflight -Tailscale $tailscale -SshdConfigPath $sshdConfigPath -AuthorizedKeysPath $authorizedKeysPath -SnapshotPath $snapshotPath -HostKeys $hostKeyFacts
     } elseif (-not (Test-RemoteSshManifestScope -Manifest $manifest -AccountSid $account.sid -Port $Port -ClientAddresses $TrustedClientAddresses -ListenerAddresses $tailscale.addresses -InterfaceAliases $tailscale.aliases)) {
         throw 'The existing SSH manifest scope changed; use the documented rollback and a new reviewed apply to change account, port, client, or Tailscale interface scope.'
     }
 
     $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
     if ([string]$capability.State -ne 'Installed') {
+        $hostMutationStarted = $true
         Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
     }
+
+    if ($hostKeyPlan.create_directory -or @($hostKeyPlan.missing_keys).Count -gt 0) { $hostMutationStarted = $true }
+    Initialize-RemoteSshHostKeys -Manifest $manifest -ManifestPath $manifestPath -BeforeState $hostKeyFacts
 
     $defaultRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
     if ($defaultRule) {
@@ -544,13 +651,16 @@ try {
             program = [string](Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $defaultRule).Program
             service = [string](Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $defaultRule).Service
         }
-        if (-not (Test-RemoteSshDefaultFirewallRule -Rule $ruleShape)) { throw 'The Windows OpenSSH firewall rule has an unrecognized shape; refusing to change it.' }
         $defaultResource = Get-RemoteAccessField (Get-RemoteAccessField $manifest 'resources') 'default_openssh_rule'
+        if (-not (Test-RemoteSshDefaultRuleForApply -Rule $ruleShape -Resource $defaultResource)) { throw 'The Windows OpenSSH firewall rule has an unrecognized shape; refusing to change it.' }
         if (-not $defaultResource.existed_before) {
-            Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled False -ErrorAction Stop | Out-Null
+            $hostMutationStarted = $true
             $defaultResource.managed = $true
             Save-Manifest $manifest $manifestPath
+            Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled False -ErrorAction Stop | Out-Null
+            Save-Manifest $manifest $manifestPath
         } elseif ($defaultResource.managed -and $FinalizeFirewall -and $ConfirmSecondDeviceKeyLogin) {
+            $hostMutationStarted = $true
             Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled False -ErrorAction Stop | Out-Null
             $defaultResource.managed = $true
             Save-Manifest $manifest $manifestPath
@@ -565,7 +675,7 @@ try {
         if ($currentKeyFileHash -ne [string]$keyResource.sha256_after) { throw 'The feature-managed authorized_keys file has local edits; refusing to overwrite them.' }
     }
     $existingKey = Test-AuthorizedKeyPresent -Path $authorizedKeysPath -Key $clientKey
-    if (-not $existingKey) { Add-ApprovedAuthorizedKey -Path $authorizedKeysPath -DirectoryPath $directoryPath -Account $account -Key $clientKey -Manifest $manifest }
+    if (-not $existingKey) { $hostMutationStarted = $true; Add-ApprovedAuthorizedKey -Path $authorizedKeysPath -DirectoryPath $directoryPath -Account $account -Key $clientKey -Manifest $manifest }
     $keyResource.sha256_after = (Get-FileHash -LiteralPath $authorizedKeysPath -Algorithm SHA256).Hash
     Save-Manifest $manifest $manifestPath
 
@@ -585,6 +695,7 @@ try {
             }
         }
         $config = New-RemoteSshManagedConfig -Port $Port -WindowsAccount $account.name -ListenAddresses $tailscale.addresses
+        $hostMutationStarted = $true
         Write-RemoteSshConfig -Path $sshdConfigPath -Text $config
         $configResource.configured = $true
         $configResource.sha256 = (Get-FileHash -LiteralPath $sshdConfigPath -Algorithm SHA256).Hash
@@ -595,12 +706,14 @@ try {
     & $sshdPath -t -f $sshdConfigPath 2>$null
     if ($LASTEXITCODE -ne 0) { throw 'The managed sshd configuration did not pass sshd -t; the service was not started.' }
 
+    $hostMutationStarted = $true
     Set-RemoteSshFirewallRules -Manifest $manifest -ClientAddresses $TrustedClientAddresses -Tailscale $tailscale -SshdPath $sshdPath
     $firewallAfter = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($sshdPath)
-    if ($firewallAfter -eq 'broad') { throw 'The effective SSH firewall policy is broad after rule creation; sshd was not started.' }
+    if ($firewallAfter -ne 'tailnet-only') { throw 'The effective SSH firewall policy is not proven tailnet-only after rule creation; sshd was not started.' }
 
     $service = Get-Service -Name sshd -ErrorAction Stop
     if ([string]$service.Status -ne 'Running') {
+        $hostMutationStarted = $true
         Set-Service -Name sshd -StartupType Automatic -ErrorAction Stop
         Start-Service -Name sshd -ErrorAction Stop
         $startedSshd = $true
@@ -614,7 +727,7 @@ try {
     Save-Manifest $manifest $manifestPath
     [pscustomobject]@{ state = 'applied'; ready = $true; port = $Port; firewall = $firewallAfter; manifest = 'protected-local-state' } | ConvertTo-Json -Depth 4
 } catch {
-    if ($manifest) { $manifest.state = 'applying'; Save-Manifest $manifest $manifestPath }
+    if ($manifest) { $manifest.state = Get-RemoteAccessManifestFailureState -PreviousState $previousManifestState -MutationStarted $hostMutationStarted; Save-Manifest $manifest $manifestPath }
     Write-Error 'SSH setup stopped safely. Protected recovery state is available; no unrelated host resources were changed. Inspect the local protected manifest before retrying.'
     exit 1
 }

@@ -256,7 +256,7 @@ try {
     }
     $manifest.resources.binary.managed = $false
     $manifest.state = 'rolled_back'
-    $manifest.rolled_back_at_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Set-RemoteAccessManifestProperty -Manifest $manifest -Name 'rolled_back_at_utc' -Value ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
     Save-RdcRollbackManifest
     [pscustomobject]@{ component = 'rdc'; state = 'rolled_back'; restored_resources = [string[]]$rollbackPlan.managed_resources; manifest_retained = $true } | ConvertTo-Json -Depth 4
 } catch {

@@ -121,11 +121,10 @@ function Test-RdcUserPathsSafe {
 
 function Get-RdcFirewallDefaultAllow {
     try {
-        $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.Enabled })
-        if (-not $profiles) { return $null }
-        $actions = @($profiles | ForEach-Object { [string]$_.DefaultInboundAction.ToString() } | Sort-Object -Unique)
-        if ($actions -contains 'Allow') { return $true }
-        if (@($actions | Where-Object { $_ -ne 'Block' }).Count -eq 0) { return $false }
+        $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+        $state = Get-RemoteAccessFirewallProfileState -Profiles $profiles
+        if ($state -eq 'broad') { return $true }
+        if ($state -eq 'blocked') { return $false }
         return $null
     } catch { return $null }
 }
@@ -188,18 +187,7 @@ function Get-RdcTaskFacts {
 
 function Get-RdcPortInUse {
     param([int]$SelectedPort, [string]$ExpectedExecutable, [bool]$FeatureOwnsInstall)
-    try {
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $SelectedPort -ErrorAction SilentlyContinue)
-        if (-not $listeners) { return $false }
-        if (-not $FeatureOwnsInstall) { return $true }
-        foreach ($listener in $listeners) {
-            try {
-                $process = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
-                if ($process.ProcessName -ine 'rdc' -or [IO.Path]::GetFullPath([string]$process.Path) -ine [IO.Path]::GetFullPath($ExpectedExecutable)) { return $true }
-            } catch { return $true }
-        }
-        return $false
-    } catch { return $null }
+    return Get-RemoteAccessPortUseState -ListenerQuery { param($port) Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop } -Port $SelectedPort -FeatureOwnsListener $FeatureOwnsInstall -ExpectedProcessName 'rdc' -ExpectedExecutable $ExpectedExecutable
 }
 
 function Test-RdcExistingManifest {
@@ -414,7 +402,8 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
     $latestBinding = Get-RdcTailnetBinding -Address $BindAddress
     if (-not $latestBinding -or $latestBinding.address -ine $tailscaleBinding.address -or $latestBinding.alias -ine $tailscaleBinding.alias) { throw 'The Tailscale listener address or interface changed after review.' }
     if ((Get-RdcFirewallDefaultAllow) -ne $false) { throw 'The inbound firewall policy is no longer confirmed as block by default.' }
-    if ((Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($rdcPath)) -eq 'broad') { throw 'A broad firewall rule appeared after review.' }
+    $latestFirewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($rdcPath)
+    if ($latestFirewallState -notin @('blocked', 'tailnet-only')) { throw 'The effective firewall state is broad or could not be verified after review.' }
     $liveFeatureRule = Get-NetFirewallRule -Name $script:RdcFirewallRuleName -ErrorAction SilentlyContinue
     if ([bool]$liveFeatureRule -ne [bool]$firewallRule) { throw 'The feature firewall rule changed after review.' }
     if ($liveFeatureRule -and $manifestCheck.manifest) {
@@ -502,6 +491,10 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
         if (-not $taskFacts.valid) {
             $installOutput = @(& $rdcPath service install 2>&1)
             if ($LASTEXITCODE -ne 0) { throw 'rdc service install failed; inspect the signed-in desktop locally.' }
+            $registeredTaskFacts = Get-RdcTaskFacts -UserSid $userSid -RdcPath $rdcPath -TaskName $taskName -ExpectedTaskPath $null
+            if (-not (Set-RemoteAccessRdcTaskPath -Manifest $manifest -TaskFacts $registeredTaskFacts)) { throw 'rdc registered a task whose ownership could not be validated; inspect the signed-in desktop locally.' }
+            Save-RdcManifest -Manifest $manifest -Path $manifestPath -UserSid $userSid
+            $taskFacts = $registeredTaskFacts
         } elseif (-not $taskFacts.running) {
             Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
         }

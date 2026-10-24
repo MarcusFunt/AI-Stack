@@ -46,6 +46,8 @@ The feature manifest and protected before-state are stored under `%ProgramData%\
 
 Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
 
+OpenSSH host keys are server identity and are retained after feature rollback. Existing keys are never replaced; keys generated during first-use setup are recorded in the manifest by filename and SHA-256 and remain in the protected `%ProgramData%\ssh` directory. Do not remove or rotate them as part of routine feature rollback.
+
 ## `rdc` desktop setup (after SSH acceptance)
 
 Only continue after key-only SSH has passed the wrong-key, unauthorized-peer, sign-out, and cold-reboot checks from a second tailnet device. The installer also requires live tailnet-only SSH readiness and the explicit `-ConfirmSshRecoveryAccepted` attestation. That switch records your acceptance; it does not run those tests for you.

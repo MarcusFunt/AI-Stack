@@ -64,6 +64,8 @@ Windows capability installation can create a broad `OpenSSH-Server-In-TCP` rule.
 
 SSH rollback is inspect-only by default. Apply requires an explicit `-ConfirmManagementPath` attestation after local console or an independently verified path is available, and restores only manifest-owned resources. Snapshots remain available after rollback.
 
+Existing OpenSSH host keys are never replaced. Keys generated to initialize a new OpenSSH service are recorded by name and SHA-256 and kept in the SYSTEM/Administrators-only `%ProgramData%\ssh` directory after feature rollback, preserving the server identity if the OS capability is installed again. This intentionally leaves those feature-created key files behind.
+
 ## Human fallback status
 
 The selected fallback is RustDesk direct-IP over Tailscale. Its configuration and recovery behavior have not been installed or tested. The local readiness probe reports `unknown` until an operator records a protected, secret-free attestation at `%ProgramData%\AI-Stack\RemoteAccess\human-fallback-status.json`. A `ready` record is accepted only for `rustdesk-direct-ip` when it attests tailnet-only access, public relay disabled, a locally configured credential, blocked external access, a successful recovery after an `rdc` failure, and a test date within 90 days. The probe never reads the viewer's password or connection secret. Missing, malformed, stale, or incomplete records remain `unknown`; an explicit valid `disabled` record reports `disabled`.
