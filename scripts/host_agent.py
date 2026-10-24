@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -47,6 +49,109 @@ def run(args, timeout=20, max_output=12000):
         "stdout": stdout.strip(),
         "stderr": stderr.strip(),
     }
+
+
+REMOTE_ACCESS_STATUS_CACHE_TTL = 15.0
+REMOTE_ACCESS_STATUS_CACHE = {"expires_at": 0.0, "value": None}
+REMOTE_ACCESS_STATUS_CACHE_LOCK = threading.Lock()
+
+
+def _remote_access_enum(value, allowed):
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    return normalized if normalized in allowed else "unknown"
+
+
+def _remote_access_timestamp(value):
+    if not isinstance(value, str):
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+
+
+def _remote_access_count(value, maximum):
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if result < 0 or result > maximum:
+        return None
+    return result
+
+
+def sanitize_remote_access_status(status):
+    if not isinstance(status, dict):
+        raise ValueError("invalid remote access status")
+    tailnet = status.get("tailnet") if isinstance(status.get("tailnet"), dict) else {}
+    ssh = status.get("ssh") if isinstance(status.get("ssh"), dict) else {}
+    desktop = status.get("desktop") if isinstance(status.get("desktop"), dict) else {}
+    denied = desktop.get("denied_by_category") if isinstance(desktop.get("denied_by_category"), dict) else {}
+    host = status.get("host") if isinstance(status.get("host"), dict) else {}
+    audit = status.get("last_audit") if isinstance(status.get("last_audit"), dict) else {}
+    return {
+        "observed_at_utc": _remote_access_timestamp(status.get("observed_at_utc")),
+        "tailnet": {
+            "state": _remote_access_enum(tailnet.get("state"), {"connected", "disconnected", "unknown"}),
+            "unattended": _remote_access_enum(tailnet.get("unattended"), {"enabled", "disabled", "unknown"}),
+            "last_state_change_utc": _remote_access_timestamp(tailnet.get("last_state_change_utc")),
+        },
+        "ssh": {
+            "service": _remote_access_enum(ssh.get("service"), {"running", "stopped", "missing", "unknown"}),
+            "firewall": _remote_access_enum(ssh.get("firewall"), {"tailnet-only", "broad", "unknown"}),
+            "last_listener_check_utc": _remote_access_timestamp(ssh.get("last_listener_check_utc")),
+        },
+        "desktop": {
+            "task": _remote_access_enum(desktop.get("task"), {"ready", "running", "absent", "unknown"}),
+            "session": _remote_access_enum(desktop.get("session"), {"interactive", "signed-out", "locked", "unknown"}),
+            "rdc": _remote_access_enum(desktop.get("rdc"), {"ready", "unavailable", "not-checked", "unknown"}),
+            "denied_by_category": {
+                "authorization": _remote_access_count(denied.get("authorization"), 1000000),
+                "view_only": _remote_access_count(denied.get("view_only"), 1000000),
+                "other": _remote_access_count(denied.get("other"), 1000000),
+            },
+        },
+        "human_fallback": _remote_access_enum(status.get("human_fallback"), {"ready", "disabled", "unknown"}),
+        "host": {
+            "uptime_seconds": _remote_access_count(host.get("uptime_seconds"), 630720000),
+            "last_boot_utc": _remote_access_timestamp(host.get("last_boot_utc")),
+        },
+        "last_audit": {
+            "timestamp": _remote_access_timestamp(audit.get("timestamp")),
+            "category": _remote_access_enum(audit.get("category"), {"authorization", "view_only", "other"}),
+        },
+    }
+
+
+def remote_access_status():
+    now = time.monotonic()
+    with REMOTE_ACCESS_STATUS_CACHE_LOCK:
+        cached = REMOTE_ACCESS_STATUS_CACHE.get("value")
+        if cached is not None and now < REMOTE_ACCESS_STATUS_CACHE.get("expires_at", 0.0):
+            return copy.deepcopy(cached)
+
+    powershell = shutil.which("powershell.exe") or "powershell.exe"
+    script_path = ROOT / "scripts" / "remote" / "Test-RemoteReadiness.ps1"
+    result = run([
+        powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(script_path), "-Json",
+    ], timeout=12, max_output=8192)
+    if not result.get("ok"):
+        raise RuntimeError("remote access status probe failed")
+    document = json.loads(result.get("stdout", ""))
+    status = document.get("status") if isinstance(document, dict) else None
+    normalized = sanitize_remote_access_status(status)
+    with REMOTE_ACCESS_STATUS_CACHE_LOCK:
+        REMOTE_ACCESS_STATUS_CACHE["value"] = copy.deepcopy(normalized)
+        REMOTE_ACCESS_STATUS_CACHE["expires_at"] = time.monotonic() + REMOTE_ACCESS_STATUS_CACHE_TTL
+    return normalized
 
 def read_text_tail(path, max_chars=12000):
     try:
@@ -801,6 +906,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/tailscale/status":
                 return self.send_json(200, tailscale_status())
+            if path == "/remote-access/status":
+                try:
+                    return self.send_json(200, remote_access_status())
+                except Exception:
+                    return self.send_json(503, {"detail": "remote access status unavailable"})
             if path == "/models/config":
                 return self.send_json(200, {
                     "config": model_config(),

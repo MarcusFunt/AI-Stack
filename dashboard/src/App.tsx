@@ -520,7 +520,7 @@ export default function App() {
     ) :
     section === 'setup' ? <SetupPanel snapshot={snapshot} models={models} network={network}
       onNavigate={(next) => setSection(next)} /> :
-    section === 'network' ? <NetworkPanel network={network} onNetwork={setNetwork} /> :
+    section === 'network' ? <NetworkPanel network={network} onNetwork={setNetwork} application={snapshot} /> :
     section === 'maintenance' ? <MaintenancePanel /> :
     section === 'system' ? (
       <SystemPanel models={models} status={status} onStopAll={stopAll} />

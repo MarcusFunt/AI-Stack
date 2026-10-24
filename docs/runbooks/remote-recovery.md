@@ -1,0 +1,135 @@
+# Remote Recovery Runbook
+
+**Status:** SSH and `rdc` provisioning code plus read-only status reporting are implemented. No host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
+
+## Before using this runbook
+
+- Use only an operator-approved Windows account, SSH key, and tailnet client. Keep private keys, identities, source addresses, firewall exports, audit lines, and rollback snapshots outside Git.
+- Direct SSH must remain usable when Docker, Gateway, MCP, the dashboard, or the host agent is unavailable.
+- Do not use Tailscale Funnel, router forwarding, or public MCP for SSH or desktop access.
+- The current Windows TCP 22 listener belongs to `wslrelay`; Windows `sshd` is absent. Do not stop WSL or change that listener. A safe port decision is still required.
+- The current signed-in account belongs to Administrators and `docker-users`; it is not approved for agent SSH. A separate least-privilege account is unresolved.
+- The installer only plans by default. It requires a standard local account, a public-key file, exact verified Tailscale client IPs, and an explicitly approved available port. It refuses TCP 22 while `wslrelay` owns it.
+- `sshd` binds only to the host's current Tailscale IP addresses. Its firewall rules use those local addresses, the Tailscale interface, and the exact approved client IPs. Password authentication is disabled before the service starts.
+- If OpenSSH capability installation is needed, the installer first creates and verifies a feature-owned Windows Firewall Block rule for inbound TCP 22 on every profile and interface. It keeps that guard while capability setup runs, disables only a generated `OpenSSH-Server-In-TCP` rule whose previously absent state and guarded installation are recorded, verifies the exact client-address firewall rules and that no other effective inbound allow remains on TCP 22, then removes the guard before starting `sshd`. A pre-existing broad rule blocks setup and is preserved. The temporary guard can interrupt any existing inbound TCP 22 use, so apply requires `-ConfirmManagementPath` after local console or another independent management path is available. A failed or unverifiable apply retains the guard for reviewed rollback.
+- The stack was stopped during the baseline and supervisor status was unavailable. If GPU/job state is unknown, do not start, stop, rebuild, or restart services.
+
+## SSH setup (after operator review)
+
+Choose a standard local account and test client, verify the client's current Tailscale IPv4/IPv6 address, select a free port, and confirm router/Tailscale policy does not expose it publicly. Keep the client public key in a protected local file. Use the same approved values for planning and apply; values are not written to console output or committed.
+Replace every angle-bracket placeholder below with the approved value before running the command. Include one exact IP per authorized client address; add both address families only when each was verified.
+
+```powershell
+# Read-only plan; port 22 is expected to be rejected while wslrelay owns it.
+.\scripts\remote\Install-SshTailnet.ps1 `
+  -WindowsAccount '<approved-local-account>' `
+  -PublicKeyPath '<protected-client-public-key-file>' `
+  -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
+  -Port <operator-approved-free-port> -ConfirmAlternatePort
+
+# Only after reviewing the plan and confirming the client/account/port. If the
+# plan says capability installation is required, also verify a separate
+# management path: the installer temporarily blocks inbound TCP 22.
+.\scripts\remote\Install-SshTailnet.ps1 `
+  -WindowsAccount '<approved-local-account>' `
+  -PublicKeyPath '<protected-client-public-key-file>' `
+  -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
+  -Port <operator-approved-free-port> -ConfirmAlternatePort -ConfirmManagementPath -Apply
+```
+
+Run the second-device acceptance checks before relying on SSH: correct key succeeds, wrong key fails, an unapproved peer is denied, and direct internet access is closed. If a feature-owned broad default rule must be finalized, use `-FinalizeFirewall -ConfirmSecondDeviceKeyLogin` only after the successful key login. The confirmation switch records an operator attestation; it is not an automated test result.
+
+The feature manifest and protected before-state are stored under `%ProgramData%\AI-Stack\RemoteAccess`. Inspect the rollback plan first. Apply rollback only from local console or after a separate management path has been verified:
+
+```powershell
+.\scripts\remote\Rollback-RemoteAccess.ps1 -Component Ssh
+.\scripts\remote\Rollback-RemoteAccess.ps1 -Component Ssh -Apply -ConfirmManagementPath
+```
+
+Rollback performs a complete read-only check of the managed firewall rules, the temporary TCP 22 guard, service state, current file hashes, and required before-state copies before it changes the manifest or stops `sshd`. A mismatch blocks rollback before service state changes. It removes a recorded install guard only after the other feature-owned state has been restored, the OpenSSH capability cleanup has finished, and inbound TCP 22 is again proven to have no effective allow rule. If the restored before-state includes an allow rule or its scope is unknown, the guard remains and the manifest stays in rollback review. Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
+
+OpenSSH host keys are server identity and are retained after feature rollback. Existing keys are never replaced; keys generated during first-use setup are recorded in the manifest by filename and SHA-256 and remain in the protected `%ProgramData%\ssh` directory. Do not remove or rotate them as part of routine feature rollback.
+
+## `rdc` desktop setup (after SSH acceptance)
+
+Only continue after key-only SSH has passed the wrong-key, unauthorized-peer, sign-out, and cold-reboot checks from a second tailnet device. The installer also requires live tailnet-only SSH readiness and the explicit `-ConfirmSshRecoveryAccepted` attestation. That switch records your acceptance; it does not run those tests for you.
+
+Use the immutable release and digest recorded in [the version pin](../plans/remote-access-versions.md). Download `rdc-windows-x86_64.zip` from that pinned release, verify its SHA-256 against the pin, and retain the archive outside the repository. The binary is unsigned and Windows SmartScreen may warn the first time it runs.
+
+Run the installer from the signed-in desktop user's PowerShell. It needs an Administrator token to add the firewall rule; the scheduled task itself is registered without `--elevated` and must remain at standard integrity. The script never changes Tailscale access policy. Replace placeholders with exact identities that you verified in the tailnet. `AllowedIdentities` receive `view` and `input`; `ViewOnlyIdentities` receive `view` only. Leave out the view-only parameter when there are no view-only identities.
+
+```powershell
+# Sanitized plan; no host setting changes.
+.\scripts\remote\Install-RdcDesktop.ps1 `
+  -AllowedIdentities @('<verified-login-or-tag>') `
+  -ViewOnlyIdentities @('<optional-verified-view-only-login-or-tag>') `
+  -ArchivePath '<path-to-verified-rdc-windows-x86_64.zip>' `
+  -BindAddress '<this-hosts-exact-Tailscale-address>' `
+  -ConfirmSshRecoveryAccepted
+
+# Apply only after reviewing the plan and confirming the recovery tests above.
+.\scripts\remote\Install-RdcDesktop.ps1 `
+  -AllowedIdentities @('<verified-login-or-tag>') `
+  -ViewOnlyIdentities @('<optional-verified-view-only-login-or-tag>') `
+  -ArchivePath '<path-to-verified-rdc-windows-x86_64.zip>' `
+  -BindAddress '<this-hosts-exact-Tailscale-address>' `
+  -ConfirmSshRecoveryAccepted -Apply
+```
+
+The installer refuses wildcards, empty identities, changed managed scope, a conflicting task/config/rule, occupied port, broad firewall state, unknown inbound policy, signed-out invocation, or a missing SSH acceptance gate. It verifies the archive SHA-256 before extracting only `rdc.exe`, creates a protected user-local config and manifest, scopes TCP 7770 to the selected Tailscale address/interface and tailnet source prefixes, then invokes `rdc service install` without `--elevated`. An unchanged healthy install is left running.
+
+Add the matching Tailscale policy `grants`/`acls` rule for the identities and TCP 7770 if the current policy requires it. Match the same exact login/tag identities as the local `rdc` allowlist; the installer will not edit the tailnet policy. Validate from the client with `whoami`, then read-only screenshots/window listing, then a disposable screenshot-click-screenshot test. Verify a view-only identity is denied input and that the audit entry is present. Test lock/sign-out/sign-in and task recovery while SSH remains usable.
+
+The standard task cannot control elevated windows (Windows UIPI drops synthetic input) and cannot reach secure-desktop UAC prompts. `rdc` is unavailable while the user is signed out or locked. The pinned Windows guide was verified on one display at 150% scaling; multi-monitor behavior still needs host testing. Do not report desktop readiness from a session-0 or SSH probe.
+
+Inspect the desktop rollback first. Apply it only as the same Windows user, after SSH or local console management is verified; it also requires Administrator access to remove the firewall rule. It removes only the task, firewall rule, config, and binary whose paths, hashes, task settings, and firewall scope still match the user-local manifest. It retains a rollback manifest.
+
+Plan: .\scripts\remote\Rollback-RdcDesktop.ps1
+Apply: .\scripts\remote\Rollback-RdcDesktop.ps1 -Apply -ConfirmManagementPath
+
+## Recovery state order
+
+1. **Host/network:** verify Windows is online and Tailscale is connected from the second device. The current CLI snapshot reported tailnet-only routes on 8443–8449 and 10000; preserve all of them.
+2. **SSH boot recovery:** use the approved key and port only after the second-device, sign-out, and cold-reboot acceptance checks pass. Those checks have not passed yet.
+3. **AI-Stack application:** on the host, use `scripts\ai.ps1 status` for read-only status. Confirm supervisor/lease state before any lifecycle operation. A down supervisor means active-job state is unknown; escalate to local console instead of guessing.
+4. **Desktop:** `rdc` is expected to work only for the signed-in interactive user. Treat signed-out, locked/secure-desktop, and session-0 reports as unavailable unless actual testing proves otherwise.
+5. **Human fallback:** RustDesk direct-IP over Tailscale is selected because this host runs Windows 11 Home. It is not installed or accepted yet. Its usual direct-IP listener port is TCP 21118; restrict it to the Tailscale interface and authorized tailnet peers, disable public relay, and verify no WAN path or router forwarding exists. Do this only after SSH has passed second-device and no-login acceptance.
+
+## Read-only readiness status
+
+Run `scripts\remote\Test-RemoteReadiness.ps1 -Json` locally to inspect tailnet, SSH, desktop, fallback, and host state without starting Docker or changing host settings. The dashboard's Network page uses the authenticated Gateway `GET /control/remote-access` endpoint for the same sanitized status; its SSH card reports local signals only and does not certify second-device, sign-out, cold-boot, or Tailscale-reconnect acceptance. If the Gateway or host agent is unavailable, it shows unavailable/unknown and cannot substitute for direct SSH. Optional MQTT publishes only the bounded status summary at `localai/marcus-computer/remote-access/status` and remains telemetry-only.
+
+The unattended field is `enabled` only when the locally visible machine policy explicitly sets `UnattendedMode=always`, and `disabled` only when it explicitly sets `never`. Missing/other policy values remain `unknown`; the probe does not infer unattended operation from the Tailscale service or assume a UI/CLI user-decides mode survives sign-out. Accept boot recovery only after a second-device test covers sign-out, cold boot, and Tailscale reconnect.
+
+### Fallback acceptance and status record
+
+Before configuring RustDesk, keep the existing Tailscale routes intact and confirm the independent SSH path from a second device. Test signed-in, locked, signed-out/login-screen, restart, `rdc` unavailable, and network reconnect behavior. A separate, unique permanent password must stay in RustDesk's local credential store; never put it in the project, host-agent response, dashboard, MQTT, or this status record. Do not depend on public relay or expose TCP 21118 to the WAN.
+
+The readiness probe reads only `%ProgramData%\AI-Stack\RemoteAccess\human-fallback-status.json`. The file must have a protected ACL writable only by the current operator, SYSTEM, and local Administrators. After the actual direct-IP and `rdc`-failure recovery checks pass, an operator may record these non-secret fields: `schema_version: 1`, `component: human-fallback`, `method: rustdesk-direct-ip`, `state: ready`, `tailnet_only: true`, `public_relay_disabled: true`, `credential_configured: true`, `external_access_blocked: true`, `rdc_failure_recovered: true`, and `last_tested_utc` in UTC. The probe reports `ready` for a complete record less than 90 days old, `disabled` for an explicit disabled record, and `unknown` for missing, malformed, stale, or incomplete evidence. It never reads the credential itself. No accepted record exists yet.
+
+## When access is lost
+
+- Preserve existing Tailscale Serve routes; never use a broad Serve/Funnel reset.
+- Do not change Tailscale identity, tags, grants, unattended mode, or key expiry from an unverified session.
+- If the host agent or Gateway is down, use the separately accepted direct SSH path. Dashboard status is not a recovery prerequisite.
+- If direct SSH is not accepted or fails, use local console or the accepted human fallback. Do not expose new public ports as an emergency workaround.
+- If AI-Stack is offline and supervisor/job state cannot be read, do not stop or restart GPU workers. Preserve logs and ask for local operator review.
+
+## Compromised client or key
+
+After the replacement path is verified, revoke the affected tailnet node/client and remove its authorized SSH key from the approved account. Verify a rejected connection from that client, keep a sanitized timestamp/result, and rotate any related credential using the owning system. Never record key text or raw audit output in this runbook.
+
+## Rollback
+
+Rollback is not authorized by this preparation document. When a later apply is approved:
+
+1. Confirm a separate management path works.
+2. Read the protected `%ProgramData%\AI-Stack\RemoteAccess` manifest and restore only resources the feature changed.
+3. Remove `rdc` task/rule before considering SSH rollback.
+4. Restore SSH only from local console or a proven replacement path; do not remove the last working management route.
+5. Compare current Serve/Funnel routes with the protected before-state and the sanitized design baseline. Preserve all routes, including 8446, 8448, and 8449.
+6. Confirm the AI-Stack state and GPU leases before any stack lifecycle action.
+
+## Acceptance evidence still required
+
+R01–R19 and R22 from [the design record](../plans/remote-access-and-computer-control.md) require actual host and second-device results. No no-login reboot, wrong-key denial, unauthorized-device denial, WAN isolation, `rdc` audit, fallback recovery, revocation, or full rollback result is claimed yet.
