@@ -257,6 +257,8 @@ function New-SshPreflightFixture {
         service_state = 'missing'
         firewall_state = 'unknown'
         firewall_default_allow = $false
+        firewall_admin_context = $true
+        firewall_rule_present = $false
         default_openssh_rule_state = 'absent'
         finalize_firewall = $false
         second_device_verified = $false
@@ -389,5 +391,146 @@ $rollbackPlan = Get-RemoteAccessRollbackPlan -Manifest $ownedManifest -Component
 Assert-Equal $rollbackPlan.ready $true 'Rollback plan should include resources recorded as feature-managed'
 Assert-Equal ($rollbackPlan.managed_resources -contains 'sshd_config') $true 'Rollback plan should restore a feature-managed config'
 Assert-Equal ($rollbackPlan.managed_resources -contains 'ssh_service') $false 'Rollback plan must omit a pre-existing service'
+
+$rdcConfig = New-RemoteAccessRdcConfig -Port 7770 -BindAddress '100.64.12.34' -AllowedIdentities @('operator@example.invalid') -ViewOnlyIdentities @('monitor@example.invalid')
+Assert-Equal $rdcConfig.Contains('bind = "100.64.12.34"') $true 'rdc config must bind only to the verified tailnet address'
+Assert-Equal $rdcConfig.Contains('can = ["view", "input"]') $true 'Control identities must receive view and input capabilities only'
+Assert-Equal $rdcConfig.Contains('can = ["view"]') $true 'View-only identities must receive view capability only'
+Assert-Equal $rdcConfig.Contains('clipboard') $false 'rdc clipboard capability must be absent by default'
+Assert-Equal $rdcConfig.Contains('enabled = true') $true 'rdc auditing must be explicitly enabled'
+Assert-Equal $rdcConfig.Contains('who = "*"') $false 'rdc config must never grant a wildcard identity'
+$emptyRdcIdentityRejected = $false
+try { [void](New-RemoteAccessRdcConfig -Port 7770 -BindAddress '100.64.12.34' -AllowedIdentities @('')) } catch { $emptyRdcIdentityRejected = $true }
+Assert-Equal $emptyRdcIdentityRejected $true 'An empty identity must be rejected before config generation'
+$wildcardRdcIdentityRejected = $false
+try { [void](New-RemoteAccessRdcConfig -Port 7770 -BindAddress '100.64.12.34' -AllowedIdentities @('*')) } catch { $wildcardRdcIdentityRejected = $true }
+Assert-Equal $wildcardRdcIdentityRejected $true 'A wildcard identity must be rejected before config generation'
+$overlapRdcIdentityRejected = $false
+try { [void](New-RemoteAccessRdcConfig -Port 7770 -BindAddress '100.64.12.34' -AllowedIdentities @('operator@example.invalid') -ViewOnlyIdentities @('OPERATOR@example.invalid')) } catch { $overlapRdcIdentityRejected = $true }
+Assert-Equal $overlapRdcIdentityRejected $true 'An identity must not receive conflicting input and view-only grants'
+
+Assert-Equal (Test-RemoteAccessRdcArchiveHash -ActualHash ('A' * 64) -ExpectedHash ('a' * 64)) $true 'Archive hashes should compare case-insensitively'
+Assert-Equal (Test-RemoteAccessRdcArchiveHash -ActualHash ('b' * 64) -ExpectedHash ('a' * 64)) $false 'A mismatched rdc archive hash must block installation'
+Assert-Equal (Test-RemoteAccessRdcArchiveHash -ActualHash 'not-a-hash' -ExpectedHash ('a' * 64)) $false 'Malformed archive hashes must fail closed'
+
+Assert-Equal (Test-RemoteAccessRdcConfigAcl -IsProtected $true -WriteSids @('S-1-5-21-100-200-300-1001', 'S-1-5-18', 'S-1-5-32-544') -OwnerSid 'S-1-5-21-100-200-300-1001' -AllowedSids @('S-1-5-21-100-200-300-1001', 'S-1-5-18', 'S-1-5-32-544')) $true 'A protected config ACL limited to the owner, SYSTEM and Administrators should pass'
+Assert-Equal (Test-RemoteAccessRdcConfigAcl -IsProtected $false -WriteSids @('S-1-5-21-100-200-300-1001') -OwnerSid 'S-1-5-21-100-200-300-1001' -AllowedSids @('S-1-5-21-100-200-300-1001')) $false 'An inheriting rdc config ACL must be rejected'
+Assert-Equal (Test-RemoteAccessRdcConfigAcl -IsProtected $true -WriteSids @('S-1-1-0') -OwnerSid 'S-1-5-21-100-200-300-1001' -AllowedSids @('S-1-5-21-100-200-300-1001', 'S-1-5-18', 'S-1-5-32-544')) $false 'A config ACL writable by Everyone must be rejected'
+Assert-Equal (Test-RemoteAccessRdcConfigAcl -IsProtected $true -WriteSids @('S-1-5-21-100-200-300-1001') -OwnerSid 'S-1-5-21-999-999-999-1001' -AllowedSids @('S-1-5-21-100-200-300-1001')) $false 'An unexpected config owner must be rejected'
+
+$validRdcTask = @{
+    name = 'dev.rdc.daemon.operator'
+    expected_name = 'dev.rdc.daemon.operator'
+    path = '\'
+    expected_task_path = '\'
+    action_count = 1
+    state = 'Running'
+    user_sid = 'S-1-5-21-100-200-300-1001'
+    expected_user_sid = 'S-1-5-21-100-200-300-1001'
+    run_level = 'Limited'
+    logon_type = 'Interactive'
+    executable = 'C:\Users\operator\AppData\Local\Programs\rdc\rdc.exe'
+    expected_executable = 'C:\Users\operator\AppData\Local\Programs\rdc\rdc.exe'
+    arguments = 'serve'
+}
+Assert-Equal (Test-RemoteAccessRdcTask -Task $validRdcTask) $true 'The pinned per-user logon task should be accepted at standard integrity'
+$wrongTaskPathRdcTask = $validRdcTask.Clone()
+$wrongTaskPathRdcTask.path = '\Unexpected\'
+Assert-Equal (Test-RemoteAccessRdcTask -Task $wrongTaskPathRdcTask) $false 'A task moved outside its manifest-recorded task path must be rejected'
+$missingTaskPathRdcTask = $validRdcTask.Clone()
+$missingTaskPathRdcTask.path = ''
+Assert-Equal (Test-RemoteAccessRdcTask -Task $missingTaskPathRdcTask) $false 'A task without a scheduler path must not count as ready'
+$multipleActionsRdcTask = $validRdcTask.Clone()
+$multipleActionsRdcTask.action_count = 2
+Assert-Equal (Test-RemoteAccessRdcTask -Task $multipleActionsRdcTask) $false 'A task with additional actions must not count as ready or feature-owned'
+$elevatedRdcTask = $validRdcTask.Clone()
+$elevatedRdcTask.run_level = 'Highest'
+Assert-Equal (Test-RemoteAccessRdcTask -Task $elevatedRdcTask) $false 'An elevated rdc task must be reported unavailable'
+$wrongUserRdcTask = $validRdcTask.Clone()
+$wrongUserRdcTask.user_sid = 'S-1-5-21-999-999-999-1001'
+Assert-Equal (Test-RemoteAccessRdcTask -Task $wrongUserRdcTask) $false 'A task owned by another account must not count as desktop readiness'
+$elevatedArgumentRdcTask = $validRdcTask.Clone()
+$elevatedArgumentRdcTask.arguments = 'service install --elevated'
+Assert-Equal (Test-RemoteAccessRdcTask -Task $elevatedArgumentRdcTask) $false 'A task invoking elevated rdc mode must be rejected'
+$scopeOverrideRdcTask = $validRdcTask.Clone()
+$scopeOverrideRdcTask.arguments = 'serve --allow "*"'
+Assert-Equal (Test-RemoteAccessRdcTask -Task $scopeOverrideRdcTask) $false 'A task adding command-line identity grants must be rejected'
+Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '100.64.12.34'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $true 'rdc readiness requires its own listener on a tailnet address'
+Assert-Equal (Test-RemoteAccessRdcListener -Listeners @(@{ local_address = '0.0.0.0'; owning_process = 4432 }) -RdcProcessIds @(4432) -TailnetAddresses @('100.64.12.34')) $false 'rdc readiness must reject a wildcard listener'
+
+function New-RdcInstallFixture {
+    return @{
+        identities_valid = $true
+        archive_hash_valid = $true
+        config_acl_valid = $true
+        user_paths_safe = $true
+        session_state = 'interactive'
+        current_session_id = 3
+        process_is_elevated = $false
+        bind_address_valid = $true
+        port_available = $true
+        ssh_manifest_active = 'active'
+        ssh_acceptance_attested = $true
+        boot_recovery_ready = $true
+        firewall_state = 'unknown'
+        firewall_default_allow = $false
+        firewall_admin_context = $true
+        install_state = 'absent'
+        task_valid = $false
+        task_running = $false
+    }
+}
+
+$signedOutRdc = New-RdcInstallFixture
+$signedOutRdc.session_state = 'signed-out'
+Assert-Equal ((Get-RemoteAccessRdcInstallPlan $signedOutRdc).blockers -contains 'interactive-session-required') $true 'rdc setup must refuse a signed-out invocation'
+$unacceptedSshRdc = New-RdcInstallFixture
+$unacceptedSshRdc.ssh_acceptance_attested = $false
+Assert-Equal ((Get-RemoteAccessRdcInstallPlan $unacceptedSshRdc).blockers -contains 'ssh-recovery-acceptance-required') $true 'rdc setup must wait for an attested SSH recovery path'
+$unsafeFirewallRdc = New-RdcInstallFixture
+$unsafeFirewallRdc.firewall_state = 'broad'
+Assert-Equal ((Get-RemoteAccessRdcInstallPlan $unsafeFirewallRdc).blockers -contains 'rdc-firewall-already-broad') $true 'A broad existing rule for the rdc port must block task startup'
+$safeRdc = New-RdcInstallFixture
+$safeRdcPlan = Get-RemoteAccessRdcInstallPlan $safeRdc
+Assert-Equal $safeRdcPlan.ready $true 'A verified interactive standard-user desktop may be planned after SSH acceptance'
+Assert-Equal ($safeRdcPlan.actions -contains 'register-standard-user-logon-task') $true 'The rdc install plan should explicitly register the standard-user logon task'
+$repeatRdc = New-RdcInstallFixture
+$repeatRdc.install_state = 'active-identical'
+$repeatRdc.task_valid = $true
+$repeatRdc.task_running = $true
+$repeatRdc.firewall_rule_present = $true
+$repeatRdcPlan = Get-RemoteAccessRdcInstallPlan $repeatRdc
+Assert-Equal ($repeatRdcPlan.actions -contains 'register-standard-user-logon-task') $false 'A repeated identical install must not restart or re-register the healthy rdc task'
+$repeatWithoutAdmin = New-RdcInstallFixture
+$repeatWithoutAdmin.install_state = 'active-identical'
+$repeatWithoutAdmin.task_valid = $true
+$repeatWithoutAdmin.task_running = $true
+$repeatWithoutAdmin.firewall_rule_present = $true
+$repeatWithoutAdmin.firewall_admin_context = $false
+Assert-Equal (Get-RemoteAccessRdcInstallPlan $repeatWithoutAdmin).ready $true 'A healthy repeated install needs no administrator token when its firewall rule already exists'
+
+$dryRunTaskRegistrations = 0
+$dryRunElevationAttempts = 0
+Invoke-RemoteAccessRdcMutation -Apply:$false -Mutation { $dryRunTaskRegistrations++; $dryRunElevationAttempts++ } | Out-Null
+Assert-Equal $dryRunTaskRegistrations 0 'Dry-run rdc installation must not register a scheduled task'
+Assert-Equal $dryRunElevationAttempts 0 'Dry-run rdc installation must not request elevation'
+
+$rdcRollbackManifest = @{
+    schema_version = 1; component = 'rdc'; state = 'active'
+    resources = @{
+        task = @{ managed = $true }
+        firewall = @{ managed = $true }
+        config = @{ managed = $true; sha256 = 'config-hash' }
+        binary = @{ managed = $true; sha256 = 'binary-hash' }
+    }
+}
+$rdcRollbackPlan = Get-RemoteAccessRdcRollbackPlan -Manifest $rdcRollbackManifest -CurrentBinaryHash 'binary-hash' -CurrentConfigHash 'config-hash' -TaskMatchesManifest $true -FirewallMatchesManifest $true
+Assert-Equal $rdcRollbackPlan.ready $true 'An unchanged active rdc manifest should be eligible for rollback'
+Assert-Equal ($rdcRollbackPlan.managed_resources -contains 'task') $true 'rdc rollback should include its feature-managed logon task'
+$changedRdcRollback = Get-RemoteAccessRdcRollbackPlan -Manifest $rdcRollbackManifest -CurrentBinaryHash 'edited-binary' -CurrentConfigHash 'config-hash' -TaskMatchesManifest $true -FirewallMatchesManifest $true
+Assert-Equal ($changedRdcRollback.blockers -contains 'rdc-binary-changed') $true 'rdc rollback must preserve an edited binary'
+$driftedRdcRollback = Get-RemoteAccessRdcRollbackPlan -Manifest $rdcRollbackManifest -CurrentBinaryHash 'binary-hash' -CurrentConfigHash 'config-hash' -TaskMatchesManifest $false -FirewallMatchesManifest $false
+Assert-Equal ($driftedRdcRollback.blockers -contains 'rdc-task-scope-changed') $true 'rdc rollback must refuse a task that no longer matches its manifest'
+Assert-Equal ($driftedRdcRollback.blockers -contains 'rdc-firewall-scope-changed') $true 'rdc rollback must refuse a firewall rule that no longer matches its manifest'
 
 Write-Output 'PASS: remote-access status fixtures are sanitized and fail closed.'

@@ -1,6 +1,6 @@
 # Remote Recovery Runbook
 
-**Status:** SSH provisioning code is implemented, but no host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
+**Status:** SSH and `rdc` provisioning code is implemented, but no host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
 
 ## Before using this runbook
 
@@ -45,6 +45,43 @@ The feature manifest and protected before-state are stored under `%ProgramData%\
 ```
 
 Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
+
+## `rdc` desktop setup (after SSH acceptance)
+
+Only continue after key-only SSH has passed the wrong-key, unauthorized-peer, sign-out, and cold-reboot checks from a second tailnet device. The installer also requires live tailnet-only SSH readiness and the explicit `-ConfirmSshRecoveryAccepted` attestation. That switch records your acceptance; it does not run those tests for you.
+
+Use the immutable release and digest recorded in [the version pin](../plans/remote-access-versions.md). Download `rdc-windows-x86_64.zip` from that pinned release, verify its SHA-256 against the pin, and retain the archive outside the repository. The binary is unsigned and Windows SmartScreen may warn the first time it runs.
+
+Run the installer from the signed-in desktop user's PowerShell. It needs an Administrator token to add the firewall rule; the scheduled task itself is registered without `--elevated` and must remain at standard integrity. The script never changes Tailscale access policy. Replace placeholders with exact identities that you verified in the tailnet. `AllowedIdentities` receive `view` and `input`; `ViewOnlyIdentities` receive `view` only. Leave out the view-only parameter when there are no view-only identities.
+
+```powershell
+# Sanitized plan; no host setting changes.
+.\scripts\remote\Install-RdcDesktop.ps1 `
+  -AllowedIdentities @('<verified-login-or-tag>') `
+  -ViewOnlyIdentities @('<optional-verified-view-only-login-or-tag>') `
+  -ArchivePath '<path-to-verified-rdc-windows-x86_64.zip>' `
+  -BindAddress '<this-hosts-exact-Tailscale-address>' `
+  -ConfirmSshRecoveryAccepted
+
+# Apply only after reviewing the plan and confirming the recovery tests above.
+.\scripts\remote\Install-RdcDesktop.ps1 `
+  -AllowedIdentities @('<verified-login-or-tag>') `
+  -ViewOnlyIdentities @('<optional-verified-view-only-login-or-tag>') `
+  -ArchivePath '<path-to-verified-rdc-windows-x86_64.zip>' `
+  -BindAddress '<this-hosts-exact-Tailscale-address>' `
+  -ConfirmSshRecoveryAccepted -Apply
+```
+
+The installer refuses wildcards, empty identities, changed managed scope, a conflicting task/config/rule, occupied port, broad firewall state, unknown inbound policy, signed-out invocation, or a missing SSH acceptance gate. It verifies the archive SHA-256 before extracting only `rdc.exe`, creates a protected user-local config and manifest, scopes TCP 7770 to the selected Tailscale address/interface and tailnet source prefixes, then invokes `rdc service install` without `--elevated`. An unchanged healthy install is left running.
+
+Add the matching Tailscale policy `grants`/`acls` rule for the identities and TCP 7770 if the current policy requires it. Match the same exact login/tag identities as the local `rdc` allowlist; the installer will not edit the tailnet policy. Validate from the client with `whoami`, then read-only screenshots/window listing, then a disposable screenshot-click-screenshot test. Verify a view-only identity is denied input and that the audit entry is present. Test lock/sign-out/sign-in and task recovery while SSH remains usable.
+
+The standard task cannot control elevated windows (Windows UIPI drops synthetic input) and cannot reach secure-desktop UAC prompts. `rdc` is unavailable while the user is signed out or locked. The pinned Windows guide was verified on one display at 150% scaling; multi-monitor behavior still needs host testing. Do not report desktop readiness from a session-0 or SSH probe.
+
+Inspect the desktop rollback first. Apply it only as the same Windows user, after SSH or local console management is verified; it also requires Administrator access to remove the firewall rule. It removes only the task, firewall rule, config, and binary whose paths, hashes, task settings, and firewall scope still match the user-local manifest. It retains a rollback manifest.
+
+Plan: .\scripts\remote\Rollback-RdcDesktop.ps1
+Apply: .\scripts\remote\Rollback-RdcDesktop.ps1 -Apply -ConfirmManagementPath
 
 ## Recovery state order
 

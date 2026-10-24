@@ -831,24 +831,35 @@ function Get-RemoteAccessInventory {
         $sshFirewall = Get-RemoteAccessFirewallState -Port ([int]$sshPort) -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
     }
 
-    $desktopTask = 'absent'
-    try {
-        $tasks = @(Get-ScheduledTask -TaskPath '\AI-Stack\RemoteAccess\' -ErrorAction Stop)
-        $rdcTask = $tasks | Where-Object TaskName -eq 'RdcDesktop' | Select-Object -First 1
-        if ($rdcTask) {
-            if ($rdcTask.State -eq 'Running') { $desktopTask = 'running' }
-            elseif ($rdcTask.State -eq 'Ready') { $desktopTask = 'ready' }
-            else { $desktopTask = 'unknown' }
-        }
-    } catch { }
-
     $sessionState = Get-RemoteAccessDesktopSessionState
     $rdcPath = Join-Path $env:LOCALAPPDATA 'Programs\rdc\rdc.exe'
+    $currentSid = $null
+    $currentSessionId = 0
+    try {
+        $currentSid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        $currentSessionId = [int](Get-Process -Id $PID -ErrorAction Stop).SessionId
+    } catch { }
+    $rdcTaskName = 'dev.rdc.daemon.' + $env:USERNAME
+    $rdcTaskState = Get-RemoteAccessRdcTaskState -TaskName $rdcTaskName -UserSid ([string]$currentSid) -RdcPath $rdcPath
+    $desktopTask = $rdcTaskState.state
     $rdcStatus = 'unavailable'
-    if (Test-Path -LiteralPath $rdcPath) {
+    $rdcManifestPath = Join-Path (Split-Path -Parent $rdcPath) 'ai-stack-manifest.json'
+    if ($rdcTaskState.valid -and $rdcTaskState.running -and (Test-Path -LiteralPath $rdcPath -PathType Leaf) -and (Test-Path -LiteralPath $rdcManifestPath -PathType Leaf)) {
         try {
-            $rdcProcesses = @(Get-Process -Name 'rdc' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 })
-            if ($rdcProcesses.Count -gt 0 -and $sessionState -eq 'interactive') { $rdcStatus = 'ready' }
+            $rdcManifest = Get-Content -LiteralPath $rdcManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $rdcPort = [int]$rdcManifest.port
+            $rdcAddress = [string]$rdcManifest.bind_address
+            $binaryHash = (Get-FileHash -LiteralPath $rdcPath -Algorithm SHA256).Hash
+            $rdcConfigPath = Join-Path (Join-Path $env:APPDATA 'rdc') 'config.toml'
+            $configHash = (Get-FileHash -LiteralPath $rdcConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash
+            $rdcFirewall = Get-RemoteAccessFirewallState -Port $rdcPort -ExpectedProgramPaths @($rdcPath)
+            $manifestValid = ($rdcManifest.schema_version -eq 1 -and $rdcManifest.component -eq 'rdc' -and $rdcManifest.state -eq 'active' -and [string]$rdcManifest.account.sid -eq $currentSid -and [string]$rdcManifest.resources.binary.sha256 -eq $binaryHash -and [string]$rdcManifest.resources.config.sha256 -eq $configHash -and $rdcFirewall -eq 'tailnet-only' -and (Test-RemoteAccessTailnetAddress $rdcAddress))
+            if ($manifestValid -and $sessionState -eq 'interactive' -and $currentSessionId -gt 0) {
+                $rdcProcesses = @(Get-Process -Name 'rdc' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId -and $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($rdcPath)) })
+                $rdcListeners = @(Get-NetTCPConnection -State Listen -LocalPort $rdcPort -ErrorAction SilentlyContinue | ForEach-Object { @{ local_address = [string]$_.LocalAddress; owning_process = [int]$_.OwningProcess } })
+                $rdcProcessIds = @($rdcProcesses | ForEach-Object { [int]$_.Id })
+                if (Test-RemoteAccessRdcListener -Listeners $rdcListeners -RdcProcessIds $rdcProcessIds -TailnetAddresses @($rdcAddress)) { $rdcStatus = 'ready' }
+            }
         } catch { }
     }
 
@@ -889,5 +900,314 @@ function Get-RemoteAccessStatus {
         return ConvertTo-RemoteAccessStatus (Get-RemoteAccessInventory)
     } catch {
         return ConvertTo-RemoteAccessStatus $null
+    }
+}
+
+function Test-RemoteAccessRdcIdentity {
+    [CmdletBinding()]
+    param([AllowNull()][string]$Identity)
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) { return $false }
+    $value = $Identity.Trim()
+    if ($value -cne $Identity -or $value.Length -gt 254 -or $value -match '[*?\s\x00-\x1f\x7f]' -or $value -match '["''`,;=\\/\[\]{}]') { return $false }
+    if ($value -match '^(?i:autogroup):') { return $false }
+    if ($value -match '^(?i:tag):[A-Za-z0-9_-]{1,63}$') { return $true }
+    if ($value -match '^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$') { return $true }
+    if ($value -match '^[A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9][A-Za-z0-9.-]{0,190}$') { return $true }
+    return $false
+}
+
+function ConvertTo-RemoteAccessRdcIdentityList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string[]]$InputIdentity,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $normalized = New-Object 'System.Collections.Generic.List[string]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($identity in $InputIdentity) {
+        if (-not (Test-RemoteAccessRdcIdentity -Identity $identity)) { throw "The $Name identity list contains an empty, broad, or unsupported value." }
+        if (-not $seen.Add($identity)) { throw "The $Name identity list contains a duplicate value." }
+        $normalized.Add($identity)
+    }
+    return @($normalized.ToArray() | Sort-Object { $_.ToLowerInvariant() })
+}
+
+function ConvertTo-RemoteAccessTomlString {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return '"' + $Value.Replace('\', '\\').Replace('"', '\"') + '"'
+}
+
+function New-RemoteAccessRdcConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$BindAddress,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string[]]$AllowedIdentities,
+        [string[]]$ViewOnlyIdentities = @()
+    )
+
+    if (-not (Test-RemoteAccessTailnetAddress -Address $BindAddress)) { throw 'The rdc bind address must be a verified Tailscale address.' }
+    $inputIdentities = @(ConvertTo-RemoteAccessRdcIdentityList -InputIdentity $AllowedIdentities -Name 'input-capable')
+    $viewIdentities = @()
+    if ($ViewOnlyIdentities.Count -gt 0) {
+        $viewIdentities = @(ConvertTo-RemoteAccessRdcIdentityList -InputIdentity $ViewOnlyIdentities -Name 'view-only')
+    }
+    $inputSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($identity in $inputIdentities) { [void]$inputSet.Add($identity) }
+    foreach ($identity in $viewIdentities) {
+        if ($inputSet.Contains($identity)) { throw 'An identity cannot receive both input and view-only grants.' }
+    }
+
+    $entries = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($identity in $inputIdentities) {
+        $who = ConvertTo-RemoteAccessTomlString -Value $identity
+        $entries.Add("  { who = $who, can = [`"view`", `"input`"] }")
+    }
+    foreach ($identity in $viewIdentities) {
+        $who = ConvertTo-RemoteAccessTomlString -Value $identity
+        $entries.Add("  { who = $who, can = [`"view`"] }")
+    }
+    $allowLines = @($entries.ToArray()) -join ",`r`n"
+    $bind = ConvertTo-RemoteAccessTomlString -Value $BindAddress
+    return @"
+[serve]
+port = $Port
+bind = $bind
+allow = [
+$allowLines
+]
+
+[serve.audit]
+enabled = true
+max_size_mb = 50
+keep = 5
+"@
+}
+
+function Test-RemoteAccessRdcArchiveHash {
+    [CmdletBinding()]
+    param([AllowNull()][string]$ActualHash, [AllowNull()][string]$ExpectedHash)
+
+    if ($ActualHash -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedHash -notmatch '^[A-Fa-f0-9]{64}$') { return $false }
+    return $ActualHash.Equals($ExpectedHash, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-RemoteAccessRdcConfigAcl {
+    [CmdletBinding()]
+    param(
+        [bool]$IsProtected,
+        [AllowNull()][string[]]$WriteSids,
+        [Parameter(Mandatory = $true)][string]$OwnerSid,
+        [Parameter(Mandatory = $true)][string[]]$AllowedSids
+    )
+
+    if (-not $IsProtected -or $null -eq $WriteSids) { return $false }
+    $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($sid in $AllowedSids) { [void]$allowed.Add([string]$sid) }
+    if ([string]::IsNullOrWhiteSpace($OwnerSid) -or -not $allowed.Contains($OwnerSid)) { return $false }
+    foreach ($sid in $WriteSids) {
+        if (-not $allowed.Contains([string]$sid)) { return $false }
+    }
+    return $true
+}
+
+function Test-RemoteAccessRdcTask {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Task)
+
+    $taskName = [string](Get-RemoteAccessField $Task 'name')
+    $expectedName = [string](Get-RemoteAccessField $Task 'expected_name')
+    $taskPath = [string](Get-RemoteAccessField $Task 'path')
+    $expectedTaskPath = [string](Get-RemoteAccessField $Task 'expected_task_path')
+    $actionCount = [int](Get-RemoteAccessField $Task 'action_count')
+    $state = [string](Get-RemoteAccessField $Task 'state')
+    $userSid = [string](Get-RemoteAccessField $Task 'user_sid')
+    $expectedUserSid = [string](Get-RemoteAccessField $Task 'expected_user_sid')
+    $runLevel = [string](Get-RemoteAccessField $Task 'run_level')
+    $logonType = [string](Get-RemoteAccessField $Task 'logon_type')
+    $executable = [string](Get-RemoteAccessField $Task 'executable')
+    $expectedExecutable = [string](Get-RemoteAccessField $Task 'expected_executable')
+    $arguments = [string](Get-RemoteAccessField $Task 'arguments')
+
+    if ([string]::IsNullOrWhiteSpace($taskName) -or $taskName -ine $expectedName) { return $false }
+    if ([string]::IsNullOrWhiteSpace($taskPath)) { return $false }
+    if ($actionCount -ne 1) { return $false }
+    if ($expectedTaskPath -and $taskPath -ine $expectedTaskPath) { return $false }
+    if ($state -notin @('Running', 'Ready')) { return $false }
+    if ([string]::IsNullOrWhiteSpace($userSid) -or $userSid -ine $expectedUserSid) { return $false }
+    if ($runLevel -notin @('Limited', 'LeastPrivilege')) { return $false }
+    if ($logonType -notin @('Interactive', 'InteractiveToken')) { return $false }
+    try {
+        if ([IO.Path]::GetFullPath($executable) -ine [IO.Path]::GetFullPath($expectedExecutable)) { return $false }
+    } catch { return $false }
+    if ($arguments -notmatch '(?i)^\s*serve(?:\s|$)' -or $arguments -match '(?i)(?:^|\s)--(?:allow|bind|clipboard|dev-loopback|elevated|port)(?:=|\s|$)') { return $false }
+    return $true
+}
+
+function ConvertTo-RemoteAccessAccountSid {
+    [CmdletBinding()]
+    param([AllowNull()][string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    try {
+        if ($Name -match '^S-1-') { return ([Security.Principal.SecurityIdentifier]$Name).Value }
+        return ([Security.Principal.NTAccount]$Name).Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch { return $null }
+}
+
+function Get-RemoteAccessRdcTaskState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$UserSid,
+        [Parameter(Mandatory = $true)][string]$RdcPath
+    )
+
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ state = 'unknown'; present = $false; valid = $false; running = $false }
+    }
+    try {
+        $tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { [string]$_.TaskName -ieq $TaskName })
+        if (-not $tasks) { return [pscustomobject]@{ state = 'absent'; present = $false; valid = $false; running = $false } }
+        if ($tasks.Count -ne 1) { return [pscustomobject]@{ state = 'unknown'; present = $true; valid = $false; running = $false } }
+        $task = $tasks[0]
+        $manifestPath = Join-Path (Split-Path -Parent $RdcPath) 'ai-stack-manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return [pscustomobject]@{ state = 'unknown'; present = $true; valid = $false; running = $false } }
+        $rdcManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($rdcManifest.schema_version -ne 1 -or $rdcManifest.component -ne 'rdc' -or $rdcManifest.state -ne 'active' -or [string]$rdcManifest.account.sid -ne $UserSid -or [string]::IsNullOrWhiteSpace([string]$rdcManifest.resources.task.task_path)) {
+            return [pscustomobject]@{ state = 'unknown'; present = $true; valid = $false; running = $false }
+        }
+        $actions = @($task.Actions)
+        if ($actions.Count -ne 1) { return [pscustomobject]@{ state = 'unknown'; present = $true; valid = $false; running = $false } }
+        $action = $actions[0]
+        $snapshot = @{
+            name = [string]$task.TaskName
+            expected_name = $TaskName
+            path = [string]$task.TaskPath
+            expected_task_path = [string]$rdcManifest.resources.task.task_path
+            action_count = $actions.Count
+            state = [string]$task.State
+            user_sid = ConvertTo-RemoteAccessAccountSid ([string]$task.Principal.UserId)
+            expected_user_sid = $UserSid
+            run_level = [string]$task.Principal.RunLevel
+            logon_type = [string]$task.Principal.LogonType
+            executable = [string]$action.Execute
+            expected_executable = $RdcPath
+            arguments = [string]$action.Arguments
+        }
+        $valid = Test-RemoteAccessRdcTask -Task $snapshot
+        if (-not $valid) { return [pscustomobject]@{ state = 'unknown'; present = $true; valid = $false; running = $false } }
+        return [pscustomobject]@{ state = [string]$task.State.ToLowerInvariant(); present = $true; valid = $true; running = ([string]$task.State -eq 'Running') }
+    } catch {
+        return [pscustomobject]@{ state = 'unknown'; present = $false; valid = $false; running = $false }
+    }
+}
+
+function Test-RemoteAccessRdcListener {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object[]]$Listeners,
+        [AllowNull()][int[]]$RdcProcessIds,
+        [AllowNull()][string[]]$TailnetAddresses
+    )
+
+    if (-not $Listeners -or -not $RdcProcessIds -or -not $TailnetAddresses) { return $false }
+    $rdcPidSet = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($processId in $RdcProcessIds) { [void]$rdcPidSet.Add([int]$processId) }
+    $tailnetAddressSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($address in $TailnetAddresses) {
+        if (Test-RemoteAccessTailnetAddress $address) { [void]$tailnetAddressSet.Add((ConvertTo-RemoteAccessAddressKey $address)) }
+    }
+    if ($tailnetAddressSet.Count -eq 0) { return $false }
+    foreach ($listener in $Listeners) {
+        $processId = Get-RemoteAccessField $listener 'owning_process'
+        $localAddress = [string](Get-RemoteAccessField $listener 'local_address')
+        if ($null -eq $processId -or -not $rdcPidSet.Contains([int]$processId)) { return $false }
+        if (-not $tailnetAddressSet.Contains((ConvertTo-RemoteAccessAddressKey $localAddress))) { return $false }
+    }
+    return $true
+}
+
+function Get-RemoteAccessRdcInstallPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Preflight)
+
+    $blockers = New-Object 'System.Collections.Generic.List[string]'
+    $actions = New-Object 'System.Collections.Generic.List[string]'
+    if ($Preflight.identities_valid -ne $true) { $blockers.Add('verified-identities-required') }
+    if ($Preflight.archive_hash_valid -ne $true) { $blockers.Add('pinned-archive-hash-mismatch') }
+    if ($Preflight.config_acl_valid -ne $true) { $blockers.Add('rdc-config-acl-untrusted') }
+    if ($Preflight.user_paths_safe -ne $true) { $blockers.Add('user-profile-path-untrusted') }
+    if ([string]$Preflight.session_state -ne 'interactive' -or [int]$Preflight.current_session_id -le 0) { $blockers.Add('interactive-session-required') }
+    if ($Preflight.bind_address_valid -ne $true) { $blockers.Add('verified-tailnet-bind-address-required') }
+    if ($Preflight.port_available -ne $true) { $blockers.Add('rdc-port-unavailable') }
+    if ([string]$Preflight.ssh_manifest_active -ne 'active' -or $Preflight.ssh_acceptance_attested -ne $true -or $Preflight.boot_recovery_ready -ne $true) {
+        $blockers.Add('ssh-recovery-acceptance-required')
+    }
+    if ([string]$Preflight.firewall_state -eq 'broad' -or $Preflight.firewall_default_allow -eq $true) { $blockers.Add('rdc-firewall-already-broad') }
+    if ($Preflight.firewall_default_allow -ne $false) { $blockers.Add('firewall-default-policy-unknown') }
+    if ($Preflight.firewall_rule_present -ne $true -and $Preflight.firewall_admin_context -ne $true) { $blockers.Add('administrator-required-for-tailnet-firewall') }
+    if ([string]$Preflight.install_state -eq 'conflict') { $blockers.Add('unmanaged-rdc-state-conflict') }
+
+    if ($blockers.Count -eq 0) {
+        if ([string]$Preflight.install_state -eq 'absent') { $actions.Add('install-pinned-binary-and-config') }
+        if ($Preflight.firewall_rule_present -ne $true) { $actions.Add('create-tailnet-scoped-firewall-rule') }
+        if ($Preflight.task_valid -ne $true) { $actions.Add('register-standard-user-logon-task') }
+        elseif ($Preflight.task_running -ne $true) { $actions.Add('start-standard-user-logon-task') }
+        if ($actions.Count -eq 0) { $actions.Add('keep-healthy-managed-installation') }
+    }
+    return [pscustomobject]@{
+        ready = ($blockers.Count -eq 0)
+        blockers = @($blockers.ToArray())
+        actions = @($actions.ToArray())
+    }
+}
+
+function Invoke-RemoteAccessRdcMutation {
+    [CmdletBinding()]
+    param([switch]$Apply, [Parameter(Mandatory = $true)][scriptblock]$Mutation)
+
+    if (-not $Apply) { return $false }
+    & $Mutation
+    return $true
+}
+
+function Get-RemoteAccessRdcRollbackPlan {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Manifest,
+        [AllowNull()][string]$CurrentBinaryHash,
+        [AllowNull()][string]$CurrentConfigHash,
+        [bool]$TaskMatchesManifest,
+        [bool]$FirewallMatchesManifest
+    )
+
+    $blockers = New-Object 'System.Collections.Generic.List[string]'
+    $resources = Get-RemoteAccessField $Manifest 'resources'
+    if ($null -eq $Manifest -or (Get-RemoteAccessField $Manifest 'schema_version') -ne 1 -or (Get-RemoteAccessField $Manifest 'component') -ne 'rdc') {
+        $blockers.Add('rdc-manifest-invalid')
+    } elseif ((Get-RemoteAccessField $Manifest 'state') -notin @('active', 'applying', 'rolling_back')) {
+        $blockers.Add('rdc-manifest-not-active')
+    }
+    foreach ($item in @(
+        @{ name = 'binary'; hash = $CurrentBinaryHash },
+        @{ name = 'config'; hash = $CurrentConfigHash }
+    )) {
+        $resource = Get-RemoteAccessField $resources $item.name
+        if ((Get-RemoteAccessField $resource 'managed') -eq $true -and $item.hash -and [string]$item.hash -cne [string](Get-RemoteAccessField $resource 'sha256')) {
+            $blockers.Add("rdc-$($item.name)-changed")
+        }
+    }
+    if (-not $TaskMatchesManifest) { $blockers.Add('rdc-task-scope-changed') }
+    if (-not $FirewallMatchesManifest) { $blockers.Add('rdc-firewall-scope-changed') }
+    $managed = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in @('task', 'firewall', 'config', 'binary')) {
+        if ((Get-RemoteAccessField (Get-RemoteAccessField $resources $name) 'managed') -eq $true) { $managed.Add($name) }
+    }
+    return [pscustomobject]@{
+        ready = ($blockers.Count -eq 0 -and $managed.Count -gt 0)
+        blockers = @($blockers.ToArray())
+        managed_resources = @($managed.ToArray())
     }
 }
