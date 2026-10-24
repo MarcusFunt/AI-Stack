@@ -115,6 +115,52 @@ function ConvertTo-RemoteAccessCount {
     }
 }
 
+function Resolve-RemoteAccessHumanFallbackState {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Attestation,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow
+    )
+
+    if ($null -eq $Attestation -or (Get-RemoteAccessField $Attestation 'schema_version') -ne 1 -or (Get-RemoteAccessField $Attestation 'component') -ne 'human-fallback') { return 'unknown' }
+    if ((Get-RemoteAccessField $Attestation 'method') -ne 'rustdesk-direct-ip') { return 'unknown' }
+    $state = ConvertTo-RemoteAccessEnum (Get-RemoteAccessField $Attestation 'state') @('ready', 'disabled', 'unknown')
+    if ($state -eq 'disabled') { return 'disabled' }
+    if ($state -ne 'ready') { return 'unknown' }
+    foreach ($field in @('tailnet_only', 'public_relay_disabled', 'credential_configured', 'external_access_blocked', 'rdc_failure_recovered')) {
+        if ((Get-RemoteAccessField $Attestation $field) -ne $true) { return 'unknown' }
+    }
+    $testedAt = ConvertTo-RemoteAccessTimestamp (Get-RemoteAccessField $Attestation 'last_tested_utc')
+    if ($testedAt -eq 'unknown') { return 'unknown' }
+    try {
+        $tested = [DateTimeOffset]::Parse($testedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+        $age = $NowUtc.ToUniversalTime() - $tested.ToUniversalTime()
+        if ($age.TotalMinutes -lt -5 -or $age.TotalDays -gt 90) { return 'unknown' }
+    } catch { return 'unknown' }
+    return 'ready'
+}
+
+function Get-RemoteAccessHumanFallbackState {
+    $path = Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\human-fallback-status.json'
+    try {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'unknown' }
+        if ((Get-Item -LiteralPath $path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) { return 'unknown' }
+        $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+        $writeMask = [int][Security.AccessControl.FileSystemRights]::Write -bor [int][Security.AccessControl.FileSystemRights]::Modify -bor [int][Security.AccessControl.FileSystemRights]::Delete -bor [int][Security.AccessControl.FileSystemRights]::ChangePermissions -bor [int][Security.AccessControl.FileSystemRights]::TakeOwnership -bor [int][Security.AccessControl.FileSystemRights]::FullControl
+        $writers = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($rule in $acl.Access) {
+            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or (([int]$rule.FileSystemRights -band $writeMask) -eq 0)) { continue }
+            $writers.Add($rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value)
+        }
+        $sid = [string]([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        if (-not (Test-RemoteAccessRdcConfigAcl -IsProtected $acl.AreAccessRulesProtected -WriteSids $writers.ToArray() -OwnerSid (ConvertTo-RemoteAccessAccountSid ([string]$acl.Owner)) -AllowedSids @($sid, 'S-1-5-18', 'S-1-5-32-544'))) { return 'unknown' }
+        $attestation = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return Resolve-RemoteAccessHumanFallbackState -Attestation $attestation
+    } catch {
+        return 'unknown'
+    }
+}
+
 function Test-RemoteAccessTailnetAddress {
     [CmdletBinding()]
     param([AllowNull()][string]$Address)
@@ -887,7 +933,7 @@ function Get-RemoteAccessInventory {
             denied_by_category = $null
             audit = @{ valid = $false }
         }
-        human_fallback = 'unknown'
+        human_fallback = Get-RemoteAccessHumanFallbackState
         host = @{ uptime_seconds = $uptimeSeconds; last_boot_utc = $lastBoot }
     }
 }

@@ -1,6 +1,6 @@
 # Remote Recovery Runbook
 
-**Status:** SSH and `rdc` provisioning code is implemented, but no host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
+**Status:** SSH and `rdc` provisioning code plus read-only status reporting are implemented. No host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
 
 ## Before using this runbook
 
@@ -89,7 +89,17 @@ Apply: .\scripts\remote\Rollback-RdcDesktop.ps1 -Apply -ConfirmManagementPath
 2. **SSH boot recovery:** use the approved key and port only after the second-device, sign-out, and cold-reboot acceptance checks pass. Those checks have not passed yet.
 3. **AI-Stack application:** on the host, use `scripts\ai.ps1 status` for read-only status. Confirm supervisor/lease state before any lifecycle operation. A down supervisor means active-job state is unknown; escalate to local console instead of guessing.
 4. **Desktop:** `rdc` is expected to work only for the signed-in interactive user. Treat signed-out, locked/secure-desktop, and session-0 reports as unavailable unless actual testing proves otherwise.
-5. **Human fallback:** no fallback is selected or installed. Candidate: RustDesk direct-IP over Tailscale, subject to a separate tailnet-only configuration and acceptance test. Windows 11 Home is not assumed to host built-in RDP.
+5. **Human fallback:** RustDesk direct-IP over Tailscale is selected because this host runs Windows 11 Home. It is not installed or accepted yet. Its usual direct-IP listener port is TCP 21118; restrict it to the Tailscale interface and authorized tailnet peers, disable public relay, and verify no WAN path or router forwarding exists. Do this only after SSH has passed second-device and no-login acceptance.
+
+## Read-only readiness status
+
+Run `scripts\remote\Test-RemoteReadiness.ps1 -Json` locally to inspect tailnet, SSH, desktop, fallback, and host state without starting Docker or changing host settings. The dashboard's Network page uses the authenticated Gateway `GET /control/remote-access` endpoint for the same sanitized status; if the Gateway or host agent is unavailable, it shows unavailable/unknown and cannot substitute for direct SSH. Optional MQTT publishes only the bounded status summary at `localai/marcus-computer/remote-access/status` and remains telemetry-only.
+
+### Fallback acceptance and status record
+
+Before configuring RustDesk, keep the existing Tailscale routes intact and confirm the independent SSH path from a second device. Test signed-in, locked, signed-out/login-screen, restart, `rdc` unavailable, and network reconnect behavior. A separate, unique permanent password must stay in RustDesk's local credential store; never put it in the project, host-agent response, dashboard, MQTT, or this status record. Do not depend on public relay or expose TCP 21118 to the WAN.
+
+The readiness probe reads only `%ProgramData%\AI-Stack\RemoteAccess\human-fallback-status.json`. The file must have a protected ACL writable only by the current operator, SYSTEM, and local Administrators. After the actual direct-IP and `rdc`-failure recovery checks pass, an operator may record these non-secret fields: `schema_version: 1`, `component: human-fallback`, `method: rustdesk-direct-ip`, `state: ready`, `tailnet_only: true`, `public_relay_disabled: true`, `credential_configured: true`, `external_access_blocked: true`, `rdc_failure_recovered: true`, and `last_tested_utc` in UTC. The probe reports `ready` for a complete record less than 90 days old, `disabled` for an explicit disabled record, and `unknown` for missing, malformed, stale, or incomplete evidence. It never reads the credential itself. No accepted record exists yet.
 
 ## When access is lost
 

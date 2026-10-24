@@ -137,6 +137,24 @@ Assert-Equal $unavailableStatus.ssh.service 'unknown' 'Unavailable SSH probes mu
 Assert-Equal $unavailableStatus.desktop.rdc 'not-checked' 'An unperformed rdc check must not claim readiness'
 Assert-Equal $unavailableStatus.human_fallback 'unknown' 'Unavailable fallback probes must remain unknown'
 
+$fallbackNow = [DateTimeOffset]::Parse('2026-10-24T12:00:00Z')
+$fallbackAttestation = @{
+    schema_version = 1; component = 'human-fallback'; method = 'rustdesk-direct-ip'; state = 'ready'
+    tailnet_only = $true; public_relay_disabled = $true; credential_configured = $true
+    external_access_blocked = $true; rdc_failure_recovered = $true; last_tested_utc = '2026-10-20T12:00:00Z'
+}
+Assert-Equal (Resolve-RemoteAccessHumanFallbackState -Attestation $fallbackAttestation -NowUtc $fallbackNow) 'ready' 'A recent operator-attested, tailnet-only fallback recovery should be ready'
+$disabledFallbackAttestation = $fallbackAttestation.Clone()
+$disabledFallbackAttestation.state = 'disabled'
+Assert-Equal (Resolve-RemoteAccessHumanFallbackState -Attestation $disabledFallbackAttestation -NowUtc $fallbackNow) 'disabled' 'An explicit valid disabled fallback record should report disabled'
+Assert-Equal (Resolve-RemoteAccessHumanFallbackState -Attestation $null -NowUtc $fallbackNow) 'unknown' 'A missing fallback record must remain unknown'
+$staleFallbackAttestation = $fallbackAttestation.Clone()
+$staleFallbackAttestation.last_tested_utc = '2026-07-01T12:00:00Z'
+Assert-Equal (Resolve-RemoteAccessHumanFallbackState -Attestation $staleFallbackAttestation -NowUtc $fallbackNow) 'unknown' 'A stale fallback acceptance must return to unknown'
+$publicRelayFallback = $fallbackAttestation.Clone()
+$publicRelayFallback.public_relay_disabled = $false
+Assert-Equal (Resolve-RemoteAccessHumanFallbackState -Attestation $publicRelayFallback -NowUtc $fallbackNow) 'unknown' 'A fallback using a public relay must never report ready'
+
 $serialized = ConvertTo-Json -InputObject $status -Depth 8 -Compress
 foreach ($privateValue in @(
     '100.64.12.34',
