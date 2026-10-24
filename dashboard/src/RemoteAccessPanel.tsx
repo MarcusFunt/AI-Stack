@@ -129,11 +129,11 @@ export function RemoteAccessPanel({ application }: { application: Snapshot | nul
       <div className="network-summary-grid remote-access-grid">
         <RemoteAccessCard
           id="boot-recovery"
-          label="BOOT RECOVERY"
+          label="LOCAL SSH HEALTH"
           state={boot}
           detail={status && !stale
-            ? `Tailnet ${status.tailnet.state} · unattended ${status.tailnet.unattended} · SSH ${status.ssh.service} · firewall ${status.ssh.firewall}`
-            : 'SSH and Tailscale recovery evidence'}
+            ? `Local signals only · tailnet ${status.tailnet.state} · unattended ${status.tailnet.unattended} · SSH ${status.ssh.service} · firewall ${status.ssh.firewall} · second-device and reboot acceptance unrecorded`
+            : 'Local SSH and Tailscale signals only; second-device and reboot acceptance unrecorded'}
           icon={<Wifi size={20} />}
         />
         <RemoteAccessCard

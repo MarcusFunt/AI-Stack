@@ -246,6 +246,19 @@ function New-RdcExpectedFirewallSnapshot {
     }
 }
 
+function Get-RdcEffectiveFirewallState {
+    param([int]$SelectedPort, [string]$RdcPath, [AllowNull()][object]$Manifest)
+    $expectedRules = @()
+    $resource = Get-RemoteAccessField (Get-RemoteAccessField $Manifest 'resources') 'firewall'
+    if ((Get-RemoteAccessField $Manifest 'schema_version') -eq 1 -and (Get-RemoteAccessField $Manifest 'component') -eq 'rdc' -and (Get-RemoteAccessField $resource 'managed') -eq $true -and (Get-RemoteAccessField $resource 'name') -eq $script:RdcFirewallRuleName -and $null -ne (Get-RemoteAccessField $resource 'expected')) {
+        $expectedRules = @(@{ name = [string](Get-RemoteAccessField $resource 'name'); expected = (Get-RemoteAccessField $resource 'expected') })
+    }
+    if ($expectedRules.Count -gt 0) {
+        return Get-RemoteAccessFirewallState -Port $SelectedPort -ExpectedProgramPaths @($RdcPath) -ExpectedFirewallRules $expectedRules
+    }
+    return Get-RemoteAccessFirewallState -Port $SelectedPort -ExpectedProgramPaths @($RdcPath)
+}
+
 $ErrorActionPreference = 'Stop'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $userSid = [string]$identity.User.Value
@@ -301,7 +314,7 @@ if ($featureState -eq 'absent' -and ((Test-Path -LiteralPath $programRoot -PathT
 if ($taskFacts.conflict) { $featureState = 'conflict' }
 
 $firewallState = 'unknown'
-try { $firewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($rdcPath) } catch { }
+try { $firewallState = Get-RdcEffectiveFirewallState -SelectedPort $Port -RdcPath $rdcPath -Manifest $manifestCheck.manifest } catch { }
 if ($firewallRule -and $manifestCheck.manifest) {
     try {
         $actualRuleSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $firewallRule
@@ -402,7 +415,7 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
     $latestBinding = Get-RdcTailnetBinding -Address $BindAddress
     if (-not $latestBinding -or $latestBinding.address -ine $tailscaleBinding.address -or $latestBinding.alias -ine $tailscaleBinding.alias) { throw 'The Tailscale listener address or interface changed after review.' }
     if ((Get-RdcFirewallDefaultAllow) -ne $false) { throw 'The inbound firewall policy is no longer confirmed as block by default.' }
-    $latestFirewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($rdcPath)
+    $latestFirewallState = Get-RdcEffectiveFirewallState -SelectedPort $Port -RdcPath $rdcPath -Manifest $manifestCheck.manifest
     if ($latestFirewallState -notin @('blocked', 'tailnet-only')) { throw 'The effective firewall state is broad or could not be verified after review.' }
     $liveFeatureRule = Get-NetFirewallRule -Name $script:RdcFirewallRuleName -ErrorAction SilentlyContinue
     if ([bool]$liveFeatureRule -ne [bool]$firewallRule) { throw 'The feature firewall rule changed after review.' }
@@ -482,7 +495,7 @@ Invoke-RemoteAccessRdcMutation -Apply -Mutation {
             $actualExpected = Get-RemoteAccessFirewallRuleSnapshot -Rule $rule
             if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actualExpected -Expected $manifest.resources.firewall.expected)) { throw 'The feature-managed rdc firewall rule has local edits; refusing to change it.' }
         }
-        $effectiveFirewall = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($rdcPath)
+        $effectiveFirewall = Get-RdcEffectiveFirewallState -SelectedPort $Port -RdcPath $rdcPath -Manifest $manifest
         if ($effectiveFirewall -ne 'tailnet-only') { throw 'The effective rdc firewall policy is not proven tailnet-only; the daemon was not started.' }
 
         $expectedTaskPath = if ($manifest.resources.task.task_path) { [string]$manifest.resources.task.task_path } else { $null }

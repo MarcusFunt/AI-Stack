@@ -8,7 +8,8 @@ param(
     [switch]$ConfirmAlternatePort,
     [switch]$Apply,
     [switch]$FinalizeFirewall,
-    [switch]$ConfirmSecondDeviceKeyLogin
+    [switch]$ConfirmSecondDeviceKeyLogin,
+    [switch]$ConfirmManagementPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -228,8 +229,11 @@ function Test-AuthorizedKeyPresent {
 function Get-OpenSshDefaultRuleState {
     param([object]$Manifest)
     $owned = Test-RemoteAccessResourceOwned -Manifest $Manifest -Name 'default_openssh_rule'
-    $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
-    if (-not $rule) { return 'absent' }
+    $activeRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore ActiveStore)
+    if ($activeRules.Count -eq 0) { return 'absent' }
+    if ($activeRules.Count -ne 1) { return 'unknown' }
+    $rule = $activeRules[0]
+    $localRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore PersistentStore)
     $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
     $app = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
     $service = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
@@ -245,9 +249,19 @@ function Get-OpenSshDefaultRuleState {
         program = [string]$app.Program
         service = [string]$service.Service
     }
-    if (-not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled:$owned)) { return 'unknown' }
-    if ($owned) { return 'feature-managed-broad' }
+    if (-not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled:$owned -AllowGeneratedUnbound:$owned)) { return 'unknown' }
+    if ($owned) {
+        if ($localRules.Count -ne 1) { return 'unknown' }
+        return 'feature-managed-broad'
+    }
     return 'preexisting-broad'
+}
+
+function Test-RemoteSshDefaultRuleForApplyWithManifest {
+    param([object]$Rule, [object]$Resource, [object]$Manifest)
+    $newRuleFromGuardedInstall = (Get-RemoteAccessField $Resource 'existed_before') -ne $true -and (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name 'ssh_install_guard')
+    $ownedNewRule = (Get-RemoteAccessField $Resource 'managed') -eq $true -and (Get-RemoteAccessField $Resource 'existed_before') -ne $true
+    return (Test-RemoteSshDefaultFirewallRule -Rule $Rule -AllowDisabled:$ownedNewRule -AllowGeneratedUnbound:$newRuleFromGuardedInstall)
 }
 
 function Get-SshdServiceState {
@@ -365,7 +379,9 @@ function Save-InitialManifest {
         $service = @{ existed = $true; status = [string]$existingService.Status; start_type = [string](Get-CimInstance Win32_Service -Filter "Name='sshd'" -ErrorAction Stop).StartMode }
     } catch { $service = @{ existed = $false; status = 'missing'; start_type = 'missing' } }
     $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
-    $defaultRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    $defaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore PersistentStore)
+    if ($defaultRules.Count -gt 1) { throw 'Multiple local firewall rules use the OpenSSH default rule name.' }
+    $defaultRule = if ($defaultRules.Count -eq 1) { $defaultRules[0] } else { $null }
     $manifest = [pscustomobject]@{
         schema_version = 1
         component = 'ssh'
@@ -386,6 +402,7 @@ function Save-InitialManifest {
             ssh_service = @{ managed = $true; before = $service }
             ssh_firewall_v4 = @{ managed = $false; name = 'AIStack-RemoteAccess-SSH-v4'; expected = $null }
             ssh_firewall_v6 = @{ managed = $false; name = 'AIStack-RemoteAccess-SSH-v6'; expected = $null }
+            ssh_install_guard = @{ managed = $false; name = 'AIStack-RemoteAccess-SSH-InstallGuard-22'; expected = $null }
             default_openssh_rule = @{ managed = $false; existed_before = ($null -ne $defaultRule); enabled_before = if ($defaultRule) { [string]$defaultRule.Enabled } else { 'absent' }; name = 'OpenSSH-Server-In-TCP' }
         }
     }
@@ -411,7 +428,8 @@ function Set-RemoteSshFirewallRules {
             if ($family -eq 'v4') { $ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork } else { $ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6 }
         })
         if (-not $familyRemotes) { continue }
-        $existing = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+        $existing = @(Get-RemoteAccessFirewallRulesByName -Name $ruleName -PolicyStore PersistentStore)
+        if ($existing.Count -gt 1) { throw 'Multiple local firewall rules use a managed SSH rule name.' }
         $desired = @{
             enabled = 'True'
             direction = 'Inbound'
@@ -424,9 +442,9 @@ function Set-RemoteSshFirewallRules {
             interface_aliases = @($Tailscale.aliases)
             program = $SshdPath
         }
-        if ($existing) {
+        if ($existing.Count -eq 1) {
             if (-not (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name "ssh_firewall_$family")) { throw 'A firewall rule with the feature name already exists but is not feature-managed.' }
-            $current = Get-RemoteAccessFirewallRuleSnapshot -Rule $existing
+            $current = Get-RemoteAccessFirewallRuleSnapshot -Rule $existing[0]
             $resource = Get-RemoteAccessField (Get-RemoteAccessField $Manifest 'resources') "ssh_firewall_$family"
             if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $current -Expected $resource.expected) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $current -Expected $desired)) {
                 throw 'A feature-managed SSH firewall rule differs from its recorded or requested scope; refusing to change it.'
@@ -438,7 +456,9 @@ function Set-RemoteSshFirewallRules {
         $resource.expected = $desired
         Save-Manifest $Manifest (Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\ssh-manifest.json')
         New-NetFirewallRule -Name $ruleName -DisplayName 'AI-Stack tailnet SSH recovery' -Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol TCP -LocalPort ([int]$Manifest.port) -LocalAddress $familyLocals -RemoteAddress $familyRemotes -InterfaceAlias $Tailscale.aliases -Program $SshdPath -ErrorAction Stop | Out-Null
-        $created = Get-NetFirewallRule -Name $ruleName -ErrorAction Stop
+        $createdRules = @(Get-RemoteAccessFirewallRulesByName -Name $ruleName -PolicyStore PersistentStore)
+        if ($createdRules.Count -ne 1) { throw 'The created SSH firewall rule is not uniquely present in the local policy store.' }
+        $created = $createdRules[0]
         $actual = Get-RemoteAccessFirewallRuleSnapshot -Rule $created
         $resource.expected = $actual
         Save-Manifest $Manifest (Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\ssh-manifest.json')
@@ -533,6 +553,8 @@ $publicKeyValid = $false
 $manifestScopeMatches = $null
 $hostKeyFacts = $null
 $hostKeyPlan = $null
+$capabilityState = 'unknown'
+$installGuardNameAvailable = $false
 
 try {
     $manifest = Get-FeatureManifest -Path $manifestPath
@@ -551,11 +573,31 @@ try {
     $tailscale = Get-TailscaleInterfaceFacts -ClientAddresses $TrustedClientAddresses
     $manifestScopeMatches = Test-RemoteSshManifestScope -Manifest $manifest -AccountSid $account.sid -Port $Port -ClientAddresses $TrustedClientAddresses -ListenerAddresses $tailscale.addresses -InterfaceAliases $tailscale.aliases
     $defaultRuleState = Get-OpenSshDefaultRuleState -Manifest $manifest
+    $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
+    $capabilityState = [string]$capability.State
+    $guardName = 'AIStack-RemoteAccess-SSH-InstallGuard-22'
+    $existingGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+    $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+    $guardResource = Get-RemoteAccessField (Get-RemoteAccessField $manifest 'resources') 'ssh_install_guard'
+    if ($existingGuards.Count -eq 0 -and $activeGuards.Count -eq 0) {
+        $installGuardNameAvailable = $true
+    } elseif ((Get-RemoteAccessField $guardResource 'managed') -eq $true -and $null -ne (Get-RemoteAccessField $guardResource 'expected') -and $existingGuards.Count -eq 1 -and $activeGuards.Count -eq 1) {
+        $existingGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $existingGuards[0]
+        $activeGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+        $installGuardNameAvailable = (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $existingGuardSnapshot) -and (Test-RemoteAccessFirewallRuleSnapshot -Actual $existingGuardSnapshot -Expected $guardResource.expected) -and (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeGuardSnapshot) -and (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeGuardSnapshot -Expected $guardResource.expected)
+    } elseif ((Get-RemoteAccessField $guardResource 'managed') -eq $true -and $null -eq (Get-RemoteAccessField $guardResource 'expected')) {
+        $installGuardNameAvailable = $false
+    }
     $serviceState = Get-SshdServiceState
     $featureOwnsService = Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'ssh_service'
     $portInUse = Get-SshdPortInUse -SelectedPort $Port -FeatureOwnsService $featureOwnsService
     $firewallDefaultAllow = Get-SshFirewallDefaultAllowState
-    $firewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+    $sshExpectations = Get-RemoteAccessSshFirewallExpectations -Manifest $manifest
+    if ($sshExpectations.valid) {
+        $firewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe')) -ExpectedClientAddresses $sshExpectations.client_addresses -ExpectedFirewallRules $sshExpectations.rules
+    } else {
+        $firewallState = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+    }
     $customConfig = (Test-Path -LiteralPath $sshdConfigPath -PathType Leaf) -and -not (Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'sshd_config')
     $keyExists = Test-AuthorizedKeyPresent -Path $authorizedKeysPath -Key $clientKey
     $preflight = @{
@@ -576,6 +618,9 @@ try {
         finalize_firewall = [bool]$FinalizeFirewall
         second_device_verified = [bool]$ConfirmSecondDeviceKeyLogin
         broad_rule_manifested = (Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'default_openssh_rule')
+        capability_install_required = ($capabilityState -ne 'Installed')
+        confirm_management_path = [bool]$ConfirmManagementPath
+        install_guard_name_available = $installGuardNameAvailable
     }
 } catch {
     $preflight = @{
@@ -596,6 +641,9 @@ try {
         finalize_firewall = [bool]$FinalizeFirewall
         second_device_verified = [bool]$ConfirmSecondDeviceKeyLogin
         broad_rule_manifested = $false
+        capability_install_required = $true
+        confirm_management_path = [bool]$ConfirmManagementPath
+        install_guard_name_available = $false
     }
     $preflight_error = 'host-prerequisite-check-failed'
 }
@@ -621,6 +669,8 @@ $previousManifestState = if ($manifest) { [string]$manifest.state } else { $null
 $hostMutationStarted = $false
 $startedSshd = $false
 try {
+    $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
+    if ([string]$capability.State -ne 'Installed' -and -not $ConfirmManagementPath) { throw 'OpenSSH capability installation requires -ConfirmManagementPath because inbound TCP 22 will be blocked temporarily.' }
     Assert-ProtectedStateDirectory -Path $stateRoot
     if (-not $manifest) {
         $snapshotPath = Join-Path $stateRoot ('snapshots\ssh-' + [Guid]::NewGuid().ToString('N'))
@@ -629,8 +679,42 @@ try {
         throw 'The existing SSH manifest scope changed; use the documented rollback and a new reviewed apply to change account, port, client, or Tailscale interface scope.'
     }
 
-    $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
     if ([string]$capability.State -ne 'Installed') {
+        $guardName = 'AIStack-RemoteAccess-SSH-InstallGuard-22'
+        $resources = Get-RemoteAccessField $manifest 'resources'
+        $guardResource = Get-RemoteAccessField $resources 'ssh_install_guard'
+        if ($null -eq $guardResource) {
+            $guardResource = @{ managed = $false; name = $guardName; expected = $null }
+            Set-RemoteAccessManifestProperty -Manifest $resources -Name 'ssh_install_guard' -Value $guardResource
+        }
+        $guards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+        $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+        if ($guards.Count -gt 0 -or $activeGuards.Count -gt 0) {
+            if ($guards.Count -ne 1 -or $activeGuards.Count -ne 1 -or (Get-RemoteAccessField $guardResource 'managed') -ne $true -or $null -eq (Get-RemoteAccessField $guardResource 'expected')) {
+                throw 'The temporary TCP 22 guard name is occupied by a rule that is not the exact recorded feature-owned block.'
+            }
+            $guardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $guards[0]
+            $activeGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+            if (-not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $guardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $guardSnapshot -Expected $guardResource.expected) -or -not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeGuardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeGuardSnapshot -Expected $guardResource.expected)) {
+                throw 'The temporary TCP 22 guard name is occupied by a rule that is not the exact recorded feature-owned block.'
+            }
+        } else {
+            $guardResource.managed = $true
+            $guardResource.expected = $null
+            Save-Manifest $manifest $manifestPath
+            $hostMutationStarted = $true
+            New-NetFirewallRule -Name $guardName -DisplayName 'AI-Stack temporary OpenSSH install guard' -Direction Inbound -Action Block -Enabled True -Profile Any -Protocol TCP -LocalPort 22 -ErrorAction Stop | Out-Null
+            $guards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+            $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+            if ($guards.Count -ne 1 -or $activeGuards.Count -ne 1) { throw 'The temporary TCP 22 guard is not uniquely present in the active firewall policy; it was retained for review.' }
+            $guardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $guards[0]
+            $activeGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+            if (-not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $guardSnapshot) -or -not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeGuardSnapshot)) { throw 'The temporary TCP 22 guard did not match its fail-closed scope; it was retained for review.' }
+            $guardResource.expected = $guardSnapshot
+            Save-Manifest $manifest $manifestPath
+        }
+        $preCapabilityRuleState = Get-OpenSshDefaultRuleState -Manifest $manifest
+        if ($preCapabilityRuleState -notin @('absent', 'feature-managed-broad')) { throw 'The active OpenSSH firewall rule appeared or changed before capability installation; retaining the temporary TCP 22 guard.' }
         $hostMutationStarted = $true
         Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
     }
@@ -638,7 +722,9 @@ try {
     if ($hostKeyPlan.create_directory -or @($hostKeyPlan.missing_keys).Count -gt 0) { $hostMutationStarted = $true }
     Initialize-RemoteSshHostKeys -Manifest $manifest -ManifestPath $manifestPath -BeforeState $hostKeyFacts
 
-    $defaultRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    $defaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore PersistentStore)
+    if ($defaultRules.Count -gt 1) { throw 'Multiple local firewall rules use the OpenSSH default rule name.' }
+    $defaultRule = if ($defaultRules.Count -eq 1) { $defaultRules[0] } else { $null }
     if ($defaultRule) {
         $ruleShape = @{
             name = $defaultRule.Name
@@ -652,7 +738,7 @@ try {
             service = [string](Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $defaultRule).Service
         }
         $defaultResource = Get-RemoteAccessField (Get-RemoteAccessField $manifest 'resources') 'default_openssh_rule'
-        if (-not (Test-RemoteSshDefaultRuleForApply -Rule $ruleShape -Resource $defaultResource)) { throw 'The Windows OpenSSH firewall rule has an unrecognized shape; refusing to change it.' }
+        if (-not (Test-RemoteSshDefaultRuleForApplyWithManifest -Rule $ruleShape -Resource $defaultResource -Manifest $manifest)) { throw 'The Windows OpenSSH firewall rule has an unrecognized shape; refusing to change it.' }
         if (-not $defaultResource.existed_before) {
             $hostMutationStarted = $true
             $defaultResource.managed = $true
@@ -708,8 +794,27 @@ try {
 
     $hostMutationStarted = $true
     Set-RemoteSshFirewallRules -Manifest $manifest -ClientAddresses $TrustedClientAddresses -Tailscale $tailscale -SshdPath $sshdPath
-    $firewallAfter = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($sshdPath)
+    $sshExpectations = Get-RemoteAccessSshFirewallExpectations -Manifest $manifest
+    $firewallAfter = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($sshdPath) -ExpectedClientAddresses $sshExpectations.client_addresses -ExpectedFirewallRules $sshExpectations.rules
     if ($firewallAfter -ne 'tailnet-only') { throw 'The effective SSH firewall policy is not proven tailnet-only after rule creation; sshd was not started.' }
+
+    $guardResource = Get-RemoteAccessField (Get-RemoteAccessField $manifest 'resources') 'ssh_install_guard'
+    if (Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'ssh_install_guard') {
+        $port22Firewall = Get-RemoteAccessFirewallState -Port 22 -ExpectedProgramPaths @($sshdPath)
+        if ($port22Firewall -ne 'blocked') { throw 'Inbound TCP 22 still has an allow rule or its scope is unknown; retaining the temporary guard.' }
+        $guardName = [string]$guardResource.name
+        $guards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+        $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+        if ($guards.Count -gt 0 -or $activeGuards.Count -gt 0) {
+            if ($guards.Count -ne 1 -or $activeGuards.Count -ne 1) { throw 'The temporary TCP 22 guard changed during setup; leaving it in place for review.' }
+            $guardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $guards[0]
+            $activeGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+            if (-not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $guardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $guardSnapshot -Expected $guardResource.expected) -or -not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeGuardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeGuardSnapshot -Expected $guardResource.expected)) { throw 'The temporary TCP 22 guard changed during setup; leaving it in place for review.' }
+            Remove-NetFirewallRule -Name $guardName -ErrorAction Stop
+        }
+        $guardResource.managed = $false
+        Save-Manifest $manifest $manifestPath
+    }
 
     $service = Get-Service -Name sshd -ErrorAction Stop
     if ([string]$service.Status -ne 'Running') {
@@ -718,7 +823,7 @@ try {
         Start-Service -Name sshd -ErrorAction Stop
         $startedSshd = $true
     }
-    $firewallAfter = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($sshdPath)
+    $firewallAfter = Get-RemoteAccessFirewallState -Port $Port -ExpectedProgramPaths @($sshdPath) -ExpectedClientAddresses $sshExpectations.client_addresses -ExpectedFirewallRules $sshExpectations.rules
     if ($firewallAfter -ne 'tailnet-only') {
         if ($startedSshd) { Stop-Service -Name sshd -ErrorAction SilentlyContinue }
         throw 'The effective SSH firewall policy is not proven tailnet-only; the newly started service was stopped.'

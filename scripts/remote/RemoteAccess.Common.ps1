@@ -16,6 +16,18 @@ function Get-RemoteAccessField {
     return $null
 }
 
+function Get-RemoteAccessFirewallRulesByName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [ValidateSet('ActiveStore', 'PersistentStore')][string]$PolicyStore = 'ActiveStore'
+    )
+
+    # Filter a successful store-wide enumeration locally so a missing name is an
+    # empty result, while an inability to inspect the policy store remains an error.
+    return @(Get-NetFirewallRule -PolicyStore $PolicyStore -ErrorAction Stop | Where-Object { [string]$_.Name -ieq $Name })
+}
+
 function Set-RemoteAccessManifestProperty {
     [CmdletBinding()]
     param(
@@ -121,9 +133,18 @@ function Test-RemoteSshManifestScope {
 function Get-RemoteAccessSshPort {
     $path = Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\ssh-manifest.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 22 }
+    $manifest = Get-RemoteAccessSshManifest
+    if ($null -eq $manifest) { return $null }
+    return Get-RemoteAccessSshStatusPort -Manifest $manifest
+}
+
+function Get-RemoteAccessSshManifest {
+    $path = Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\ssh-manifest.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try {
         $manifest = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        return Get-RemoteAccessSshStatusPort -Manifest $manifest
+        if ($manifest.schema_version -ne 1 -or $manifest.component -ne 'ssh' -or $manifest.state -notin @('active', 'applying')) { return $null }
+        return $manifest
     } catch {
         return $null
     }
@@ -323,7 +344,7 @@ function Get-RemoteSshHostKeySetupPlan {
 
 function Test-RemoteSshDefaultFirewallRule {
     [CmdletBinding()]
-    param([AllowNull()][object]$Rule, [switch]$AllowDisabled)
+    param([AllowNull()][object]$Rule, [switch]$AllowDisabled, [switch]$AllowGeneratedUnbound)
 
     if ($null -eq $Rule) { return $false }
     $name = [string](Get-RemoteAccessField $Rule 'name')
@@ -342,11 +363,31 @@ function Test-RemoteSshDefaultFirewallRule {
     if ($protocol -notin @('TCP', '6') -or $localPort -ne '22' -or $service -notin @('sshd', 'Any', '*', '')) { return $false }
     if ($remoteAddresses.Count -ne 1 -or $remoteAddresses[0] -notin @('Any', '*')) { return $false }
     $expectedProgram = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
-    try {
-        return ([IO.Path]::GetFullPath($program).TrimEnd('\') -ieq [IO.Path]::GetFullPath($expectedProgram).TrimEnd('\'))
-    } catch {
-        return $false
+    if ([string]::IsNullOrWhiteSpace($program) -or $program -eq '*') {
+        return ($AllowGeneratedUnbound -and $service -in @('sshd', 'Any', '*', ''))
     }
+    try { return ([IO.Path]::GetFullPath($program).TrimEnd('\') -ieq [IO.Path]::GetFullPath($expectedProgram).TrimEnd('\')) } catch { return $false }
+}
+
+function Test-RemoteSshInstallGuardRule {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][object]$Rule)
+
+    if ($Name -ne 'AIStack-RemoteAccess-SSH-InstallGuard-22') { return $false }
+    if ((Get-RemoteAccessField $Rule 'enabled') -ne 'True') { return $false }
+    if ((Get-RemoteAccessField $Rule 'direction') -notin @('Inbound', '1')) { return $false }
+    if ((Get-RemoteAccessField $Rule 'action') -notin @('Block', '0')) { return $false }
+    if ((Get-RemoteAccessField $Rule 'profile') -ne 'Any') { return $false }
+    if ((Get-RemoteAccessField $Rule 'protocol') -notin @('TCP', '6') -or (Get-RemoteAccessField $Rule 'local_port') -ne '22') { return $false }
+    if ((Get-RemoteAccessField $Rule 'service') -notin @('Any', '*', '')) { return $false }
+    foreach ($field in @('remote_addresses', 'local_addresses')) {
+        $addresses = @(Get-RemoteAccessField $Rule $field | ForEach-Object { [string]$_ })
+        if ($addresses.Count -ne 1 -or $addresses[0] -notin @('Any', '*')) { return $false }
+    }
+    $interfaces = @(Get-RemoteAccessField $Rule 'interface_aliases' | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($interfaces.Count -gt 1 -or ($interfaces.Count -eq 1 -and $interfaces[0] -notin @('Any', '*'))) { return $false }
+    $program = [string](Get-RemoteAccessField $Rule 'program')
+    return [string]::IsNullOrWhiteSpace($program) -or $program -in @('Any', '*')
 }
 
 function Test-RemoteSshDefaultRuleForApply {
@@ -354,7 +395,7 @@ function Test-RemoteSshDefaultRuleForApply {
     param([AllowNull()][object]$Rule, [AllowNull()][object]$Resource)
 
     $ownedNewRule = (Get-RemoteAccessField $Resource 'managed') -eq $true -and (Get-RemoteAccessField $Resource 'existed_before') -ne $true
-    return (Test-RemoteSshDefaultFirewallRule -Rule $Rule -AllowDisabled:$ownedNewRule)
+    return (Test-RemoteSshDefaultFirewallRule -Rule $Rule -AllowDisabled:$ownedNewRule -AllowGeneratedUnbound:$ownedNewRule)
 }
 
 function Test-RemoteAccessFirewallRuleSnapshot {
@@ -367,6 +408,11 @@ function Test-RemoteAccessFirewallRuleSnapshot {
     foreach ($name in @('enabled', 'direction', 'action', 'profile', 'protocol', 'local_port')) {
         if ([string](Get-RemoteAccessField $Actual $name) -ine [string](Get-RemoteAccessField $Expected $name)) { return $false }
     }
+    $actualService = [string](Get-RemoteAccessField $Actual 'service')
+    $expectedService = [string](Get-RemoteAccessField $Expected 'service')
+    if ([string]::IsNullOrWhiteSpace($actualService)) { $actualService = 'Any' }
+    if ([string]::IsNullOrWhiteSpace($expectedService)) { $expectedService = 'Any' }
+    if ($actualService -ine $expectedService) { return $false }
     foreach ($name in @('remote_addresses', 'local_addresses', 'interface_aliases')) {
         $normalizer = { param($value) [string]$value }
         if ($name -ne 'interface_aliases') { $normalizer = { param($value) ConvertTo-RemoteAccessAddressKey ([string]$value) } }
@@ -379,11 +425,55 @@ function Test-RemoteAccessFirewallRuleSnapshot {
     }
     $actualProgram = [Environment]::ExpandEnvironmentVariables([string](Get-RemoteAccessField $Actual 'program'))
     $expectedProgram = [Environment]::ExpandEnvironmentVariables([string](Get-RemoteAccessField $Expected 'program'))
+    $actualProgramIsAny = [string]::IsNullOrWhiteSpace($actualProgram) -or $actualProgram -in @('Any', '*')
+    $expectedProgramIsAny = [string]::IsNullOrWhiteSpace($expectedProgram) -or $expectedProgram -in @('Any', '*')
+    if ($actualProgramIsAny -or $expectedProgramIsAny) { return ($actualProgramIsAny -and $expectedProgramIsAny) }
     try {
         return ([IO.Path]::GetFullPath($actualProgram).TrimEnd('\') -ieq [IO.Path]::GetFullPath($expectedProgram).TrimEnd('\'))
     } catch {
         return $false
     }
+}
+
+function Get-RemoteAccessSshFirewallExpectations {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Manifest)
+
+    $rules = New-Object 'System.Collections.Generic.List[object]'
+    if ($null -eq $Manifest -or (Get-RemoteAccessField $Manifest 'schema_version') -ne 1 -or (Get-RemoteAccessField $Manifest 'component') -ne 'ssh') {
+        return [pscustomobject]@{ valid = $false; client_addresses = @(); rules = @() }
+    }
+    $clientAddresses = @(Get-RemoteAccessField $Manifest 'client_addresses' | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($clientAddresses.Count -eq 0) { return [pscustomobject]@{ valid = $false; client_addresses = @(); rules = @() } }
+
+    $resources = Get-RemoteAccessField $Manifest 'resources'
+    foreach ($family in @('v4', 'v6')) {
+        $resourceName = "ssh_firewall_$family"
+        $resource = Get-RemoteAccessField $resources $resourceName
+        if ((Get-RemoteAccessField $resource 'managed') -ne $true) { continue }
+        $expected = Get-RemoteAccessField $resource 'expected'
+        $ruleName = [string](Get-RemoteAccessField $resource 'name')
+        if ($null -eq $expected -or [string]::IsNullOrWhiteSpace($ruleName)) {
+            return [pscustomobject]@{ valid = $false; client_addresses = $clientAddresses; rules = @() }
+        }
+        $rules.Add(@{ name = $ruleName; expected = $expected })
+    }
+    return [pscustomobject]@{ valid = ($rules.Count -gt 0); client_addresses = $clientAddresses; rules = @($rules.ToArray()) }
+}
+
+function Get-RemoteAccessTcpListeners {
+    [CmdletBinding()]
+    param([ValidateRange(1, 65535)][int]$Port)
+
+    try {
+        # Query the listener table once and filter locally: querying a missing LocalPort
+        # can be reported as a CIM error on some Windows builds, although no match is a
+        # valid empty result. A failure of the underlying listener query stays unknown.
+        $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port })
+    } catch {
+        throw 'tcp-listener-query-failed'
+    }
+    return [pscustomobject]@{ listeners = $listeners }
 }
 
 function ConvertTo-RemoteAccessAddressKey {
@@ -410,6 +500,7 @@ function Get-RemoteAccessFirewallRuleSnapshot {
     $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
     $app = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
     $interfaces = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $service = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
     return @{
         enabled = [string]$Rule.Enabled
         direction = [string]$Rule.Direction
@@ -421,6 +512,7 @@ function Get-RemoteAccessFirewallRuleSnapshot {
         local_addresses = @($address.LocalAddress | ForEach-Object { [string]$_ })
         interface_aliases = @($interfaces.InterfaceAlias | ForEach-Object { [string]$_ })
         program = [string]$app.Program
+        service = [string]$service.Service
     }
 }
 
@@ -649,6 +741,8 @@ function Get-RemoteAccessTailscalePath {
 }
 
 function Get-RemoteAccessTailscaleUnattendedState {
+    # Only an explicit system policy is locally inspectable here. UI/CLI user-decides
+    # mode remains unknown until the sign-out/reboot acceptance path is exercised.
     try {
         $policy = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Tailscale' -Name UnattendedMode -ErrorAction Stop
         switch ([string]$policy.UnattendedMode) {
@@ -681,7 +775,9 @@ function Get-RemoteAccessFirewallState {
     [CmdletBinding()]
     param(
         [ValidateRange(1, 65535)][int]$Port = 22,
-        [AllowNull()][string[]]$ExpectedProgramPaths = @()
+        [AllowNull()][string[]]$ExpectedProgramPaths = @(),
+        [AllowNull()][string[]]$ExpectedClientAddresses = @(),
+        [AllowNull()][object[]]$ExpectedFirewallRules = @()
     )
 
     try {
@@ -691,8 +787,10 @@ function Get-RemoteAccessFirewallState {
         if ($profileState -ne 'blocked') { return 'unknown' }
 
         $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop)
+        $listenerResult = Get-RemoteAccessTcpListeners -Port $Port
+        $listeners = @($listenerResult.listeners)
         $listenerPaths = [System.Collections.Generic.List[string]]::new()
+        $listenerPathInspectionComplete = $true
         foreach ($expectedPath in $ExpectedProgramPaths) {
             if (-not [string]::IsNullOrWhiteSpace($expectedPath)) { $listenerPaths.Add($expectedPath) }
         }
@@ -700,8 +798,9 @@ function Get-RemoteAccessFirewallState {
             try {
                 $process = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
                 if (-not [string]::IsNullOrWhiteSpace($process.Path)) { $listenerPaths.Add($process.Path) }
-            } catch { }
+            } catch { $listenerPathInspectionComplete = $false }
         }
+        if (-not $listenerPathInspectionComplete) { return 'unknown' }
         $normalizedRules = [System.Collections.Generic.List[object]]::new()
         foreach ($rule in $policy.Rules) {
             if (-not $rule.Enabled -or [int]$rule.Direction -ne 1 -or [int]$rule.Action -ne 1) { continue }
@@ -736,6 +835,7 @@ function Get-RemoteAccessFirewallState {
             if ($remoteAddresses -contains '*' -or $remoteAddresses -contains 'Any' -or $remoteAddresses.Count -eq 0) { $remoteAddresses = @('Any') }
             $interfaces = @($rule.Interfaces | ForEach-Object { [string]$_ } | Where-Object { $_ })
             $normalizedRules.Add(@{
+                name = [string]$rule.Name
                 local_port = $localPorts
                 protocol = $protocol.ToString()
                 program = if ($programIsAny) { 'Any' } else { $program }
@@ -745,7 +845,35 @@ function Get-RemoteAccessFirewallState {
             })
         }
         if ($normalizedRules.Count -eq 0) { return 'blocked' }
-        return ConvertTo-RemoteAccessFirewallState -Rules $normalizedRules.ToArray() -DefaultInboundAction 'Block' -ListenerProgramPaths $listenerPaths.ToArray() -Port $Port
+        $state = ConvertTo-RemoteAccessFirewallState -Rules $normalizedRules.ToArray() -DefaultInboundAction 'Block' -ListenerProgramPaths $listenerPaths.ToArray() -Port $Port
+        if ($state -ne 'tailnet-only') { return $state }
+
+        $expectedClients = @($ExpectedClientAddresses | ForEach-Object { ConvertTo-RemoteAccessAddressKey ([string]$_) } | Sort-Object -Unique)
+        if ($expectedClients.Count -gt 0) {
+            $actualClients = @($normalizedRules | ForEach-Object { Get-RemoteAccessField $_ 'remote_addresses' } | ForEach-Object { ConvertTo-RemoteAccessAddressKey ([string]$_) } | Sort-Object -Unique)
+            if ($actualClients -contains 'Any' -or $actualClients -contains '*') { return 'broad' }
+            $unexpectedClients = @($actualClients | Where-Object { $_ -notin $expectedClients })
+            if ($unexpectedClients.Count -gt 0) { return 'broad' }
+            $missingClients = @($expectedClients | Where-Object { $_ -notin $actualClients })
+            if ($missingClients.Count -gt 0) { return 'unknown' }
+        }
+        if ($ExpectedFirewallRules.Count -eq 0) { return 'unknown' }
+
+        $expectedRuleNames = @($ExpectedFirewallRules | ForEach-Object { [string](Get-RemoteAccessField $_ 'name') } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        $actualRuleNames = @($normalizedRules | ForEach-Object { [string](Get-RemoteAccessField $_ 'name') } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        if ($expectedRuleNames.Count -ne $ExpectedFirewallRules.Count -or $actualRuleNames.Count -ne $normalizedRules.Count -or $actualRuleNames.Count -ne $expectedRuleNames.Count) { return 'unknown' }
+        foreach ($ruleName in $actualRuleNames) { if ($ruleName -notin $expectedRuleNames) { return 'unknown' } }
+
+        foreach ($expectedRule in $ExpectedFirewallRules) {
+            $ruleName = [string](Get-RemoteAccessField $expectedRule 'name')
+            $expectedSnapshot = Get-RemoteAccessField $expectedRule 'expected'
+            if ([string]::IsNullOrWhiteSpace($ruleName) -or $null -eq $expectedSnapshot) { return 'unknown' }
+            $managedRule = @(Get-RemoteAccessFirewallRulesByName -Name $ruleName -PolicyStore ActiveStore)
+            if ($managedRule.Count -ne 1) { return 'unknown' }
+            $actualSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $managedRule[0]
+            if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actualSnapshot -Expected $expectedSnapshot)) { return 'unknown' }
+        }
+        return 'tailnet-only'
     } catch {
         return 'unknown'
     }
@@ -827,6 +955,12 @@ function Get-RemoteSshInstallPlan {
         $actions.Add('keep-scoped-firewall-rule')
     }
 
+    if ((Get-RemoteAccessField $Preflight 'capability_install_required') -eq $true) {
+        $actions.Add('temporarily-block-inbound-tcp-22-during-capability-install')
+        if ((Get-RemoteAccessField $Preflight 'confirm_management_path') -ne $true) { $blockers.Add('temporary-port-22-block-management-confirmation-required') }
+        if ((Get-RemoteAccessField $Preflight 'install_guard_name_available') -ne $true) { $blockers.Add('install-guard-firewall-rule-name-conflict') }
+    }
+
     return [pscustomobject]@{
         ready = ($blockers.Count -eq 0)
         port = $port
@@ -860,7 +994,7 @@ function Get-RemoteAccessRollbackPlan {
         [ValidateSet('Ssh')][string]$Component = 'Ssh'
     )
 
-    $names = @('ssh_firewall_v4', 'ssh_firewall_v6', 'default_openssh_rule', 'authorized_keys', 'sshd_config', 'ssh_service', 'ssh_capability')
+    $names = @('ssh_firewall_v4', 'ssh_firewall_v6', 'default_openssh_rule', 'ssh_install_guard', 'authorized_keys', 'sshd_config', 'ssh_service', 'ssh_capability')
     $managed = New-Object 'System.Collections.Generic.List[string]'
     foreach ($name in $names) {
         if (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name $name) { $managed.Add($name) }
@@ -971,12 +1105,14 @@ function Get-RemoteAccessInventory {
     } catch {
         if (Get-Command Get-Service -ErrorAction SilentlyContinue) { $sshService = 'missing' }
     }
+    $sshManifest = Get-RemoteAccessSshManifest
     $sshPort = Get-RemoteAccessSshPort
     $listenerCheck = 'unknown'
     $sshListenerState = 'unknown'
     if ($null -ne $sshPort) {
         try {
-            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$sshPort) -ErrorAction Stop)
+            $listenerResult = Get-RemoteAccessTcpListeners -Port ([int]$sshPort)
+            $listeners = @($listenerResult.listeners)
             $listenerCheck = $now
             $normalizedListeners = @()
             $sshdProcessIds = New-Object 'System.Collections.Generic.List[int]'
@@ -1005,7 +1141,10 @@ function Get-RemoteAccessInventory {
     }
     $sshFirewall = 'unknown'
     if ($null -ne $sshPort) {
-        $sshFirewall = Get-RemoteAccessFirewallState -Port ([int]$sshPort) -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+        $sshFirewallExpectations = Get-RemoteAccessSshFirewallExpectations -Manifest $sshManifest
+        if ($sshFirewallExpectations.valid) {
+            $sshFirewall = Get-RemoteAccessFirewallState -Port ([int]$sshPort) -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe')) -ExpectedClientAddresses $sshFirewallExpectations.client_addresses -ExpectedFirewallRules $sshFirewallExpectations.rules
+        }
     }
 
     $sessionState = Get-RemoteAccessDesktopSessionState
@@ -1029,7 +1168,16 @@ function Get-RemoteAccessInventory {
             $binaryHash = (Get-FileHash -LiteralPath $rdcPath -Algorithm SHA256).Hash
             $rdcConfigPath = Join-Path (Join-Path $env:APPDATA 'rdc') 'config.toml'
             $configHash = (Get-FileHash -LiteralPath $rdcConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash
-            $rdcFirewall = Get-RemoteAccessFirewallState -Port $rdcPort -ExpectedProgramPaths @($rdcPath)
+            $rdcFirewallResource = Get-RemoteAccessField (Get-RemoteAccessField $rdcManifest 'resources') 'firewall'
+            $rdcFirewallExpected = @()
+            if ($rdcManifest.schema_version -eq 1 -and $rdcManifest.component -eq 'rdc' -and $rdcManifest.state -eq 'active' -and $rdcFirewallResource.managed -eq $true -and $rdcFirewallResource.name -eq 'AIStack-RemoteAccess-Rdc' -and $null -ne $rdcFirewallResource.expected) {
+                $rdcFirewallExpected = @(@{ name = [string]$rdcFirewallResource.name; expected = $rdcFirewallResource.expected })
+            }
+            if ($rdcFirewallExpected.Count -gt 0) {
+                $rdcFirewall = Get-RemoteAccessFirewallState -Port $rdcPort -ExpectedProgramPaths @($rdcPath) -ExpectedFirewallRules $rdcFirewallExpected
+            } else {
+                $rdcFirewall = 'unknown'
+            }
             $manifestValid = ($rdcManifest.schema_version -eq 1 -and $rdcManifest.component -eq 'rdc' -and $rdcManifest.state -eq 'active' -and [string]$rdcManifest.account.sid -eq $currentSid -and [string]$rdcManifest.resources.binary.sha256 -eq $binaryHash -and [string]$rdcManifest.resources.config.sha256 -eq $configHash -and $rdcFirewall -eq 'tailnet-only' -and (Test-RemoteAccessTailnetAddress $rdcAddress))
             if ($manifestValid -and $sessionState -eq 'interactive' -and $currentSessionId -gt 0) {
                 $rdcProcesses = @(Get-Process -Name 'rdc' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $currentSessionId -and $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($rdcPath)) })

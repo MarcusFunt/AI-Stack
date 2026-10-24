@@ -11,7 +11,7 @@
 - The current signed-in account belongs to Administrators and `docker-users`; it is not approved for agent SSH. A separate least-privilege account is unresolved.
 - The installer only plans by default. It requires a standard local account, a public-key file, exact verified Tailscale client IPs, and an explicitly approved available port. It refuses TCP 22 while `wslrelay` owns it.
 - `sshd` binds only to the host's current Tailscale IP addresses. Its firewall rules use those local addresses, the Tailscale interface, and the exact approved client IPs. Password authentication is disabled before the service starts.
-- If capability installation creates Windows' broad `OpenSSH-Server-In-TCP` rule, the installer disables that newly created rule before starting `sshd`. A pre-existing broad rule blocks setup and is preserved.
+- If OpenSSH capability installation is needed, the installer first creates and verifies a feature-owned Windows Firewall Block rule for inbound TCP 22 on every profile and interface. It keeps that guard while capability setup runs, disables only a generated `OpenSSH-Server-In-TCP` rule whose previously absent state and guarded installation are recorded, verifies the exact client-address firewall rules and that no other effective inbound allow remains on TCP 22, then removes the guard before starting `sshd`. A pre-existing broad rule blocks setup and is preserved. The temporary guard can interrupt any existing inbound TCP 22 use, so apply requires `-ConfirmManagementPath` after local console or another independent management path is available. A failed or unverifiable apply retains the guard for reviewed rollback.
 - The stack was stopped during the baseline and supervisor status was unavailable. If GPU/job state is unknown, do not start, stop, rebuild, or restart services.
 
 ## SSH setup (after operator review)
@@ -27,12 +27,14 @@ Replace every angle-bracket placeholder below with the approved value before run
   -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
   -Port <operator-approved-free-port> -ConfirmAlternatePort
 
-# Only after reviewing the plan and confirming the client/account/port.
+# Only after reviewing the plan and confirming the client/account/port. If the
+# plan says capability installation is required, also verify a separate
+# management path: the installer temporarily blocks inbound TCP 22.
 .\scripts\remote\Install-SshTailnet.ps1 `
   -WindowsAccount '<approved-local-account>' `
   -PublicKeyPath '<protected-client-public-key-file>' `
   -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
-  -Port <operator-approved-free-port> -ConfirmAlternatePort -Apply
+  -Port <operator-approved-free-port> -ConfirmAlternatePort -ConfirmManagementPath -Apply
 ```
 
 Run the second-device acceptance checks before relying on SSH: correct key succeeds, wrong key fails, an unapproved peer is denied, and direct internet access is closed. If a feature-owned broad default rule must be finalized, use `-FinalizeFirewall -ConfirmSecondDeviceKeyLogin` only after the successful key login. The confirmation switch records an operator attestation; it is not an automated test result.
@@ -44,7 +46,7 @@ The feature manifest and protected before-state are stored under `%ProgramData%\
 .\scripts\remote\Rollback-RemoteAccess.ps1 -Component Ssh -Apply -ConfirmManagementPath
 ```
 
-Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
+Rollback performs a complete read-only check of the managed firewall rules, the temporary TCP 22 guard, service state, current file hashes, and required before-state copies before it changes the manifest or stops `sshd`. A mismatch blocks rollback before service state changes. It removes a recorded install guard only after the other feature-owned state has been restored, the OpenSSH capability cleanup has finished, and inbound TCP 22 is again proven to have no effective allow rule. If the restored before-state includes an allow rule or its scope is unknown, the guard remains and the manifest stays in rollback review. Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
 
 OpenSSH host keys are server identity and are retained after feature rollback. Existing keys are never replaced; keys generated during first-use setup are recorded in the manifest by filename and SHA-256 and remain in the protected `%ProgramData%\ssh` directory. Do not remove or rotate them as part of routine feature rollback.
 
@@ -95,7 +97,9 @@ Apply: .\scripts\remote\Rollback-RdcDesktop.ps1 -Apply -ConfirmManagementPath
 
 ## Read-only readiness status
 
-Run `scripts\remote\Test-RemoteReadiness.ps1 -Json` locally to inspect tailnet, SSH, desktop, fallback, and host state without starting Docker or changing host settings. The dashboard's Network page uses the authenticated Gateway `GET /control/remote-access` endpoint for the same sanitized status; if the Gateway or host agent is unavailable, it shows unavailable/unknown and cannot substitute for direct SSH. Optional MQTT publishes only the bounded status summary at `localai/marcus-computer/remote-access/status` and remains telemetry-only.
+Run `scripts\remote\Test-RemoteReadiness.ps1 -Json` locally to inspect tailnet, SSH, desktop, fallback, and host state without starting Docker or changing host settings. The dashboard's Network page uses the authenticated Gateway `GET /control/remote-access` endpoint for the same sanitized status; its SSH card reports local signals only and does not certify second-device, sign-out, cold-boot, or Tailscale-reconnect acceptance. If the Gateway or host agent is unavailable, it shows unavailable/unknown and cannot substitute for direct SSH. Optional MQTT publishes only the bounded status summary at `localai/marcus-computer/remote-access/status` and remains telemetry-only.
+
+The unattended field is `enabled` only when the locally visible machine policy explicitly sets `UnattendedMode=always`, and `disabled` only when it explicitly sets `never`. Missing/other policy values remain `unknown`; the probe does not infer unattended operation from the Tailscale service or assume a UI/CLI user-decides mode survives sign-out. Accept boot recovery only after a second-device test covers sign-out, cold boot, and Tailscale reconnect.
 
 ### Fallback acceptance and status record
 

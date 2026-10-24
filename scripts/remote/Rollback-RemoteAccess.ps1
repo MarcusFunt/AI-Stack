@@ -110,6 +110,164 @@ function Restore-AuthorizedKeys {
     }
 }
 
+function Get-SshDefaultRuleShape {
+    param([Parameter(Mandatory = $true)][object]$Rule)
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $app = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $service = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    return @{
+        name = [string]$Rule.Name
+        enabled = ([string]$Rule.Enabled -eq 'True')
+        direction = [string]$Rule.Direction
+        action = [string]$Rule.Action
+        protocol = [string]$port.Protocol
+        local_port = [string]$port.LocalPort
+        remote_addresses = @($address.RemoteAddress | ForEach-Object { [string]$_ })
+        program = [string]$app.Program
+        service = [string]$service.Service
+    }
+}
+
+function Get-RemoteSshRollbackPreflight {
+    param([Parameter(Mandatory = $true)][object]$Manifest)
+
+    $blockers = New-Object 'System.Collections.Generic.List[string]'
+    $resources = Get-RemoteAccessField $Manifest 'resources'
+
+    foreach ($item in @(
+        @{ resource = 'ssh_firewall_v4'; name = 'AIStack-RemoteAccess-SSH-v4' },
+        @{ resource = 'ssh_firewall_v6'; name = 'AIStack-RemoteAccess-SSH-v6' }
+    )) {
+        if (-not (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name $item.resource)) { continue }
+        try {
+            $resource = Get-RemoteAccessField $resources $item.resource
+            $rules = @(Get-RemoteAccessFirewallRulesByName -Name $item.name -PolicyStore PersistentStore)
+            $activeRules = @(Get-RemoteAccessFirewallRulesByName -Name $item.name -PolicyStore ActiveStore)
+            if ($rules.Count -gt 1) { throw 'duplicate-firewall-rule-name' }
+            if ($rules.Count -eq 1 -or $activeRules.Count -gt 0) {
+                if ($rules.Count -ne 1 -or $activeRules.Count -ne 1) { throw 'firewall-rule-not-uniquely-active' }
+                if ($null -eq $resource.expected) { throw 'missing-expected-snapshot' }
+                $actual = Get-RemoteAccessFirewallRuleSnapshot -Rule $rules[0]
+                $activeActual = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeRules[0]
+                if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actual -Expected $resource.expected) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeActual -Expected $resource.expected)) { throw 'firewall-rule-changed' }
+            }
+        } catch { $blockers.Add("$($item.resource)-changed-or-unverifiable") }
+    }
+
+    $guardResource = Get-RemoteAccessField $resources 'ssh_install_guard'
+    if ((Get-RemoteAccessField $guardResource 'managed') -eq $true) {
+        try {
+            $guardName = [string](Get-RemoteAccessField $guardResource 'name')
+            if ($guardName -ne 'AIStack-RemoteAccess-SSH-InstallGuard-22') { throw 'unexpected-guard-name' }
+            $guards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+            $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+            if ($guards.Count -gt 0 -or $activeGuards.Count -gt 0) {
+                if ($guards.Count -ne 1 -or $activeGuards.Count -ne 1) { throw 'guard-not-uniquely-active' }
+                if ($null -eq (Get-RemoteAccessField $guardResource 'expected')) { throw 'missing-guard-snapshot' }
+                $actual = Get-RemoteAccessFirewallRuleSnapshot -Rule $guards[0]
+                $activeActual = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+                if (-not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $actual) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actual -Expected $guardResource.expected) -or -not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeActual) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeActual -Expected $guardResource.expected)) { throw 'guard-changed' }
+            } else {
+                $port22State = Get-RemoteAccessFirewallState -Port 22 -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+                if ($port22State -ne 'blocked') { throw 'missing-guard-and-port22-not-proven-blocked' }
+            }
+        } catch { $blockers.Add('ssh-install-guard-changed-or-unverifiable') }
+    } else {
+        try {
+            $unownedGuards = @(Get-RemoteAccessFirewallRulesByName -Name 'AIStack-RemoteAccess-SSH-InstallGuard-22' -PolicyStore PersistentStore)
+            $activeUnownedGuards = @(Get-RemoteAccessFirewallRulesByName -Name 'AIStack-RemoteAccess-SSH-InstallGuard-22' -PolicyStore ActiveStore)
+            if ($unownedGuards.Count -gt 0 -or $activeUnownedGuards.Count -gt 0) { $blockers.Add('unowned-ssh-install-guard-present') }
+        } catch { $blockers.Add('ssh-install-guard-state-unverifiable') }
+    }
+
+    $defaultResource = Get-RemoteAccessField $resources 'default_openssh_rule'
+    if ((Get-RemoteAccessField $defaultResource 'managed') -eq $true) {
+        try {
+            $defaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore PersistentStore)
+            $activeDefaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore ActiveStore)
+            if ($defaultRules.Count -gt 1) { throw 'duplicate-default-rule-name' }
+            $defaultRule = if ($defaultRules.Count -eq 1) { $defaultRules[0] } else { $null }
+            if ($defaultResource.existed_before -eq $true) {
+                if (-not $defaultRule -or $activeDefaultRules.Count -ne 1) { throw 'preexisting-rule-missing-or-inactive' }
+                $shape = Get-SshDefaultRuleShape -Rule $defaultRule
+                $activeShape = Get-SshDefaultRuleShape -Rule $activeDefaultRules[0]
+                if (-not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled)) { throw 'preexisting-rule-changed' }
+                if (-not (Test-RemoteSshDefaultFirewallRule -Rule $activeShape -AllowDisabled)) { throw 'preexisting-active-rule-changed' }
+                if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual (Get-RemoteAccessFirewallRuleSnapshot -Rule $activeDefaultRules[0]) -Expected (Get-RemoteAccessFirewallRuleSnapshot -Rule $defaultRule))) { throw 'preexisting-rule-not-active-as-saved' }
+                if ($defaultResource.enabled_before -notin @('True', 'False')) { throw 'preexisting-enabled-state-missing' }
+            } elseif ($defaultRule) {
+                if ($activeDefaultRules.Count -ne 1) { throw 'generated-rule-not-uniquely-active' }
+                $shape = Get-SshDefaultRuleShape -Rule $defaultRule
+                $activeShape = Get-SshDefaultRuleShape -Rule $activeDefaultRules[0]
+                if ([string]$defaultRule.Enabled -ne 'False' -or -not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled -AllowGeneratedUnbound)) { throw 'generated-rule-changed' }
+                if ([string]$activeDefaultRules[0].Enabled -ne 'False' -or -not (Test-RemoteSshDefaultFirewallRule -Rule $activeShape -AllowDisabled -AllowGeneratedUnbound)) { throw 'generated-active-rule-changed' }
+                if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual (Get-RemoteAccessFirewallRuleSnapshot -Rule $activeDefaultRules[0]) -Expected (Get-RemoteAccessFirewallRuleSnapshot -Rule $defaultRule))) { throw 'generated-rule-not-active-as-saved' }
+            } elseif ($activeDefaultRules.Count -gt 0) {
+                throw 'unowned-active-default-rule-present'
+            }
+        } catch { $blockers.Add('default-openssh-rule-changed-or-unverifiable') }
+    }
+
+    foreach ($resourceName in @('sshd_config', 'authorized_keys')) {
+        if (-not (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name $resourceName)) { continue }
+        try {
+            $resource = Get-RemoteAccessField $resources $resourceName
+            $path = [string](Get-RemoteAccessField $resource 'path')
+            if ([string]::IsNullOrWhiteSpace($path)) { throw 'missing-path' }
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse-current-file' }
+                $currentHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
+                $expectedHash = if ($resourceName -eq 'sshd_config') { [string]$resource.sha256 } else { [string]$resource.sha256_after }
+                if ($expectedHash) {
+                    if ($currentHash -ne $expectedHash) { throw 'current-file-edited' }
+                } elseif ($resource.existed -eq $true) {
+                    $backupPath = [string]$resource.backup_path
+                    if (-not $backupPath -or -not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or $currentHash -ne (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256 -ErrorAction Stop).Hash) { throw 'before-state-file-changed' }
+                } else { throw 'feature-file-has-no-recorded-hash' }
+            } elseif (Test-Path -LiteralPath $path) { throw 'current-path-is-not-a-file' }
+
+            if ($resource.existed -eq $true) {
+                $backupPath = [string]$resource.backup_path
+                if (-not $backupPath -or -not (Test-Path -LiteralPath $backupPath -PathType Leaf)) { throw 'required-backup-missing' }
+                if ((Get-Item -LiteralPath $backupPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse-backup' }
+            }
+            if ($resourceName -eq 'authorized_keys') {
+                $directoryPath = [string]$resource.directory_path
+                if (Test-Path -LiteralPath $directoryPath -PathType Container) {
+                    if ((Get-Item -LiteralPath $directoryPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'reparse-key-directory' }
+                    if ($resource.directory_existed -ne $true) {
+                        $otherChildren = @(Get-ChildItem -LiteralPath $directoryPath -Force | Where-Object { $_.Name -ne 'authorized_keys' })
+                        if ($otherChildren.Count -gt 0) { throw 'feature-directory-has-other-files' }
+                    }
+                } elseif (Test-Path -LiteralPath $directoryPath) { throw 'key-directory-path-is-not-a-directory' }
+            }
+        } catch { $blockers.Add("$resourceName-changed-or-unverifiable") }
+    }
+
+    $serviceResource = Get-RemoteAccessField $resources 'ssh_service'
+    if ((Get-RemoteAccessField $serviceResource 'managed') -eq $true) {
+        try {
+            $before = Get-RemoteAccessField $serviceResource 'before'
+            if ($null -eq $before -or $before.existed -notin @($true, $false)) { throw 'service-before-state-invalid' }
+            $services = @(Get-Service -ErrorAction Stop | Where-Object { [string]$_.Name -ieq 'sshd' })
+            if ($services.Count -gt 1) { throw 'duplicate-service-name' }
+            $service = if ($services.Count -eq 1) { $services[0] } else { $null }
+            if ($before.existed -eq $true) {
+                if (-not $service -or $before.start_type -notin @('Auto', 'Manual', 'Disabled') -or $before.status -notin @('Running', 'Stopped')) { throw 'service-before-state-invalid' }
+            }
+        } catch { $blockers.Add('ssh-service-state-unverifiable') }
+    }
+
+    $capabilityResource = Get-RemoteAccessField $resources 'ssh_capability'
+    if ((Test-RemoteAccessResourceOwned -Manifest $Manifest -Name 'ssh_capability') -and $capabilityResource.was_installed -ne $true) {
+        try { [void](Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop) }
+        catch { $blockers.Add('ssh-capability-state-unverifiable') }
+    }
+
+    return [pscustomobject]@{ ready = ($blockers.Count -eq 0); blockers = @($blockers.ToArray()) }
+}
+
 $stateRoot = Join-Path $env:ProgramData 'AI-Stack\RemoteAccess'
 $manifestPath = Join-Path $stateRoot 'ssh-manifest.json'
 $manifest = $null
@@ -131,11 +289,13 @@ try {
 }
 
 $rollbackPlan = Get-RemoteAccessRollbackPlan -Manifest $manifest -Component $Component
+$rollbackPreflight = if ($manifest) { Get-RemoteSshRollbackPreflight -Manifest $manifest } else { [pscustomobject]@{ ready = $false; blockers = @('no-feature-manifest') } }
 $actions = @($rollbackPlan.managed_resources)
-$rollbackReady = ($rollbackPlan.ready -and $manifest.state -ne 'rolled_back') -or ($manifest.state -eq 'rolling_back')
+$rollbackReady = ($rollbackPlan.ready -and $rollbackPreflight.ready -and $manifest.state -ne 'rolled_back') -or ($manifest.state -eq 'rolling_back' -and $rollbackPreflight.ready)
 $planBlockers = @()
 if ($manifest -and $manifest.state -eq 'rolled_back') { $planBlockers += 'already-rolled-back' }
 elseif (-not $manifest) { $planBlockers += 'no-feature-manifest' }
+if ($manifest -and -not $rollbackPreflight.ready) { $planBlockers += @($rollbackPreflight.blockers) }
 [pscustomobject]@{
     component = $Component.ToLowerInvariant()
     ready = $rollbackReady
@@ -147,9 +307,13 @@ elseif (-not $manifest) { $planBlockers += 'no-feature-manifest' }
 
 if (-not $Apply) { return }
 if (-not $manifest -or (-not $rollbackPlan.ready -and $manifest.state -ne 'rolling_back') -or $manifest.state -eq 'rolled_back') { Write-Error 'No active feature-managed SSH resources are available to roll back.'; exit 1 }
+if (-not $rollbackPreflight.ready) { Write-Error 'SSH rollback preflight found a changed or unverifiable resource. No service or host state was changed.'; exit 1 }
 if (-not $ConfirmManagementPath) { Write-Error 'SSH rollback requires -ConfirmManagementPath after local console or alternate access has been verified.'; exit 1 }
 if (-not (Test-CurrentProcessAdministrator)) { Write-Error 'Run rollback from an elevated PowerShell session.'; exit 1 }
 if (-not $PSCmdlet.ShouldProcess('feature-managed Windows SSH resources', 'Restore protected before-state')) { return }
+
+$rollbackPreflight = Get-RemoteSshRollbackPreflight -Manifest $manifest
+if (-not $rollbackPreflight.ready) { Write-Error 'SSH rollback preflight changed or became unverifiable before apply. No service or host state was changed.'; exit 1 }
 
 try {
     $manifest.state = 'rolling_back'
@@ -158,7 +322,9 @@ try {
     $serviceResource = Get-RemoteAccessField $resources 'ssh_service'
     $serviceBefore = Get-RemoteAccessField $serviceResource 'before'
 
-    $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
+    $services = @(Get-Service -ErrorAction Stop | Where-Object { [string]$_.Name -ieq 'sshd' })
+    if ($services.Count -gt 1) { throw 'Multiple services use the sshd service name.' }
+    $service = if ($services.Count -eq 1) { $services[0] } else { $null }
     if ($service -and [string]$service.Status -eq 'Running' -and ($serviceBefore.status -ne 'Running' -or -not $serviceBefore.existed)) {
         Stop-Service -Name sshd -ErrorAction Stop
     }
@@ -167,10 +333,14 @@ try {
         $resourceName = if ($ruleName.EndsWith('-v4')) { 'ssh_firewall_v4' } else { 'ssh_firewall_v6' }
         if (Test-RemoteAccessResourceOwned -Manifest $manifest -Name $resourceName) {
             $resource = Get-RemoteAccessField $resources $resourceName
-            $rule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
-            if ($rule) {
-                $actual = Get-RemoteAccessFirewallRuleSnapshot -Rule $rule
-                if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actual -Expected $resource.expected)) { throw 'A feature-managed firewall rule has changed since setup; refusing to remove it.' }
+            $rules = @(Get-RemoteAccessFirewallRulesByName -Name $ruleName -PolicyStore PersistentStore)
+            $activeRules = @(Get-RemoteAccessFirewallRulesByName -Name $ruleName -PolicyStore ActiveStore)
+            if ($rules.Count -gt 1) { throw 'Multiple local firewall rules use a feature-owned SSH name.' }
+            if ($rules.Count -eq 1 -or $activeRules.Count -gt 0) {
+                if ($rules.Count -ne 1 -or $activeRules.Count -ne 1) { throw 'A feature-managed firewall rule is not uniquely active; refusing to remove it.' }
+                $actual = Get-RemoteAccessFirewallRuleSnapshot -Rule $rules[0]
+                $activeActual = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeRules[0]
+                if (-not (Test-RemoteAccessFirewallRuleSnapshot -Actual $actual -Expected $resource.expected) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeActual -Expected $resource.expected)) { throw 'A feature-managed firewall rule has changed since setup; refusing to remove it.' }
                 Remove-NetFirewallRule -Name $ruleName -ErrorAction Stop
             }
             $resource.managed = $false
@@ -180,9 +350,12 @@ try {
 
     $defaultRuleResource = Get-RemoteAccessField $resources 'default_openssh_rule'
     if (Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'default_openssh_rule') {
-        $defaultRule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+        $defaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore PersistentStore)
+        if ($defaultRules.Count -gt 1) { throw 'Multiple local firewall rules use the OpenSSH default rule name.' }
+        $defaultRule = if ($defaultRules.Count -eq 1) { $defaultRules[0] } else { $null }
+        $activeDefaultRules = @(Get-RemoteAccessFirewallRulesByName -Name 'OpenSSH-Server-In-TCP' -PolicyStore ActiveStore)
         if ($defaultRuleResource.existed_before -eq $true) {
-            if (-not $defaultRule) { throw 'A pre-existing default SSH firewall rule is missing; refusing to recreate it from an incomplete snapshot.' }
+            if (-not $defaultRule -or $activeDefaultRules.Count -ne 1) { throw 'A pre-existing default SSH firewall rule is missing or inactive; refusing to recreate it from an incomplete snapshot.' }
             $portFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
             $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
             $serviceFilter = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
@@ -203,6 +376,7 @@ try {
                 Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled ([string]$defaultRuleResource.enabled_before -eq 'True') -ErrorAction Stop | Out-Null
             } else { throw 'The saved default SSH firewall state is incomplete.' }
         } elseif ($defaultRule) {
+            if ($activeDefaultRules.Count -ne 1) { throw 'The generated default SSH firewall rule is not uniquely active; refusing to remove it.' }
             $portFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
             $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
             $serviceFilter = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $defaultRule -ErrorAction Stop
@@ -218,7 +392,7 @@ try {
                 program = [string]$appFilter.Program
                 service = [string]$serviceFilter.Service
             }
-            if ([string]$defaultRule.Enabled -ne 'False' -or -not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled)) { throw 'The default firewall rule changed after setup; refusing to remove it.' }
+            if ([string]$defaultRule.Enabled -ne 'False' -or -not (Test-RemoteSshDefaultFirewallRule -Rule $shape -AllowDisabled -AllowGeneratedUnbound)) { throw 'The default firewall rule changed after setup; refusing to remove it.' }
             Remove-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop
         }
         $defaultRuleResource.managed = $false
@@ -258,6 +432,24 @@ try {
         $capability = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
         if ([string]$capability.State -eq 'Installed') { Remove-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null }
         $capabilityResource.managed = $false
+        Save-RollbackManifest
+    }
+
+    $guardResource = Get-RemoteAccessField $resources 'ssh_install_guard'
+    if (Test-RemoteAccessResourceOwned -Manifest $manifest -Name 'ssh_install_guard') {
+        $port22Firewall = Get-RemoteAccessFirewallState -Port 22 -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+        if ($port22Firewall -ne 'blocked') { throw 'Inbound TCP 22 still has an allow rule or its scope is unknown; retaining the temporary guard for review.' }
+        $guardName = [string]$guardResource.name
+        $guards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore PersistentStore)
+        $activeGuards = @(Get-RemoteAccessFirewallRulesByName -Name $guardName -PolicyStore ActiveStore)
+        if ($guards.Count -gt 0 -or $activeGuards.Count -gt 0) {
+            if ($guards.Count -ne 1 -or $activeGuards.Count -ne 1) { throw 'The temporary TCP 22 guard changed after rollback preflight; refusing to remove it.' }
+            $guardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $guards[0]
+            $activeGuardSnapshot = Get-RemoteAccessFirewallRuleSnapshot -Rule $activeGuards[0]
+            if (-not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $guardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $guardSnapshot -Expected $guardResource.expected) -or -not (Test-RemoteSshInstallGuardRule -Name $guardName -Rule $activeGuardSnapshot) -or -not (Test-RemoteAccessFirewallRuleSnapshot -Actual $activeGuardSnapshot -Expected $guardResource.expected)) { throw 'The temporary TCP 22 guard changed after rollback preflight; refusing to remove it.' }
+            Remove-NetFirewallRule -Name $guardName -ErrorAction Stop
+        }
+        $guardResource.managed = $false
         Save-RollbackManifest
     }
 
