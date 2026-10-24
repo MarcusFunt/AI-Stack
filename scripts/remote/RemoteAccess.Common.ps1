@@ -16,6 +16,66 @@ function Get-RemoteAccessField {
     return $null
 }
 
+function Get-RemoteAccessSshStatusPort {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Manifest)
+
+    if ($null -eq $Manifest) { return 22 }
+    if ((Get-RemoteAccessField $Manifest 'schema_version') -ne 1 -or (Get-RemoteAccessField $Manifest 'component') -ne 'ssh') { return $null }
+    $state = [string](Get-RemoteAccessField $Manifest 'state')
+    if ($state -eq 'rolled_back') { return 22 }
+    if ($state -ne 'active') { return $null }
+    try {
+        $port = [int](Get-RemoteAccessField $Manifest 'port')
+        if ($port -ge 1 -and $port -le 65535) { return $port }
+    } catch { }
+    return $null
+}
+
+function Test-RemoteSshManifestScope {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Manifest,
+        [Parameter(Mandatory = $true)][string]$AccountSid,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string[]]$ClientAddresses,
+        [Parameter(Mandatory = $true)][string[]]$ListenerAddresses,
+        [Parameter(Mandatory = $true)][string[]]$InterfaceAliases
+    )
+
+    if ($null -eq $Manifest) { return $true }
+    if ((Get-RemoteAccessField $Manifest 'schema_version') -ne 1 -or (Get-RemoteAccessField $Manifest 'component') -ne 'ssh') { return $false }
+    if ((Get-RemoteAccessField $Manifest 'state') -notin @('applying', 'active')) { return $false }
+    $account = Get-RemoteAccessField $Manifest 'account'
+    if ([string](Get-RemoteAccessField $account 'sid') -ne $AccountSid -or [int](Get-RemoteAccessField $Manifest 'port') -ne $Port) { return $false }
+
+    foreach ($pair in @(
+        @{ saved = (Get-RemoteAccessField $Manifest 'client_addresses'); requested = $ClientAddresses; address = $true },
+        @{ saved = (Get-RemoteAccessField $Manifest 'listener_addresses'); requested = $ListenerAddresses; address = $true },
+        @{ saved = (Get-RemoteAccessField $Manifest 'listener_interfaces'); requested = $InterfaceAliases; address = $false }
+    )) {
+        $normalizer = if ($pair.address) { { param($value) ConvertTo-RemoteAccessAddressKey ([string]$value) } } else { { param($value) [string]$value } }
+        $saved = @($pair.saved | ForEach-Object { & $normalizer $_ } | Sort-Object -Unique)
+        $requested = @($pair.requested | ForEach-Object { & $normalizer $_ } | Sort-Object -Unique)
+        if ($saved.Count -ne $requested.Count) { return $false }
+        for ($index = 0; $index -lt $saved.Count; $index++) {
+            if ($saved[$index] -ine $requested[$index]) { return $false }
+        }
+    }
+    return $true
+}
+
+function Get-RemoteAccessSshPort {
+    $path = Join-Path $env:ProgramData 'AI-Stack\RemoteAccess\ssh-manifest.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 22 }
+    try {
+        $manifest = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return Get-RemoteAccessSshStatusPort -Manifest $manifest
+    } catch {
+        return $null
+    }
+}
+
 function ConvertTo-RemoteAccessEnum {
     param(
         [AllowNull()][object]$Value,
@@ -84,12 +144,190 @@ function Test-RemoteAccessTailnetAddress {
     return $false
 }
 
+function Test-RemoteSshClientAddress {
+    [CmdletBinding()]
+    param([AllowNull()][string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address) -or $Address.Contains('/')) { return $false }
+    try { [void][Net.IPAddress]::Parse($Address.Trim()) } catch { return $false }
+    return Test-RemoteAccessTailnetAddress $Address
+}
+
+function ConvertFrom-RemoteOpenSshPublicKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$KeyText)
+
+    $raw = $KeyText.Trim()
+    if ($raw.Length -gt 16384 -or $raw.Contains("`r") -or $raw.Contains("`n")) { throw 'The public key must be one bounded OpenSSH key line.' }
+    if ($raw -notmatch '^(?<type>ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)\s+(?<data>[A-Za-z0-9+/]+={0,2})(?:\s+.*)?$') {
+        throw 'The public key type or encoding is not supported.'
+    }
+    try { $bytes = [Convert]::FromBase64String($Matches.data) } catch { throw 'The public key payload is invalid.' }
+    if ($bytes.Length -lt 5) { throw 'The public key payload is incomplete.' }
+    $typeLength = ([int]$bytes[0] * 16777216) + ([int]$bytes[1] * 65536) + ([int]$bytes[2] * 256) + [int]$bytes[3]
+    if ($typeLength -lt 1 -or $typeLength -gt 128 -or $typeLength -gt ($bytes.Length - 4)) { throw 'The public key payload has an invalid type field.' }
+    $blobType = [Text.Encoding]::ASCII.GetString($bytes, 4, $typeLength)
+    if ($blobType -cne $Matches.type) { throw 'The public key line type does not match its encoded key payload.' }
+    return [pscustomobject]@{ type = $Matches.type; data = $Matches.data; line = ($Matches.type + ' ' + $Matches.data) }
+}
+
+function New-RemoteSshManagedConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$WindowsAccount,
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string[]]$ListenAddresses
+    )
+
+    if ($WindowsAccount -notmatch '^[A-Za-z0-9_.-]+(?:\\[A-Za-z0-9_.-]+)?$') {
+        throw 'The Windows account must be a simple local or domain account name.'
+    }
+    if (@($ListenAddresses | Where-Object { -not (Test-RemoteAccessTailnetAddress $_) }).Count -gt 0) {
+        throw 'The SSH listener addresses must be verified Tailscale addresses.'
+    }
+    $listenLines = @($ListenAddresses | Sort-Object -Unique | ForEach-Object { 'ListenAddress ' + $_ }) -join "`r`n"
+
+    return @"
+# Managed by AI-Stack remote-access setup. Local edits are detected and preserved for review.
+Port $Port
+AddressFamily any
+$listenLines
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+AllowUsers $WindowsAccount
+AuthorizedKeysFile .ssh/authorized_keys
+Subsystem sftp sftp-server.exe
+"@
+}
+
+function Test-RemoteSshDefaultFirewallRule {
+    [CmdletBinding()]
+    param([AllowNull()][object]$Rule, [switch]$AllowDisabled)
+
+    if ($null -eq $Rule) { return $false }
+    $name = [string](Get-RemoteAccessField $Rule 'name')
+    $enabled = Get-RemoteAccessField $Rule 'enabled'
+    $direction = [string](Get-RemoteAccessField $Rule 'direction')
+    $action = [string](Get-RemoteAccessField $Rule 'action')
+    $protocol = [string](Get-RemoteAccessField $Rule 'protocol')
+    $localPort = [string](Get-RemoteAccessField $Rule 'local_port')
+    $service = [string](Get-RemoteAccessField $Rule 'service')
+    $remoteAddresses = @(Get-RemoteAccessField $Rule 'remote_addresses' | ForEach-Object { [string]$_ })
+    $program = [Environment]::ExpandEnvironmentVariables([string](Get-RemoteAccessField $Rule 'program'))
+
+    if ($name -ne 'OpenSSH-Server-In-TCP') { return $false }
+    if ($enabled -ne $true -and -not ($AllowDisabled -and $enabled -eq $false)) { return $false }
+    if ($direction -notin @('Inbound', '1') -or $action -notin @('Allow', '1')) { return $false }
+    if ($protocol -notin @('TCP', '6') -or $localPort -ne '22' -or $service -notin @('sshd', 'Any', '*', '')) { return $false }
+    if ($remoteAddresses.Count -ne 1 -or $remoteAddresses[0] -notin @('Any', '*')) { return $false }
+    $expectedProgram = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'
+    try {
+        return ([IO.Path]::GetFullPath($program).TrimEnd('\') -ieq [IO.Path]::GetFullPath($expectedProgram).TrimEnd('\'))
+    } catch {
+        return $false
+    }
+}
+
+function Test-RemoteAccessFirewallRuleSnapshot {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Actual,
+        [Parameter(Mandatory = $true)][object]$Expected
+    )
+
+    foreach ($name in @('enabled', 'direction', 'action', 'profile', 'protocol', 'local_port')) {
+        if ([string](Get-RemoteAccessField $Actual $name) -ine [string](Get-RemoteAccessField $Expected $name)) { return $false }
+    }
+    foreach ($name in @('remote_addresses', 'local_addresses', 'interface_aliases')) {
+        $normalizer = { param($value) [string]$value }
+        if ($name -ne 'interface_aliases') { $normalizer = { param($value) ConvertTo-RemoteAccessAddressKey ([string]$value) } }
+        $actualSet = @((Get-RemoteAccessField $Actual $name) | ForEach-Object { & $normalizer $_ } | Sort-Object -Unique)
+        $expectedSet = @((Get-RemoteAccessField $Expected $name) | ForEach-Object { & $normalizer $_ } | Sort-Object -Unique)
+        if ($actualSet.Count -ne $expectedSet.Count) { return $false }
+        for ($index = 0; $index -lt $actualSet.Count; $index++) {
+            if ($actualSet[$index] -ine $expectedSet[$index]) { return $false }
+        }
+    }
+    $actualProgram = [Environment]::ExpandEnvironmentVariables([string](Get-RemoteAccessField $Actual 'program'))
+    $expectedProgram = [Environment]::ExpandEnvironmentVariables([string](Get-RemoteAccessField $Expected 'program'))
+    try {
+        return ([IO.Path]::GetFullPath($actualProgram).TrimEnd('\') -ieq [IO.Path]::GetFullPath($expectedProgram).TrimEnd('\'))
+    } catch {
+        return $false
+    }
+}
+
+function ConvertTo-RemoteAccessAddressKey {
+    param([AllowNull()][string]$Address)
+    if ([string]::IsNullOrWhiteSpace($Address) -or $Address -in @('Any', '*')) { return [string]$Address }
+    $parts = $Address.Trim().Split('/')
+    try {
+        $ip = [Net.IPAddress]::Parse($parts[0])
+        if ($parts.Count -eq 1) { return $ip.ToString() }
+        $prefix = [int]$parts[1]
+        $fullLength = if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+        if ($prefix -eq $fullLength) { return $ip.ToString() }
+        return ($ip.ToString() + '/' + $prefix.ToString([Globalization.CultureInfo]::InvariantCulture))
+    } catch {
+        return $Address.Trim()
+    }
+}
+
+function Get-RemoteAccessFirewallRuleSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Rule)
+
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $app = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    $interfaces = Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop
+    return @{
+        enabled = [string]$Rule.Enabled
+        direction = [string]$Rule.Direction
+        action = [string]$Rule.Action
+        profile = [string]$Rule.Profile
+        protocol = [string]$port.Protocol
+        local_port = [string]$port.LocalPort
+        remote_addresses = @($address.RemoteAddress | ForEach-Object { [string]$_ })
+        local_addresses = @($address.LocalAddress | ForEach-Object { [string]$_ })
+        interface_aliases = @($interfaces.InterfaceAlias | ForEach-Object { [string]$_ })
+        program = [string]$app.Program
+    }
+}
+
+function Test-RemoteAccessSshListener {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object[]]$Listeners,
+        [AllowNull()][int[]]$SshdProcessIds,
+        [AllowNull()][string[]]$TailscaleAddresses
+    )
+
+    if (-not $Listeners -or -not $SshdProcessIds -or -not $TailscaleAddresses) { return $false }
+    $sshPidSet = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($processId in $SshdProcessIds) { [void]$sshPidSet.Add([int]$processId) }
+    $tailnetAddressSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($address in $TailscaleAddresses) {
+        if (Test-RemoteAccessTailnetAddress $address) { [void]$tailnetAddressSet.Add((ConvertTo-RemoteAccessAddressKey $address)) }
+    }
+    if ($tailnetAddressSet.Count -eq 0) { return $false }
+    foreach ($listener in $Listeners) {
+        $processId = Get-RemoteAccessField $listener 'owning_process'
+        $localAddress = [string](Get-RemoteAccessField $listener 'local_address')
+        if ($null -eq $processId -or -not $sshPidSet.Contains([int]$processId)) { return $false }
+        if (-not $tailnetAddressSet.Contains((ConvertTo-RemoteAccessAddressKey $localAddress))) { return $false }
+    }
+    return $true
+}
+
 function ConvertTo-RemoteAccessFirewallState {
     [CmdletBinding()]
     param(
         [AllowNull()][object[]]$Rules,
         [AllowNull()][object]$DefaultInboundAction,
-        [AllowNull()][string[]]$ListenerProgramPaths
+        [AllowNull()][string[]]$ListenerProgramPaths,
+        [ValidateRange(1, 65535)][int]$Port = 22
     )
 
     if ([string]$DefaultInboundAction -eq 'Allow' -or [string]$DefaultInboundAction -eq '6') { return 'broad' }
@@ -105,8 +343,16 @@ function ConvertTo-RemoteAccessFirewallState {
         $program = [string](Get-RemoteAccessField $rule 'program')
         $service = [string](Get-RemoteAccessField $rule 'service')
 
-        $isPort22 = $localPorts -contains '22'
+        $isPort22 = $localPorts -contains [string]$Port
         $isAnyPort = $localPorts -contains 'Any'
+        if (-not $isPort22 -and -not $isAnyPort) {
+            foreach ($localPort in $localPorts) {
+                if ($localPort -match '^(\d+)-(\d+)$' -and [int]$Matches[1] -le $Port -and [int]$Matches[2] -ge $Port) {
+                    $isPort22 = $true
+                    break
+                }
+            }
+        }
         if (-not $isPort22 -and -not $isAnyPort) { continue }
 
         $programIsAny = [string]::IsNullOrWhiteSpace($program) -or $program -eq 'Any'
@@ -256,6 +502,12 @@ function ConvertTo-RemoteAccessDesktopSessionState {
 }
 
 function Get-RemoteAccessFirewallState {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 65535)][int]$Port = 22,
+        [AllowNull()][string[]]$ExpectedProgramPaths = @()
+    )
+
     try {
         $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | Where-Object { $_.Enabled })
         if (-not $profiles) { return 'unknown' }
@@ -264,8 +516,11 @@ function Get-RemoteAccessFirewallState {
         if (@($defaultInboundActions | Where-Object { $_ -ne 'Block' }).Count -gt 0) { return 'unknown' }
 
         $policy = New-Object -ComObject HNetCfg.FwPolicy2 -ErrorAction Stop
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 22 -ErrorAction SilentlyContinue)
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
         $listenerPaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($expectedPath in $ExpectedProgramPaths) {
+            if (-not [string]::IsNullOrWhiteSpace($expectedPath)) { $listenerPaths.Add($expectedPath) }
+        }
         foreach ($listener in $listeners) {
             try {
                 $process = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
@@ -281,8 +536,8 @@ function Get-RemoteAccessFirewallState {
             if ($localPorts.Count -eq 0) { $localPorts = @('Any') }
             $portMatches = $false
             foreach ($localPort in $localPorts) {
-                if ($localPort -eq 'Any' -or $localPort -eq '22') { $portMatches = $true; break }
-                if ($localPort -match '^(\d+)-(\d+)$' -and [int]$Matches[1] -le 22 -and [int]$Matches[2] -ge 22) { $portMatches = $true; break }
+                if ($localPort -eq 'Any' -or $localPort -eq [string]$Port) { $portMatches = $true; break }
+                if ($localPort -match '^(\d+)-(\d+)$' -and [int]$Matches[1] -le $Port -and [int]$Matches[2] -ge $Port) { $portMatches = $true; break }
             }
             if (-not $portMatches) { continue }
 
@@ -315,9 +570,128 @@ function Get-RemoteAccessFirewallState {
                 interface_aliases = $interfaces
             })
         }
-        return ConvertTo-RemoteAccessFirewallState -Rules $normalizedRules.ToArray() -DefaultInboundAction 'Block' -ListenerProgramPaths $listenerPaths.ToArray()
+        return ConvertTo-RemoteAccessFirewallState -Rules $normalizedRules.ToArray() -DefaultInboundAction 'Block' -ListenerProgramPaths $listenerPaths.ToArray() -Port $Port
     } catch {
         return 'unknown'
+    }
+}
+
+function Get-RemoteSshInstallPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Preflight)
+
+    $blockers = [System.Collections.Generic.List[string]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
+    $actions = [System.Collections.Generic.List[string]]::new()
+
+    if ((Get-RemoteAccessField $Preflight 'account_is_standard') -ne $true) { $blockers.Add('ssh-account-not-approved') }
+    if ((Get-RemoteAccessField $Preflight 'public_key_valid') -ne $true) { $blockers.Add('public-key-invalid-or-missing') }
+    if ((Get-RemoteAccessField $Preflight 'manifest_scope_matches') -eq $false) { $blockers.Add('existing-ssh-manifest-scope-changed') }
+
+    $addresses = @(Get-RemoteAccessField $Preflight 'trusted_client_addresses' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($addresses.Count -eq 0) {
+        $blockers.Add('trusted-client-address-required')
+    } else {
+        foreach ($address in $addresses) {
+            if (-not (Test-RemoteSshClientAddress ([string]$address))) {
+                $blockers.Add('trusted-client-address-invalid')
+                break
+            }
+        }
+    }
+
+    $port = 22
+    try { $port = [int](Get-RemoteAccessField $Preflight 'port') } catch { $blockers.Add('selected-port-invalid') }
+    if ($port -lt 1 -or $port -gt 65535) { $blockers.Add('selected-port-invalid') }
+    if ($port -ne 22 -and (Get-RemoteAccessField $Preflight 'alternate_port_approved') -ne $true) { $blockers.Add('alternate-port-approval-required') }
+    if ((Get-RemoteAccessField $Preflight 'port_in_use') -eq $true) { $blockers.Add('selected-port-in-use') }
+    if ((Get-RemoteAccessField $Preflight 'port_in_use') -ne $true -and (Get-RemoteAccessField $Preflight 'port_in_use') -ne $false) { $blockers.Add('selected-port-state-unknown') }
+    if ((Get-RemoteAccessField $Preflight 'custom_sshd_config') -eq $true) { $blockers.Add('existing-sshd-config-conflict') }
+
+    $defaultRuleState = ConvertTo-RemoteAccessEnum (Get-RemoteAccessField $Preflight 'default_openssh_rule_state') @('absent', 'preexisting-broad', 'feature-managed-broad', 'scoped')
+    if ($defaultRuleState -eq 'preexisting-broad') { $blockers.Add('preexisting-broad-openssh-rule') }
+    if ($defaultRuleState -eq 'unknown') { $blockers.Add('default-openssh-rule-state-unknown') }
+
+    if ((Get-RemoteAccessField $Preflight 'authorized_key_exists') -eq $true) {
+        $actions.Add('keep-authorized-key')
+    } else {
+        $actions.Add('add-authorized-key')
+    }
+
+    $serviceState = ConvertTo-RemoteAccessEnum (Get-RemoteAccessField $Preflight 'service_state') @('running', 'stopped', 'missing', 'unknown')
+    if ($serviceState -eq 'running') {
+        $actions.Add('keep-running-service')
+    } elseif ($serviceState -eq 'missing' -or $serviceState -eq 'stopped') {
+        $actions.Add('configure-ssh-service')
+    } else {
+        $blockers.Add('ssh-service-state-unknown')
+    }
+
+    $firewallState = ConvertTo-RemoteAccessEnum (Get-RemoteAccessField $Preflight 'firewall_state') @('tailnet-only', 'broad', 'unknown')
+    $firewallDefaultAllow = Get-RemoteAccessField $Preflight 'firewall_default_allow'
+    if ($firewallDefaultAllow -eq $true) { $blockers.Add('inbound-firewall-default-allows') }
+    elseif ($firewallDefaultAllow -ne $false) { $blockers.Add('inbound-firewall-default-state-unknown') }
+    $finalize = (Get-RemoteAccessField $Preflight 'finalize_firewall') -eq $true
+    if ($firewallState -eq 'broad') {
+        if (-not $finalize) {
+            $warnings.Add('broad-firewall-rule-preserved-pending-verification')
+            if ($defaultRuleState -ne 'feature-managed-broad') { $blockers.Add('unowned-broad-firewall-rule') }
+        } elseif ((Get-RemoteAccessField $Preflight 'second_device_verified') -ne $true) {
+            $blockers.Add('second-device-verification-required')
+        } elseif ($defaultRuleState -ne 'feature-managed-broad' -or (Get-RemoteAccessField $Preflight 'broad_rule_manifested') -ne $true) {
+            $blockers.Add('broad-rule-not-feature-manifested')
+        } else {
+            $actions.Add('disable-broad-default-rule')
+        }
+    } elseif ($firewallState -eq 'unknown') {
+        if ($finalize) { $blockers.Add('firewall-state-unknown') }
+        else { $actions.Add('create-scoped-firewall-rule') }
+    } else {
+        $actions.Add('keep-scoped-firewall-rule')
+    }
+
+    return [pscustomobject]@{
+        ready = ($blockers.Count -eq 0)
+        port = $port
+        blockers = @($blockers.ToArray())
+        warnings = @($warnings.ToArray())
+        actions = @($actions.ToArray())
+    }
+}
+
+function Test-RemoteAccessResourceOwned {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Manifest,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $resources = Get-RemoteAccessField $Manifest 'resources'
+    if ($null -eq $resources) {
+        $components = Get-RemoteAccessField $Manifest 'components'
+        $ssh = Get-RemoteAccessField $components 'ssh'
+        $resources = Get-RemoteAccessField $ssh 'resources'
+    }
+    $resource = Get-RemoteAccessField $resources $Name
+    return (Get-RemoteAccessField $resource 'managed') -eq $true
+}
+
+function Get-RemoteAccessRollbackPlan {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Manifest,
+        [ValidateSet('Ssh')][string]$Component = 'Ssh'
+    )
+
+    $names = @('ssh_firewall_v4', 'ssh_firewall_v6', 'default_openssh_rule', 'authorized_keys', 'sshd_config', 'ssh_service', 'ssh_capability')
+    $managed = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $names) {
+        if (Test-RemoteAccessResourceOwned -Manifest $Manifest -Name $name) { $managed.Add($name) }
+    }
+    return [pscustomobject]@{
+        component = $Component.ToLowerInvariant()
+        ready = ($managed.Count -gt 0)
+        managed_resources = @($managed.ToArray())
     }
 }
 
@@ -386,11 +760,12 @@ function Get-RemoteAccessInventory {
         last_state_change_utc = $null
     }
 
+    $tailscaleAdapters = @()
     try {
-        $adapter = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
+        $tailscaleAdapters = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
             ($_.Name -match '(?i)tailscale') -or ($_.InterfaceDescription -match '(?i)tailscale')
         } | Where-Object Status -eq 'Up')
-        $tailnet.interface_present = $adapter.Count -gt 0
+        $tailnet.interface_present = $tailscaleAdapters.Count -gt 0
     } catch { }
 
     $tailscalePath = Get-RemoteAccessTailscalePath
@@ -419,11 +794,42 @@ function Get-RemoteAccessInventory {
     } catch {
         if (Get-Command Get-Service -ErrorAction SilentlyContinue) { $sshService = 'missing' }
     }
+    $sshPort = Get-RemoteAccessSshPort
     $listenerCheck = 'unknown'
-    try {
-        $null = @(Get-NetTCPConnection -State Listen -LocalPort 22 -ErrorAction Stop)
-        $listenerCheck = $now
-    } catch { }
+    $sshListenerState = 'unknown'
+    if ($null -ne $sshPort) {
+        try {
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$sshPort) -ErrorAction Stop)
+            $listenerCheck = $now
+            $normalizedListeners = @()
+            $sshdProcessIds = New-Object 'System.Collections.Generic.List[int]'
+            foreach ($listener in $listeners) {
+                $normalizedListeners += @{ local_address = [string]$listener.LocalAddress; owning_process = [int]$listener.OwningProcess }
+                try {
+                    $process = Get-Process -Id ([int]$listener.OwningProcess) -ErrorAction Stop
+                    if ($process.ProcessName -ieq 'sshd') { $sshdProcessIds.Add([int]$listener.OwningProcess) }
+                } catch { }
+            }
+            $tailnetLocalAddresses = @()
+            foreach ($adapter in $tailscaleAdapters) {
+                try {
+                    $tailnetLocalAddresses += @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -ErrorAction Stop | ForEach-Object { [string]$_.IPAddress } | Where-Object { Test-RemoteAccessTailnetAddress $_ })
+                } catch { }
+            }
+            if (Test-RemoteAccessSshListener -Listeners $normalizedListeners -SshdProcessIds $sshdProcessIds.ToArray() -TailscaleAddresses $tailnetLocalAddresses) {
+                $sshListenerState = 'running'
+            } else {
+                $sshListenerState = 'stopped'
+            }
+        } catch { }
+    }
+    if ($sshService -eq 'running' -and $sshListenerState -ne 'running') {
+        if ($sshListenerState -eq 'stopped') { $sshService = 'stopped' } else { $sshService = 'unknown' }
+    }
+    $sshFirewall = 'unknown'
+    if ($null -ne $sshPort) {
+        $sshFirewall = Get-RemoteAccessFirewallState -Port ([int]$sshPort) -ExpectedProgramPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\sshd.exe'))
+    }
 
     $desktopTask = 'absent'
     try {
@@ -460,7 +866,7 @@ function Get-RemoteAccessInventory {
         tailnet = $tailnet
         ssh = @{
             service = $sshService
-            firewall = Get-RemoteAccessFirewallState
+            firewall = $sshFirewall
             last_listener_check_utc = $listenerCheck
         }
         desktop = @{

@@ -1,6 +1,6 @@
 # Remote Recovery Runbook
 
-**Status:** Preparation only. Remote SSH, `rdc`, and a human fallback have not been configured or accepted on a second device.
+**Status:** SSH provisioning code is implemented, but no host setting has been applied. Remote SSH, `rdc`, and a human fallback have not been accepted on a second device.
 
 ## Before using this runbook
 
@@ -9,7 +9,42 @@
 - Do not use Tailscale Funnel, router forwarding, or public MCP for SSH or desktop access.
 - The current Windows TCP 22 listener belongs to `wslrelay`; Windows `sshd` is absent. Do not stop WSL or change that listener. A safe port decision is still required.
 - The current signed-in account belongs to Administrators and `docker-users`; it is not approved for agent SSH. A separate least-privilege account is unresolved.
+- The installer only plans by default. It requires a standard local account, a public-key file, exact verified Tailscale client IPs, and an explicitly approved available port. It refuses TCP 22 while `wslrelay` owns it.
+- `sshd` binds only to the host's current Tailscale IP addresses. Its firewall rules use those local addresses, the Tailscale interface, and the exact approved client IPs. Password authentication is disabled before the service starts.
+- If capability installation creates Windows' broad `OpenSSH-Server-In-TCP` rule, the installer disables that newly created rule before starting `sshd`. A pre-existing broad rule blocks setup and is preserved.
 - The stack was stopped during the baseline and supervisor status was unavailable. If GPU/job state is unknown, do not start, stop, rebuild, or restart services.
+
+## SSH setup (after operator review)
+
+Choose a standard local account and test client, verify the client's current Tailscale IPv4/IPv6 address, select a free port, and confirm router/Tailscale policy does not expose it publicly. Keep the client public key in a protected local file. Use the same approved values for planning and apply; values are not written to console output or committed.
+Replace every angle-bracket placeholder below with the approved value before running the command. Include one exact IP per authorized client address; add both address families only when each was verified.
+
+```powershell
+# Read-only plan; port 22 is expected to be rejected while wslrelay owns it.
+.\scripts\remote\Install-SshTailnet.ps1 `
+  -WindowsAccount '<approved-local-account>' `
+  -PublicKeyPath '<protected-client-public-key-file>' `
+  -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
+  -Port <operator-approved-free-port> -ConfirmAlternatePort
+
+# Only after reviewing the plan and confirming the client/account/port.
+.\scripts\remote\Install-SshTailnet.ps1 `
+  -WindowsAccount '<approved-local-account>' `
+  -PublicKeyPath '<protected-client-public-key-file>' `
+  -TrustedClientAddresses @('<verified-tailnet-client-ip>') `
+  -Port <operator-approved-free-port> -ConfirmAlternatePort -Apply
+```
+
+Run the second-device acceptance checks before relying on SSH: correct key succeeds, wrong key fails, an unapproved peer is denied, and direct internet access is closed. If a feature-owned broad default rule must be finalized, use `-FinalizeFirewall -ConfirmSecondDeviceKeyLogin` only after the successful key login. The confirmation switch records an operator attestation; it is not an automated test result.
+
+The feature manifest and protected before-state are stored under `%ProgramData%\AI-Stack\RemoteAccess`. Inspect the rollback plan first. Apply rollback only from local console or after a separate management path has been verified:
+
+```powershell
+.\scripts\remote\Rollback-RemoteAccess.ps1 -Component Ssh
+.\scripts\remote\Rollback-RemoteAccess.ps1 -Component Ssh -Apply -ConfirmManagementPath
+```
+
+Rollback retains its protected snapshot and refuses paths/rules that are not marked feature-managed. It will not revoke client keys or alter Tailscale Serve, grants, unattended mode, router forwarding, or the WSL listener.
 
 ## Recovery state order
 

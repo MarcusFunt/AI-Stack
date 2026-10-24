@@ -34,7 +34,7 @@ This is a read-only snapshot. It is not proof of off-site reachability or a comp
 | Windows | Windows 11 Home, build 26200. | Confirm after the eventual host install/reboot. |
 | Tailscale | Service running; local CLI reports the host online. Unattended setting and node-key expiry were not established. | Verify in the supported Windows setting and tailnet admin view; do not change them automatically. |
 | Existing tailnet routes | Read-only CLI reports tailnet-only routes on external ports 8443–8449 and 10000. Ports 8446, 8448, and 8449 are present in the live configuration although not listed in the inventory's static route table. | Preserve every observed route, including routes not named in the proposal. Recheck before and after any later change. The CLI did not report a public Funnel route; router forwarding and tailnet grants remain unverified. |
-| OpenSSH / port 22 | Windows `sshd` service is absent. TCP 22 is already bound by `wslrelay`. | Do not install onto or displace the existing listener. Resolve a safe port strategy before applying SSH changes. |
+| OpenSSH / port 22 | Windows `sshd` service is absent. TCP 22 is already bound by `wslrelay`. | Do not install onto or displace the existing listener. The installer rejects port 22 while occupied; an alternate port still needs operator approval and live preflight. |
 | Other remote-control ports | No listener was found on 7770, 21118, or 3389 at this snapshot. | This does not prove effective firewall or internet policy. |
 | Firewall / router | All three Windows firewall profiles are enabled. A complete effective-rule and router-forward audit was not established. | Do not claim ports are closed from these observations. Inspect rule scope and router configuration before provisioning. |
 | Windows account | The current interactive account belongs to Administrators and `docker-users`. | It is not approved for agent SSH. Choose a separate standard account and establish which app recovery operations it can perform without adding either group. |
@@ -52,6 +52,16 @@ The inventory is a useful code-level map at the exact base commit. Its explicit 
 - Audit effective Windows firewall rules for IPv4 and IPv6, local interface/address, profile, and remote source. Confirm router forwarding independently.
 - Confirm display topology, sign-in/lock/UAC expectations, and one human fallback. Windows 11 Home does not provide the supported built-in RDP host role, so do not plan on built-in RDP without a separately verified capability.
 - Any host change must have a dry-run, explicit apply, protected before-state, and a tested replacement management path before an existing rule is narrowed or removed.
+
+## SSH implementation controls and current gates
+
+The read-only PowerShell probes and SSH installer/rollback scripts are implemented, but no host resource has been changed. The installer defaults to a sanitized plan. Apply remains blocked until the operator selects a standard local account, supplies a public key and exact current Tailscale client IPs, approves an unused port, verifies host/tailnet policy and router exposure, and reviews the before-state plan. The current privileged account is rejected, and port 22 remains blocked while `wslrelay` is listening.
+
+The SSH configuration binds to the host's current Tailscale addresses. Firewall rules are created separately for IPv4 and IPv6 and restricted to the corresponding local tailnet address, Tailscale interface, and exact client addresses. CIDR ranges and non-tailnet addresses are rejected. Password authentication is disabled before the new service starts; this avoids any password-authentication window, at the cost that an invalid key requires local-console recovery.
+
+Windows capability installation can create a broad `OpenSSH-Server-In-TCP` rule. When that rule was absent before this feature and capability setup creates it, the installer disables only that exact feature-created rule before starting `sshd`. A pre-existing or otherwise broad effective rule blocks setup and is left unchanged. This is required because the current port-22 listener belongs to WSL; leaving the capability's default rule enabled could expose that listener. The manifest records ownership and the before-state under protected `%ProgramData%\AI-Stack\RemoteAccess`.
+
+SSH rollback is inspect-only by default. Apply requires an explicit `-ConfirmManagementPath` attestation after local console or an independently verified path is available, and restores only manifest-owned resources. Snapshots remain available after rollback.
 
 ## Acceptance matrix
 
