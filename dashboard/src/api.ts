@@ -138,6 +138,39 @@ export type NetworkStatus = {
   host_agent_version?: string
 }
 
+export type RemoteAccessStatus = {
+  observed_at_utc: string
+  tailnet: {
+    state: 'connected' | 'disconnected' | 'unknown'
+    unattended: 'enabled' | 'disabled' | 'unknown'
+    last_state_change_utc: string
+  }
+  ssh: {
+    service: 'running' | 'stopped' | 'missing' | 'unknown'
+    firewall: 'tailnet-only' | 'broad' | 'unknown'
+    last_listener_check_utc: string
+  }
+  desktop: {
+    task: 'ready' | 'running' | 'absent' | 'unknown'
+    session: 'interactive' | 'signed-out' | 'locked' | 'unknown'
+    rdc: 'ready' | 'unavailable' | 'not-checked' | 'unknown'
+    denied_by_category: {
+      authorization: number | null
+      view_only: number | null
+      other: number | null
+    }
+  }
+  human_fallback: 'ready' | 'disabled' | 'unknown'
+  host: {
+    uptime_seconds: number | null
+    last_boot_utc: string
+  }
+  last_audit: {
+    timestamp: string
+    category: 'authorization' | 'view_only' | 'other' | 'unknown'
+  }
+}
+
 export type RealtimeVoiceSession = {
   id: string
   offer_url: string
@@ -376,6 +409,7 @@ export const localAI = {
       body: JSON.stringify(settings),
     }),
   network: () => request<NetworkStatus>('/control/network'),
+  remoteAccess: () => request<RemoteAccessStatus>('/control/remote-access', { method: 'GET' }),
   configureTailscale: (settings: {
     dashboard_enabled: boolean
     studio_enabled?: boolean

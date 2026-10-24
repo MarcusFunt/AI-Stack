@@ -6,12 +6,14 @@ import { NetworkPanel } from './OpsPanels'
 const mocks = vi.hoisted(() => ({
   capabilities: vi.fn(),
   configureTailscale: vi.fn(),
+  remoteAccess: vi.fn(),
 }))
 
 vi.mock('./api', () => ({
   localAI: {
     capabilities: mocks.capabilities,
     configureTailscale: mocks.configureTailscale,
+    remoteAccess: mocks.remoteAccess,
   },
 }))
 
@@ -39,6 +41,14 @@ describe('NetworkPanel voice TURN route', () => {
       models: [], endpoints: {},
     })
     mocks.configureTailscale.mockReset().mockResolvedValue({ ok: true, status: network() })
+    mocks.remoteAccess.mockReset().mockResolvedValue({
+      observed_at_utc: new Date().toISOString(),
+      tailnet: { state: 'unknown', unattended: 'unknown', last_state_change_utc: 'unknown' },
+      ssh: { service: 'unknown', firewall: 'unknown', last_listener_check_utc: 'unknown' },
+      desktop: { task: 'unknown', session: 'unknown', rdc: 'unknown', denied_by_category: { authorization: null, view_only: null, other: null } },
+      human_fallback: 'unknown', host: { uptime_seconds: null, last_boot_utc: 'unknown' },
+      last_audit: { timestamp: 'unknown', category: 'unknown' },
+    })
   })
 
   it('enables voice TURN only when the loopback STUN listener is ready', async () => {

@@ -1018,6 +1018,23 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   gap: 9px;
 }
 .network-summary-grid { margin-bottom: 10px; }
+.remote-access-panel { margin-bottom: 12px; }
+.remote-access-title { align-items: center; }
+.network-summary-grid.remote-access-grid { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.remote-access-panel .health-card small { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.remote-access-audit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.remote-access-audit > span { color: var(--muted-2); font-size: 7.5px; font-weight: 760; letter-spacing: .065em; }
+.remote-access-audit strong { color: var(--text); font-weight: 600; }
+.remote-access-audit small { flex-basis: 100%; }
+.remote-access-checked { display: block; margin-top: 7px; color: var(--muted); font-size: 8px; }
 .health-card {
   min-width: 0;
   display: grid;
@@ -2661,6 +2678,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .network-summary-grid {
     grid-template-columns: repeat(2,minmax(0,1fr));
   }
+  .network-summary-grid.remote-access-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .maintenance-opencode-grid {
     grid-template-columns: repeat(2,minmax(0,1fr));
   }
@@ -2686,6 +2704,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .maintenance-opencode-grid {
     grid-template-columns: 1fr;
   }
+  .network-summary-grid.remote-access-grid { grid-template-columns: 1fr; }
   .platform-component {
     grid-template-columns: 28px minmax(0,1fr) auto;
   }

@@ -5,6 +5,7 @@ import {
   Shield, Square, TestTube2, Timer, Wifi, WifiOff,
 } from 'lucide-react'
 import { localAI } from './api'
+import { RemoteAccessPanel } from './RemoteAccessPanel'
 import type {
   ApiCapabilities, DoctorCheck, ModelInfo, ModelManagement, NetworkStatus, PlatformHealth, RuntimeSettings, Snapshot,
 } from './api'
@@ -1131,6 +1132,7 @@ export function SetupPanel(props: {
 export function NetworkPanel(props: {
   network: NetworkStatus | null
   onNetwork: (status: NetworkStatus | null) => void
+  application?: Snapshot | null
 }) {
   const [dashboardEnabled, setDashboardEnabled] = useState<boolean | null>(null)
   const [studioEnabled, setStudioEnabled] = useState<boolean | null>(null)
@@ -1342,6 +1344,7 @@ export function NetworkPanel(props: {
           <RefreshCw className={busy === 'refresh' ? 'spin' : ''} size={14} /> Refresh actual state
         </button>
       </div>
+      <RemoteAccessPanel application={props.application ?? null} />
       <div className="network-summary-grid">
         <div className="health-card"><Globe2 size={20} /><div><span>TAILSCALE</span>
           <strong>{props.network?.online ? 'Online' : 'Unavailable'}</strong>
